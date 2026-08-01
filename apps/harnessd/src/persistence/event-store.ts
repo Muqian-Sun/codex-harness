@@ -403,6 +403,22 @@ export class HarnessEventStore {
     }
   }
 
+  readByEventId(eventId: string): StoredEvent | undefined {
+    this.#assertOpen();
+    if (typeof eventId !== "string" || !EVENT_ID_PATTERN.test(eventId)) {
+      throw new EventStoreError("invalid_query");
+    }
+    try {
+      const row = this.#findByEventId.get(eventId);
+      return row === undefined ? undefined : decodeStoredEvent(row);
+    } catch (error: unknown) {
+      if (error instanceof EventStoreError) {
+        throw error;
+      }
+      throw mapStorageError(error);
+    }
+  }
+
   readAfter(sequence: number, limit = 100): readonly StoredEvent[] {
     this.#assertOpen();
     if (
