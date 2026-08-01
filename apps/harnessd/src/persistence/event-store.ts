@@ -11,15 +11,21 @@ import {
 } from "@codex-harness/protocol";
 
 const APPLICATION_ID = 0x43485831;
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const MAX_BUSY_TIMEOUT_MS = 60_000;
 const MAX_DATABASE_PATH_BYTES = 1_024;
 const MAX_EVENT_JSON_BYTES = 1024 * 1024;
+const MAX_PROJECTION_STATE_JSON_BYTES = 1024 * 1024;
+const MAX_PROJECTION_STATE_BYTES_PER_EVENT = 4 * 1024 * 1024;
 const MAX_READ_LIMIT = 1_000;
+const MAX_PROJECTIONS = 64;
+const MAX_PROJECTION_KEYS_PER_EVENT = 1_000;
+const MAX_PROJECTION_KEY_BYTES = 256;
 const EVENT_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const STREAM_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const PROJECTION_KEY_PATTERN = /^[A-Za-z0-9._:/-]{1,256}$/;
 
 const MIGRATION_V1_SQL = `
 CREATE TABLE schema_migrations (
@@ -73,7 +79,24 @@ END;
 `;
 
 const MIGRATION_V1_CHECKSUM = createHash("sha256").update(MIGRATION_V1_SQL).digest("hex");
-let expectedSchemaFingerprint: string | undefined;
+
+const MIGRATION_V2_SQL = `
+CREATE TABLE projection_state (
+  projection_name TEXT NOT NULL CHECK(length(projection_name) BETWEEN 1 AND 128),
+  projection_key TEXT NOT NULL CHECK(length(projection_key) BETWEEN 1 AND 256),
+  state_json TEXT NOT NULL CHECK(json_valid(state_json)),
+  source_sequence INTEGER NOT NULL CHECK(source_sequence >= 1),
+  PRIMARY KEY (projection_name, projection_key),
+  FOREIGN KEY (projection_name) REFERENCES projection_checkpoints(projection_name) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+`;
+
+const MIGRATION_V2_CHECKSUM = createHash("sha256").update(MIGRATION_V2_SQL).digest("hex");
+const MIGRATIONS = Object.freeze([
+  Object.freeze({ version: 1, sql: MIGRATION_V1_SQL, checksum: MIGRATION_V1_CHECKSUM }),
+  Object.freeze({ version: 2, sql: MIGRATION_V2_SQL, checksum: MIGRATION_V2_CHECKSUM }),
+]);
+const expectedSchemaFingerprints = new Map<number, string>();
 
 export type EventStoreErrorCode =
   | "closed"
@@ -84,6 +107,7 @@ export type EventStoreErrorCode =
   | "invalid_event"
   | "invalid_query"
   | "migration_mismatch"
+  | "projection_failure"
   | "storage_failure"
   | "unsupported_database";
 
@@ -96,6 +120,7 @@ const ERROR_MESSAGES: Readonly<Record<EventStoreErrorCode, string>> = Object.fre
   invalid_event: "The Harness event is invalid.",
   invalid_query: "The Harness event query is invalid.",
   migration_mismatch: "The Harness event store schema does not match its migration history.",
+  projection_failure: "The Harness event projection failed.",
   storage_failure: "The Harness event store operation failed.",
   unsupported_database: "The database does not belong to this Harness schema.",
 });
@@ -144,11 +169,37 @@ export type AppendEventResult = Readonly<{
   duplicate: boolean;
 }>;
 
+export type ProjectionMutation =
+  | Readonly<{ type: "keep" }>
+  | Readonly<{ type: "set"; state: JsonValue }>
+  | Readonly<{ type: "delete" }>;
+
+export type ProjectionReducerInput = Readonly<{
+  key: string;
+  current: JsonValue | undefined;
+  event: StoredEvent;
+}>;
+
+export type ProjectionDefinition = Readonly<{
+  name: string;
+  version: number;
+  selectKeys: (event: StoredEvent) => readonly string[];
+  reduce: (input: ProjectionReducerInput) => ProjectionMutation;
+}>;
+
+export type ProjectionState = Readonly<{
+  projectionName: string;
+  key: string;
+  sourceSequence: number;
+  state: JsonValue;
+}>;
+
 export type EventStoreInspection = Readonly<{
   schemaVersion: number;
   eventCount: number;
   lastSequence: number;
   journalMode: "wal";
+  projectionCount: number;
   sqliteVersion: string;
 }>;
 
@@ -156,6 +207,7 @@ export type EventStoreConfig = Readonly<{
   path: string;
   busyTimeoutMs?: number;
   now?: () => number;
+  projections?: readonly ProjectionDefinition[];
 }>;
 
 type NormalizedEvent = Readonly<{
@@ -171,15 +223,39 @@ type NormalizedEvent = Readonly<{
 
 type FileIdentity = Readonly<{ device: number; inode: number }>;
 
+type NormalizedProjectionDefinition = Readonly<{
+  name: string;
+  version: number;
+  selectKeys: (event: StoredEvent) => readonly string[];
+  reduce: (input: ProjectionReducerInput) => ProjectionMutation;
+}>;
+
+type ProjectionCheckpoint = Readonly<{
+  name: string;
+  version: number;
+  lastSequence: number;
+  updatedAtMs: number;
+}>;
+
+type ProjectionApplyBudget = {
+  remainingKeys: number;
+  remainingStateBytes: number;
+};
+
 export class HarnessEventStore {
   readonly #database: DatabaseSync;
   readonly #insertEvent: StatementSync;
   readonly #findByEventId: StatementSync;
   readonly #readAfter: StatementSync;
+  readonly #projections: ReadonlyMap<string, NormalizedProjectionDefinition>;
   #closed = false;
 
-  private constructor(database: DatabaseSync) {
+  private constructor(
+    database: DatabaseSync,
+    projections: readonly NormalizedProjectionDefinition[],
+  ) {
     this.#database = database;
+    this.#projections = new Map(projections.map((projection) => [projection.name, projection]));
     this.#insertEvent = database.prepare(`
       INSERT INTO event_log (
         event_id, stream_type, stream_id, event_type, event_version,
@@ -220,7 +296,9 @@ export class HarnessEventStore {
       await validateDatabaseFile(normalized.path, normalized.fileIdentity);
       initializeDatabase(database, normalized.existed, normalized.appliedAtMs);
       await validateDatabaseSidecars(normalized.path, true);
-      const store = new HarnessEventStore(database);
+      verifyStorageBeforeRecovery(database);
+      reconcileProjections(database, normalized.projections, normalized.appliedAtMs);
+      const store = new HarnessEventStore(database, normalized.projections);
       store.inspect();
       return store;
     } catch (error: unknown) {
@@ -260,6 +338,7 @@ export class HarnessEventStore {
       );
       const sequence = safeInteger(inserted.lastInsertRowid);
       const stored = materializeEvent(sequence, event);
+      applyEventToProjections(this.#database, [...this.#projections.values()], stored);
       this.#database.exec("COMMIT");
       return Object.freeze({ event: stored, duplicate: false });
     } catch (error: unknown) {
@@ -292,15 +371,72 @@ export class HarnessEventStore {
     }
   }
 
+  readProjectionState(projectionName: string, key: string): ProjectionState | undefined {
+    this.#assertOpen();
+    this.#assertRegisteredProjection(projectionName);
+    if (!isValidProjectionKey(key)) {
+      throw new EventStoreError("invalid_query");
+    }
+    try {
+      const row = this.#database
+        .prepare(
+          `SELECT projection_name, projection_key, state_json, source_sequence
+           FROM projection_state WHERE projection_name = ? AND projection_key = ?`,
+        )
+        .get(projectionName, key);
+      return row === undefined ? undefined : decodeProjectionState(row);
+    } catch (error: unknown) {
+      if (error instanceof EventStoreError) {
+        throw error;
+      }
+      throw mapStorageError(error);
+    }
+  }
+
+  listProjectionStates(
+    projectionName: string,
+    afterKey = "",
+    limit = 100,
+  ): readonly ProjectionState[] {
+    this.#assertOpen();
+    this.#assertRegisteredProjection(projectionName);
+    if (
+      (afterKey !== "" && !isValidProjectionKey(afterKey)) ||
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_READ_LIMIT
+    ) {
+      throw new EventStoreError("invalid_query");
+    }
+    try {
+      return Object.freeze(
+        this.#database
+          .prepare(
+            `SELECT projection_name, projection_key, state_json, source_sequence
+             FROM projection_state
+             WHERE projection_name = ? AND projection_key > ?
+             ORDER BY projection_key ASC LIMIT ?`,
+          )
+          .all(projectionName, afterKey, limit)
+          .map(decodeProjectionState),
+      );
+    } catch (error: unknown) {
+      if (error instanceof EventStoreError) {
+        throw error;
+      }
+      throw mapStorageError(error);
+    }
+  }
+
   inspect(): EventStoreInspection {
     this.#assertOpen();
     try {
-      verifyMigration(this.#database);
+      verifyMigrations(this.#database);
       verifySchemaObjects(this.#database);
       verifyQuickCheck(this.#database);
       verifyForeignKeys(this.#database);
       const { eventCount, lastSequence } = verifyEventSequenceAndRows(this.#database);
-      verifyProjectionCheckpoints(this.#database, lastSequence);
+      const projectionCount = verifyProjectionData(this.#database, lastSequence, this.#projections);
       const journalMode = scalarString(this.#database.prepare("PRAGMA journal_mode").get());
       if (journalMode !== "wal") {
         throw new EventStoreError("corrupt_data");
@@ -311,6 +447,7 @@ export class HarnessEventStore {
         eventCount,
         lastSequence,
         journalMode,
+        projectionCount,
         sqliteVersion,
       });
     } catch (error: unknown) {
@@ -347,6 +484,16 @@ export class HarnessEventStore {
       throw new EventStoreError("closed");
     }
   }
+
+  #assertRegisteredProjection(projectionName: string): void {
+    if (
+      typeof projectionName !== "string" ||
+      !NamespacedTokenSchema.safeParse(projectionName).success ||
+      !this.#projections.has(projectionName)
+    ) {
+      throw new EventStoreError("invalid_query");
+    }
+  }
 }
 
 async function validateStoreConfig(config: EventStoreConfig): Promise<
@@ -356,15 +503,18 @@ async function validateStoreConfig(config: EventStoreConfig): Promise<
     appliedAtMs: number;
     existed: boolean;
     fileIdentity: FileIdentity;
+    projections: readonly NormalizedProjectionDefinition[];
   }>
 > {
   let path: string;
   let busyTimeoutMs: number;
   let now: () => number;
+  let rawProjections: unknown;
   try {
     path = config.path;
     busyTimeoutMs = config.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
     now = config.now ?? Date.now;
+    rawProjections = config.projections;
   } catch {
     throw new EventStoreError("invalid_configuration");
   }
@@ -390,6 +540,7 @@ async function validateStoreConfig(config: EventStoreConfig): Promise<
   if (!Number.isSafeInteger(appliedAtMs) || appliedAtMs < 0) {
     throw new EventStoreError("invalid_configuration");
   }
+  const projections = normalizeProjectionDefinitions(rawProjections);
 
   await validatePrivateDirectory(dirname(path));
   let existed = false;
@@ -423,7 +574,103 @@ async function validateStoreConfig(config: EventStoreConfig): Promise<
   if (fileIdentity === undefined) {
     throw new EventStoreError("invalid_configuration");
   }
-  return Object.freeze({ path, busyTimeoutMs, appliedAtMs, existed, fileIdentity });
+  return Object.freeze({
+    path,
+    busyTimeoutMs,
+    appliedAtMs,
+    existed,
+    fileIdentity,
+    projections,
+  });
+}
+
+function normalizeProjectionDefinitions(input: unknown): readonly NormalizedProjectionDefinition[] {
+  if (input === undefined) {
+    return Object.freeze([]);
+  }
+  try {
+    if (!Array.isArray(input) || input.length > MAX_PROJECTIONS) {
+      throw new EventStoreError("invalid_configuration");
+    }
+    const arrayKeys = Reflect.ownKeys(input);
+    if (
+      arrayKeys.some(
+        (key) =>
+          typeof key !== "string" ||
+          (key !== "length" && (!/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= input.length)),
+      )
+    ) {
+      throw new EventStoreError("invalid_configuration");
+    }
+
+    const normalized: NormalizedProjectionDefinition[] = [];
+    const names = new Set<string>();
+    for (let index = 0; index < input.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(input, String(index));
+      if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new EventStoreError("invalid_configuration");
+      }
+      const candidate = descriptor.value as unknown;
+      if (!isPlainDataRecord(candidate, ["name", "reduce", "selectKeys", "version"])) {
+        throw new EventStoreError("invalid_configuration");
+      }
+      const values = candidate as Record<string, unknown>;
+      const name = values.name;
+      const version = values.version;
+      const selectKeys = values.selectKeys;
+      const reduce = values.reduce;
+      if (
+        typeof name !== "string" ||
+        !NamespacedTokenSchema.safeParse(name).success ||
+        names.has(name) ||
+        !Number.isSafeInteger(version) ||
+        (version as number) < 1 ||
+        (version as number) > 2_147_483_647 ||
+        typeof selectKeys !== "function" ||
+        typeof reduce !== "function"
+      ) {
+        throw new EventStoreError("invalid_configuration");
+      }
+      names.add(name);
+      normalized.push(
+        Object.freeze({
+          name,
+          version: version as number,
+          selectKeys: selectKeys as NormalizedProjectionDefinition["selectKeys"],
+          reduce: reduce as NormalizedProjectionDefinition["reduce"],
+        }),
+      );
+    }
+    normalized.sort((left, right) => left.name.localeCompare(right.name));
+    return Object.freeze(normalized);
+  } catch (error: unknown) {
+    if (error instanceof EventStoreError) {
+      throw error;
+    }
+    throw new EventStoreError("invalid_configuration");
+  }
+}
+
+function isPlainDataRecord(input: unknown, exactKeys: readonly string[]): boolean {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return false;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  const keys = Reflect.ownKeys(descriptors);
+  if (
+    keys.length !== exactKeys.length ||
+    keys.some((key) => typeof key !== "string" || !exactKeys.includes(key))
+  ) {
+    return false;
+  }
+  return exactKeys.every((key) => {
+    const descriptor = descriptors[key];
+    return descriptor !== undefined && "value" in descriptor && descriptor.enumerable;
+  });
 }
 
 async function createExclusiveDatabaseFile(path: string): Promise<FileIdentity> {
@@ -550,25 +797,66 @@ function initializeDatabase(database: DatabaseSync, existed: boolean, now: numbe
   database.exec("BEGIN EXCLUSIVE; COMMIT");
 
   const userVersion = scalarInteger(database.prepare("PRAGMA user_version").get());
-  if (userVersion === 0) {
-    applyMigrationV1(database, now);
-  } else if (userVersion !== SCHEMA_VERSION) {
+  if (userVersion > SCHEMA_VERSION) {
     throw new EventStoreError("unsupported_database");
   }
-  verifyMigration(database);
+  verifyMigrationPrefix(database, userVersion);
+  verifySchemaObjectsForVersion(database, userVersion);
+  for (const migration of MIGRATIONS) {
+    if (migration.version > userVersion) {
+      applyMigration(database, migration, now);
+    }
+  }
+  verifyMigrations(database);
 }
 
-function applyMigrationV1(database: DatabaseSync, now: number): void {
+function verifyMigrationPrefix(database: DatabaseSync, currentVersion: number): void {
+  if (currentVersion === 0) {
+    return;
+  }
+  try {
+    const rows = database
+      .prepare("SELECT version, checksum, applied_at_ms FROM schema_migrations ORDER BY version")
+      .all();
+    if (rows.length !== currentVersion) {
+      throw new EventStoreError("migration_mismatch");
+    }
+    for (let index = 0; index < currentVersion; index += 1) {
+      const row = rows[index];
+      const migration = MIGRATIONS[index];
+      if (
+        row === undefined ||
+        migration === undefined ||
+        scalarIntegerValue(row.version) !== migration.version ||
+        row.checksum !== migration.checksum ||
+        safeInteger(row.applied_at_ms) < 0
+      ) {
+        throw new EventStoreError("migration_mismatch");
+      }
+    }
+  } catch (error: unknown) {
+    if (error instanceof EventStoreError) {
+      throw error;
+    }
+    throw new EventStoreError("migration_mismatch");
+  }
+}
+
+function applyMigration(
+  database: DatabaseSync,
+  migration: (typeof MIGRATIONS)[number],
+  now: number,
+): void {
   if (!Number.isSafeInteger(now) || now < 0) {
     throw new EventStoreError("invalid_configuration");
   }
   try {
     database.exec("BEGIN IMMEDIATE");
-    database.exec(MIGRATION_V1_SQL);
+    database.exec(migration.sql);
     database
       .prepare("INSERT INTO schema_migrations (version, checksum, applied_at_ms) VALUES (?, ?, ?)")
-      .run(SCHEMA_VERSION, MIGRATION_V1_CHECKSUM, now);
-    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      .run(migration.version, migration.checksum, now);
+    database.exec(`PRAGMA user_version = ${migration.version}`);
     database.exec("COMMIT");
   } catch (error: unknown) {
     rollback(database);
@@ -576,32 +864,36 @@ function applyMigrationV1(database: DatabaseSync, now: number): void {
   }
 }
 
-function verifyMigration(database: DatabaseSync): void {
+function verifyMigrations(database: DatabaseSync): void {
   const userVersion = scalarInteger(database.prepare("PRAGMA user_version").get());
   if (userVersion !== SCHEMA_VERSION) {
     throw new EventStoreError("migration_mismatch");
   }
-  const row = database
+  const rows = database
     .prepare("SELECT version, checksum, applied_at_ms FROM schema_migrations ORDER BY version")
-    .get();
-  if (
-    row === undefined ||
-    scalarIntegerValue(row.version) !== SCHEMA_VERSION ||
-    row.checksum !== MIGRATION_V1_CHECKSUM ||
-    safeInteger(row.applied_at_ms) < 0
-  ) {
+    .all();
+  if (rows.length !== MIGRATIONS.length) {
     throw new EventStoreError("migration_mismatch");
   }
-  const count = scalarInteger(
-    database.prepare("SELECT COUNT(*) AS value FROM schema_migrations").get(),
-  );
-  if (count !== 1) {
-    throw new EventStoreError("migration_mismatch");
+  for (const [index, migration] of MIGRATIONS.entries()) {
+    const row = rows[index];
+    if (
+      row === undefined ||
+      scalarIntegerValue(row.version) !== migration.version ||
+      row.checksum !== migration.checksum ||
+      safeInteger(row.applied_at_ms) < 0
+    ) {
+      throw new EventStoreError("migration_mismatch");
+    }
   }
 }
 
 function verifySchemaObjects(database: DatabaseSync): void {
-  if (schemaFingerprint(database) !== getExpectedSchemaFingerprint()) {
+  verifySchemaObjectsForVersion(database, SCHEMA_VERSION);
+}
+
+function verifySchemaObjectsForVersion(database: DatabaseSync, version: number): void {
+  if (schemaFingerprint(database) !== getExpectedSchemaFingerprint(version)) {
     throw new EventStoreError("migration_mismatch");
   }
 }
@@ -627,9 +919,10 @@ function schemaFingerprint(database: DatabaseSync): string {
   return createHash("sha256").update(JSON.stringify(definitions)).digest("hex");
 }
 
-function getExpectedSchemaFingerprint(): string {
-  if (expectedSchemaFingerprint !== undefined) {
-    return expectedSchemaFingerprint;
+function getExpectedSchemaFingerprint(version: number): string {
+  const cached = expectedSchemaFingerprints.get(version);
+  if (cached !== undefined) {
+    return cached;
   }
   const expected = new DatabaseSync(":memory:", {
     allowExtension: false,
@@ -637,9 +930,14 @@ function getExpectedSchemaFingerprint(): string {
     enableDoubleQuotedStringLiterals: false,
   });
   try {
-    expected.exec(MIGRATION_V1_SQL);
-    expectedSchemaFingerprint = schemaFingerprint(expected);
-    return expectedSchemaFingerprint;
+    for (const migration of MIGRATIONS) {
+      if (migration.version <= version) {
+        expected.exec(migration.sql);
+      }
+    }
+    const fingerprint = schemaFingerprint(expected);
+    expectedSchemaFingerprints.set(version, fingerprint);
+    return fingerprint;
   } finally {
     expected.close();
   }
@@ -691,23 +989,372 @@ function verifyEventSequenceAndRows(
   return Object.freeze({ eventCount, lastSequence: lastSequence ?? 0 });
 }
 
-function verifyProjectionCheckpoints(database: DatabaseSync, lastEventSequence: number): void {
+function verifyStorageBeforeRecovery(database: DatabaseSync): void {
+  verifyMigrations(database);
+  verifySchemaObjects(database);
+  verifyQuickCheck(database);
+  verifyForeignKeys(database);
+  const { lastSequence } = verifyEventSequenceAndRows(database);
+  verifyProjectionData(database, lastSequence, new Map());
+}
+
+function verifyProjectionData(
+  database: DatabaseSync,
+  lastEventSequence: number,
+  registered: ReadonlyMap<string, NormalizedProjectionDefinition>,
+): number {
+  const checkpoints = new Map<string, ProjectionCheckpoint>();
   for (const row of database
     .prepare(
       `SELECT projection_name, projection_version, last_sequence, updated_at_ms
        FROM projection_checkpoints ORDER BY projection_name`,
     )
     .iterate()) {
+    const checkpoint = decodeProjectionCheckpoint(row);
+    if (checkpoint.lastSequence > lastEventSequence || checkpoints.has(checkpoint.name)) {
+      throw new EventStoreError("corrupt_data");
+    }
+    checkpoints.set(checkpoint.name, checkpoint);
+  }
+
+  for (const row of database
+    .prepare(
+      `SELECT projection_name, projection_key, state_json, source_sequence
+       FROM projection_state ORDER BY projection_name, projection_key`,
+    )
+    .iterate()) {
+    const state = decodeProjectionState(row);
+    const checkpoint = checkpoints.get(state.projectionName);
+    if (checkpoint === undefined || state.sourceSequence > checkpoint.lastSequence) {
+      throw new EventStoreError("corrupt_data");
+    }
+  }
+
+  for (const definition of registered.values()) {
+    const checkpoint = checkpoints.get(definition.name);
     if (
-      typeof row.projection_name !== "string" ||
-      !NamespacedTokenSchema.safeParse(row.projection_name).success ||
-      safeInteger(row.projection_version) < 1 ||
-      safeInteger(row.last_sequence) > lastEventSequence ||
-      safeInteger(row.updated_at_ms) < 0
+      checkpoint === undefined ||
+      checkpoint.version !== definition.version ||
+      checkpoint.lastSequence !== lastEventSequence
     ) {
       throw new EventStoreError("corrupt_data");
     }
   }
+  return checkpoints.size;
+}
+
+function decodeProjectionCheckpoint(row: Record<string, unknown>): ProjectionCheckpoint {
+  const name = row.projection_name;
+  const version = safeInteger(row.projection_version);
+  const lastSequence = safeInteger(row.last_sequence);
+  const updatedAtMs = safeInteger(row.updated_at_ms);
+  if (typeof name !== "string" || !NamespacedTokenSchema.safeParse(name).success || version < 1) {
+    throw new EventStoreError("corrupt_data");
+  }
+  return Object.freeze({ name, version, lastSequence, updatedAtMs });
+}
+
+function decodeProjectionState(row: Record<string, unknown>): ProjectionState {
+  try {
+    const projectionName = row.projection_name;
+    const key = row.projection_key;
+    const stateJson = row.state_json;
+    const sourceSequence = safeInteger(row.source_sequence);
+    if (
+      typeof projectionName !== "string" ||
+      !NamespacedTokenSchema.safeParse(projectionName).success ||
+      typeof key !== "string" ||
+      !isValidProjectionKey(key) ||
+      typeof stateJson !== "string" ||
+      sourceSequence < 1 ||
+      Buffer.byteLength(stateJson) > MAX_PROJECTION_STATE_JSON_BYTES
+    ) {
+      throw new EventStoreError("corrupt_data");
+    }
+    const state = JSON.parse(stateJson) as unknown;
+    if (!validateJsonValue(state).ok || canonicalJson(state as JsonValue) !== stateJson) {
+      throw new EventStoreError("corrupt_data");
+    }
+    return Object.freeze({
+      projectionName,
+      key,
+      sourceSequence,
+      state: deepFreezeJson(state as JsonValue),
+    });
+  } catch (error: unknown) {
+    if (error instanceof EventStoreError && error.code === "corrupt_data") {
+      throw error;
+    }
+    throw new EventStoreError("corrupt_data");
+  }
+}
+
+function reconcileProjections(
+  database: DatabaseSync,
+  definitions: readonly NormalizedProjectionDefinition[],
+  recoveryAtMs: number,
+): void {
+  if (definitions.length === 0) {
+    return;
+  }
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    let firstSequenceToReplay = Number.MAX_SAFE_INTEGER;
+    for (const definition of definitions) {
+      let checkpoint = readProjectionCheckpoint(database, definition.name);
+      if (checkpoint === undefined) {
+        database
+          .prepare(
+            `INSERT INTO projection_checkpoints (
+               projection_name, projection_version, last_sequence, updated_at_ms
+             ) VALUES (?, ?, 0, ?)`,
+          )
+          .run(definition.name, definition.version, recoveryAtMs);
+        checkpoint = Object.freeze({
+          name: definition.name,
+          version: definition.version,
+          lastSequence: 0,
+          updatedAtMs: recoveryAtMs,
+        });
+      } else if (checkpoint.version !== definition.version) {
+        database
+          .prepare("DELETE FROM projection_state WHERE projection_name = ?")
+          .run(definition.name);
+        database
+          .prepare(
+            `UPDATE projection_checkpoints
+             SET projection_version = ?, last_sequence = 0, updated_at_ms = ?
+             WHERE projection_name = ?`,
+          )
+          .run(definition.version, recoveryAtMs, definition.name);
+        checkpoint = Object.freeze({
+          name: definition.name,
+          version: definition.version,
+          lastSequence: 0,
+          updatedAtMs: recoveryAtMs,
+        });
+      }
+      firstSequenceToReplay = Math.min(firstSequenceToReplay, checkpoint.lastSequence + 1);
+    }
+
+    for (const row of database
+      .prepare(
+        `SELECT sequence, event_id, stream_type, stream_id, event_type, event_version,
+                occurred_at_ms, payload_json, metadata_json
+         FROM event_log WHERE sequence >= ? ORDER BY sequence`,
+      )
+      .iterate(firstSequenceToReplay)) {
+      const event = decodeStoredEvent(row);
+      const budget = createProjectionApplyBudget();
+      for (const definition of definitions) {
+        const checkpoint = readProjectionCheckpoint(database, definition.name);
+        if (checkpoint === undefined) {
+          throw new EventStoreError("corrupt_data");
+        }
+        if (checkpoint.lastSequence < event.sequence) {
+          applyEventToProjection(database, definition, event, budget);
+        }
+      }
+    }
+    database.exec("COMMIT");
+  } catch (error: unknown) {
+    rollback(database);
+    throw error;
+  }
+}
+
+function applyEventToProjections(
+  database: DatabaseSync,
+  definitions: readonly NormalizedProjectionDefinition[],
+  event: StoredEvent,
+): void {
+  const budget = createProjectionApplyBudget();
+  for (const definition of definitions) {
+    applyEventToProjection(database, definition, event, budget);
+  }
+}
+
+function applyEventToProjection(
+  database: DatabaseSync,
+  definition: NormalizedProjectionDefinition,
+  event: StoredEvent,
+  budget: ProjectionApplyBudget,
+): void {
+  const checkpoint = readProjectionCheckpoint(database, definition.name);
+  if (
+    checkpoint === undefined ||
+    checkpoint.version !== definition.version ||
+    checkpoint.lastSequence !== event.sequence - 1
+  ) {
+    throw new EventStoreError("corrupt_data");
+  }
+
+  const keys = selectProjectionKeys(definition, event);
+  if (keys.length > budget.remainingKeys) {
+    throw new EventStoreError("projection_failure");
+  }
+  budget.remainingKeys -= keys.length;
+  for (const key of keys) {
+    const currentRow = database
+      .prepare(
+        `SELECT projection_name, projection_key, state_json, source_sequence
+         FROM projection_state WHERE projection_name = ? AND projection_key = ?`,
+      )
+      .get(definition.name, key);
+    const current = currentRow === undefined ? undefined : decodeProjectionState(currentRow).state;
+    const mutation = reduceProjection(definition, key, current, event);
+    if (mutation.type === "set") {
+      const stateBytes = Buffer.byteLength(mutation.stateJson);
+      if (stateBytes > budget.remainingStateBytes) {
+        throw new EventStoreError("projection_failure");
+      }
+      budget.remainingStateBytes -= stateBytes;
+      database
+        .prepare(
+          `INSERT INTO projection_state (
+             projection_name, projection_key, state_json, source_sequence
+           ) VALUES (?, ?, ?, ?)
+           ON CONFLICT (projection_name, projection_key) DO UPDATE SET
+             state_json = excluded.state_json,
+             source_sequence = excluded.source_sequence`,
+        )
+        .run(definition.name, key, mutation.stateJson, event.sequence);
+    } else if (mutation.type === "delete") {
+      database
+        .prepare("DELETE FROM projection_state WHERE projection_name = ? AND projection_key = ?")
+        .run(definition.name, key);
+    }
+  }
+
+  const updated = database
+    .prepare(
+      `UPDATE projection_checkpoints
+       SET last_sequence = ?, updated_at_ms = ?
+       WHERE projection_name = ? AND projection_version = ? AND last_sequence = ?`,
+    )
+    .run(
+      event.sequence,
+      Math.max(checkpoint.updatedAtMs, event.occurredAtMs),
+      definition.name,
+      definition.version,
+      checkpoint.lastSequence,
+    );
+  if (safeInteger(updated.changes) !== 1) {
+    throw new EventStoreError("corrupt_data");
+  }
+}
+
+function createProjectionApplyBudget(): ProjectionApplyBudget {
+  return {
+    remainingKeys: MAX_PROJECTION_KEYS_PER_EVENT,
+    remainingStateBytes: MAX_PROJECTION_STATE_BYTES_PER_EVENT,
+  };
+}
+
+function readProjectionCheckpoint(
+  database: DatabaseSync,
+  name: string,
+): ProjectionCheckpoint | undefined {
+  const row = database
+    .prepare(
+      `SELECT projection_name, projection_version, last_sequence, updated_at_ms
+       FROM projection_checkpoints WHERE projection_name = ?`,
+    )
+    .get(name);
+  return row === undefined ? undefined : decodeProjectionCheckpoint(row);
+}
+
+function selectProjectionKeys(
+  definition: NormalizedProjectionDefinition,
+  event: StoredEvent,
+): readonly string[] {
+  let selected: unknown;
+  try {
+    selected = Reflect.apply(definition.selectKeys, undefined, [event]);
+  } catch {
+    throw new EventStoreError("projection_failure");
+  }
+  try {
+    if (!Array.isArray(selected) || selected.length > MAX_PROJECTION_KEYS_PER_EVENT) {
+      throw new EventStoreError("projection_failure");
+    }
+    const arrayKeys = Reflect.ownKeys(selected);
+    if (
+      arrayKeys.some(
+        (key) =>
+          typeof key !== "string" ||
+          (key !== "length" &&
+            (!/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= selected.length)),
+      )
+    ) {
+      throw new EventStoreError("projection_failure");
+    }
+    const keys: string[] = [];
+    const unique = new Set<string>();
+    for (let index = 0; index < selected.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(selected, String(index));
+      const key =
+        descriptor !== undefined && "value" in descriptor && descriptor.enumerable
+          ? descriptor.value
+          : undefined;
+      if (typeof key !== "string" || !isValidProjectionKey(key) || unique.has(key)) {
+        throw new EventStoreError("projection_failure");
+      }
+      unique.add(key);
+      keys.push(key);
+    }
+    return Object.freeze(keys);
+  } catch (error: unknown) {
+    if (error instanceof EventStoreError) {
+      throw error;
+    }
+    throw new EventStoreError("projection_failure");
+  }
+}
+
+function reduceProjection(
+  definition: NormalizedProjectionDefinition,
+  key: string,
+  current: JsonValue | undefined,
+  event: StoredEvent,
+): Readonly<{ type: "keep" } | { type: "delete" } | { type: "set"; stateJson: string }> {
+  let output: unknown;
+  try {
+    output = Reflect.apply(definition.reduce, undefined, [Object.freeze({ key, current, event })]);
+  } catch {
+    throw new EventStoreError("projection_failure");
+  }
+  try {
+    if (isPlainDataRecord(output, ["type"])) {
+      const type = (output as Record<string, unknown>).type;
+      if (type === "keep" || type === "delete") {
+        return Object.freeze({ type });
+      }
+    }
+    if (isPlainDataRecord(output, ["state", "type"])) {
+      const candidate = output as Record<string, unknown>;
+      if (candidate.type === "set" && validateJsonValue(candidate.state).ok) {
+        const stateJson = canonicalJson(candidate.state as JsonValue);
+        if (Buffer.byteLength(stateJson) <= MAX_PROJECTION_STATE_JSON_BYTES) {
+          return Object.freeze({ type: "set", stateJson });
+        }
+      }
+    }
+    throw new EventStoreError("projection_failure");
+  } catch (error: unknown) {
+    if (error instanceof EventStoreError) {
+      throw error;
+    }
+    throw new EventStoreError("projection_failure");
+  }
+}
+
+function isValidProjectionKey(key: unknown): key is string {
+  return (
+    typeof key === "string" &&
+    PROJECTION_KEY_PATTERN.test(key) &&
+    Buffer.byteLength(key, "utf8") <= MAX_PROJECTION_KEY_BYTES
+  );
 }
 
 function normalizeEvent(input: unknown): NormalizedEvent {
