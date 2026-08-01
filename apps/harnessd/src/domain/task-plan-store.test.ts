@@ -1150,5 +1150,6 @@ describe("persistent task and plan store", () => {
     store.close();
     expect(() => store.listTasks()).toThrowError(TaskPlanError);
     expect(() => store.createTask(createInput())).toThrowError(TaskPlanError);
+    expect(() => store.readTask("bad")).toThrowError(expect.objectContaining({ code: "closed" }));
   });
 });

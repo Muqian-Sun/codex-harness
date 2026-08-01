@@ -36,5 +36,8 @@ const { smokeProjectRoutingProfileBinding } =
   await import("./smoke-project-routing-profile-binding.mjs");
 await smokeProjectRoutingProfileBinding();
 
+const { smokeSharedDomainRepositories } = await import("./smoke-shared-domain-repositories.mjs");
+await smokeSharedDomainRepositories();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();
