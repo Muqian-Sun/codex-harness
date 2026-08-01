@@ -1,0 +1,32 @@
+{
+  "name": "codex-harness",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=24.14.0 <25",
+    "pnpm": ">=10.14.0 <11"
+  },
+  "scripts": {
+    "build": "tsc -b --force --pretty false",
+    "clean": "tsc -b --clean",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings 0",
+    "smoke:build": "node scripts/smoke-build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.typecheck.json --pretty false"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "eslint": "10.8.0",
+    "fast-check": "4.9.0",
+    "globals": "17.8.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.10"
+  }
+}
