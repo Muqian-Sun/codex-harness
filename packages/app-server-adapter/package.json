@@ -1,0 +1,25 @@
+{
+  "name": "@codex-harness/app-server-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "schema"
+  ],
+  "scripts": {
+    "build": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@codex-harness/protocol": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

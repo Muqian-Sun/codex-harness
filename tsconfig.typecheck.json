@@ -6,6 +6,7 @@
     "declarationMap": false,
     "noEmit": true,
     "paths": {
+      "@codex-harness/app-server-adapter": ["./packages/app-server-adapter/src/index.ts"],
       "@codex-harness/protocol": ["./packages/protocol/src/index.ts"]
     },
     "types": ["node", "vitest/globals"]
