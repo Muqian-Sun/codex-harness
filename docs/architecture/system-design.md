@@ -186,6 +186,8 @@ Harness daemon 通过 stdio 上的 JSONL 拥有 Codex App Server worker。每条
 
 App Server 的 `thread/compact/start` 只触发 Codex 侧压缩；Harness 的持久计划与轮次边界恢复是独立机制。V1 不向 renderer 暴露 `thread/shellCommand` 等可绕过 Harness 权限边界的原始能力。
 
+适配器只把经过固定 Schema 最小验证的 `turn/started`、`turn/completed` 和 `contextCompaction` item 生命周期转换为恢复信号。信号仅暴露 thread/turn/item ID、终止状态和同一 turn 中的压缩 item ID，不携带完整模型输出、错误或其他 item 内容；`turn/completed` 同时扫描其最终 item 列表，作为单独 item 通知遗漏时的保守补偿。信号中的 `completed` 只表示 App Server turn 已到终止边界，不是 Task 节点已经通过证据验证。已知生命周期消息畸形时连接保守关闭，未知通知仍作为未解释事件保留。非压缩 item 不产生恢复信号，已弃用的 `thread/compacted` 也不能成为恢复权威。该层只验证单条消息，不处理重复、乱序、Task/Run 映射或下一轮注入决策。
+
 首个适配器版本固定到 Codex CLI `0.146.0-alpha.9.2` 的非实验性完整 JSON Schema，并记录生成命令与 SHA-256。升级 Codex CLI 时必须重新生成 Schema、审阅协议差异并更新兼容性测试，不能把“新版本看起来可用”视为兼容。
 
 V1 初始出站白名单只包含 `model/list`、`thread/start`、`thread/resume`、`thread/fork`、`thread/read`、`thread/list`、`thread/compact/start`、`turn/start`、`turn/steer` 和 `turn/interrupt`。初始化显式声明 `experimentalApi: false` 与 `requestAttestation: false`；`thread/shellCommand`、原始命令/文件接口、配置写入和账户写入不进入该边界。App Server 单条 JSONL 消息上限独立设为 16 MiB，不复用 desktop 到 daemon 的 1 MiB RPC 上限。未知通知可以作为未解释事件保留以便前向兼容，未知 server request 只能进入“不支持”分支，不能执行或自动批准。

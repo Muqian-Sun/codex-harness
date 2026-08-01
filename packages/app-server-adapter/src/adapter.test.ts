@@ -133,6 +133,66 @@ describe("App Server protocol adapter", () => {
     });
   });
 
+  it("emits validated recovery lifecycle signals and keeps other item notifications generic", () => {
+    const adapter = initializedAdapter();
+    expect(
+      adapter.accept({
+        kind: "notification",
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          startedAtMs: 1_750_000_000_000,
+          item: { id: "compact-1", type: "contextCompaction", private: "not copied" },
+        },
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        type: "recovery_lifecycle",
+        signal: {
+          type: "context_compaction_started",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "compact-1",
+        },
+      },
+    });
+    expect(
+      adapter.accept({
+        kind: "notification",
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          startedAtMs: 1_750_000_000_001,
+          item: { id: "message-1", type: "agentMessage", text: "hello" },
+        },
+      }),
+    ).toMatchObject({
+      ok: true,
+      value: { type: "notification", method: "item/started" },
+    });
+  });
+
+  it("closes on malformed known lifecycle notifications with fixed errors", () => {
+    const adapter = initializedAdapter();
+    const result = adapter.accept({
+      kind: "notification",
+      method: "turn/completed",
+      params: {
+        threadId: "private-thread-id",
+        turn: { id: "turn-1", items: [], status: "inProgress" },
+      },
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "invalid_message", message: "The App Server message is invalid." },
+    });
+    expect(JSON.stringify(result)).not.toContain("private-thread-id");
+    expect(adapter.state).toBe("closed");
+  });
+
   it("surfaces server requests but never approves them", () => {
     const adapter = initializedAdapter();
     expect(
