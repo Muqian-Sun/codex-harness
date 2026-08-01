@@ -168,6 +168,8 @@ V1 初始出站白名单只包含 `model/list`、`thread/start`、`thread/resume
 
 main 与 daemon 使用换行分隔 JSON。每个连接的第一帧必须是严格的 `system.hello` bootstrap request；认证成功前，daemon 拒绝其他帧并关闭连接。认证先于 capability 和应用协议协商。
 
+daemon 的连接核心与具体 Unix socket 或 named pipe 解耦：增量帧解码与严格 envelope parser 依次完成字节上限、换行边界和 fatal UTF-8 校验，连接状态机再执行首次 hello、启动 capability 认证、版本与 capability 协商以及 RPC 分发。`system.shutdown` 只产生一次请求排空的生命周期信号；连接层本身不直接终止进程。实际监听器、父进程存活检测和进程组监督在该连接核心之上实现。
+
 握手后连接固定到精确匹配的应用协议版本。V1 wire version 为 `1`，应用协议版本为 `1.0`。应用层使用 `request`、`response`、`error` 和 `event` 四类 envelope；V1 只允许 main 发起 RPC。
 
 关键约束：
