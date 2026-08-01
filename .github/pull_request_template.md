@@ -1,12 +1,41 @@
-## Responsibility
+## 关联事项
 
-<!-- Describe the single independently verifiable capability in this PR. -->
+<!-- 链接总体设计 Issue、功能 Issue 或已批准 Proposal。 -->
 
-## Detailed design
+## 职责边界
 
-<!-- Link the design document updated in this PR. -->
+<!-- 描述本 PR 唯一、可独立验证的能力，以及明确的非目标。 -->
 
-## Validation
+## 详细设计
+
+### 模块与文件
+
+<!-- 列出涉及的模块、文件及各自职责。 -->
+
+### 接口与数据结构
+
+<!-- 描述新增或变更的接口、协议、Schema、数据结构和跨进程边界；无则写“无”。 -->
+
+### 状态与错误处理
+
+<!-- 描述状态转换、失败语义、重试、恢复、幂等和诊断策略；无则写“无”。 -->
+
+### 安全与兼容性
+
+<!-- 描述权限、信任边界、凭据、隐私、依赖、平台和向后兼容影响。 -->
+
+### 测试与验证方案
+
+<!-- 描述单元、集成、故障注入、构建和人工验证范围。 -->
+
+## 总体设计影响
+
+- [ ] 本 PR 不改变总体架构或跨 PR 契约
+- [ ] 已在本 PR 中更新 `docs/architecture/system-design.md`
+
+<!-- 上述两项按实际情况选择一项。 -->
+
+## 验证结果
 
 - [ ] `pnpm format:check`
 - [ ] `pnpm lint`
@@ -14,22 +43,29 @@
 - [ ] `pnpm test`
 - [ ] `pnpm build`
 - [ ] `pnpm smoke:build`
-- [ ] Security and compatibility checks appropriate to this PR
+- [ ] 已完成与本 PR 风险相称的安全和兼容性检查
 
-## Review gate
+## 审查门禁
 
-- [ ] Complete requirement/design/final-diff self-review
-- [ ] Independent correctness/state review complete
-- [ ] Independent security/compatibility review complete
-- [ ] Every actionable finding fixed
-- [ ] Checks rerun after the final fix
-- [ ] Two consecutive clean review rounds target the same PR head SHA
-- [ ] No unresolved review thread
-- [ ] Merge operation verifies the expected reviewed head SHA
-- [ ] Squash commit SHA recorded after merge
+- [ ] 已完成需求、详细设计和最终差异自审
+- [ ] 已完成正确性与状态审查
+- [ ] 已完成安全与兼容性审查
+- [ ] 已修复所有可执行问题
+- [ ] 最终修复后已重新运行全部检查
+- [ ] 连续两轮无新增问题的审查针对同一个 PR head SHA
+- [ ] 不存在未解决的审查对话
+- [ ] 合并操作校验预期的已审查 head SHA
+- [ ] 合并后已记录 squash commit SHA
 
-## Scope check
+## 范围检查
 
-- [ ] No dependent PR was started before its predecessor merged
-- [ ] No runtime capability was enabled before its approval/evidence gate
-- [ ] No proposal-level scope, architecture, dependency, or security contract changed
+- [ ] 前置 PR 已合并后才开始本 PR
+- [ ] 未在审批或证据门禁具备前启用运行时能力
+- [ ] 未改变已批准 Proposal 的范围、架构、依赖或安全契约
+- [ ] PR 详细设计仅存在于 PR 正文，没有新增 PR 专属设计文件
+
+## 合并后清理
+
+- [ ] 已确认 PR 状态为 `MERGED`
+- [ ] 已删除远程功能分支
+- [ ] 已同步 `main` 并删除本地功能分支
