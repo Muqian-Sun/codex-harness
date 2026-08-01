@@ -2,6 +2,10 @@ import type { JsonValue } from "@codex-harness/protocol";
 
 import { deepFreezeJsonValue } from "./json.js";
 import {
+  parseAppServerLifecycleNotification,
+  type AppServerRecoveryLifecycleSignal,
+} from "./lifecycle.js";
+import {
   classifyServerRequest,
   isAllowedAppServerMethod,
   validateMethodParams,
@@ -45,6 +49,7 @@ export type AppServerAdapterEvent =
       error: Readonly<{ code: number; message: string }>;
     }>
   | Readonly<{ type: "notification"; method: string; params: JsonValue | undefined }>
+  | Readonly<{ type: "recovery_lifecycle"; signal: AppServerRecoveryLifecycleSignal }>
   | Readonly<{
       type: "server_request";
       id: AppServerRequestId;
@@ -149,6 +154,17 @@ export class AppServerProtocolAdapter {
     }
 
     if (message.kind === "notification") {
+      const lifecycle = parseAppServerLifecycleNotification(message.method, message.params);
+      if (lifecycle.kind === "invalid") {
+        this.#state = "closed";
+        return adapterFailure("invalid_message");
+      }
+      if (lifecycle.kind === "signal") {
+        return adapterSuccess({
+          type: "recovery_lifecycle",
+          signal: lifecycle.signal,
+        });
+      }
       return adapterSuccess({
         type: "notification",
         method: message.method,
