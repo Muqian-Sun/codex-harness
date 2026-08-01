@@ -479,6 +479,452 @@ describe("persistent task and plan store", () => {
     expect(revised.task).toMatchObject({ activeGraph: null, lastGraphRevisionNumber: 2 });
   });
 
+  it("atomically reconciles requirements, stable TODO IDs, and the active DAG", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const input = createInput();
+    const created = store.createTask(input);
+    const preservedStep = plan(input.requirement.revisionId).steps[0]!;
+    const removedStep = {
+      stepId: randomUUID(),
+      title: "删除旧待办",
+      description: "该工作不再属于修订后的需求。",
+      acceptanceCriteria: ["旧节点被新图移除"],
+    };
+    const confirmed = plan(input.requirement.revisionId, {
+      status: "confirmed",
+      steps: [preservedStep, removedStep],
+    });
+    const planned = store.revisePlan({
+      eventId: confirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: confirmed,
+    });
+    const previousGraph = taskGraph(confirmed);
+    const committed = store.commitTaskGraph({
+      eventId: previousGraph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: planned.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph: previousGraph,
+    });
+
+    const nextRequirement = requirement({
+      sourceText: "用户澄清了目标，并删除旧工作、增加新工作。",
+      objective: "恢复目标并在需求变化后原子修正 TODO。",
+    });
+    const addedStep = {
+      stepId: randomUUID(),
+      title: "调和新待办",
+      description: "保存可审阅差异并重新验证节点。",
+      acceptanceCriteria: ["新节点以 pending 状态进入 DAG"],
+    };
+    const nextPlan = plan(nextRequirement.revisionId, {
+      status: "confirmed",
+      steps: [preservedStep, addedStep],
+    });
+    const addedNodeId = randomUUID();
+    const nextGraph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: nextPlan.revisionId,
+      nodes: [
+        {
+          ...previousGraph.nodes[0]!,
+          dependsOnNodeIds: [],
+        },
+        {
+          nodeId: addedNodeId,
+          sourcePlanStepId: addedStep.stepId,
+          title: addedStep.title,
+          description: addedStep.description,
+          acceptanceCriteria: addedStep.acceptanceCriteria,
+          dependsOnNodeIds: [previousGraph.nodes[0]!.nodeId],
+        },
+      ],
+    };
+    const command = {
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 3,
+      expectedTaskVersion: committed.task.taskVersion,
+      previousRequirementRevisionId: input.requirement.revisionId,
+      previousPlanRevisionId: confirmed.revisionId,
+      previousGraphRevisionId: previousGraph.revisionId,
+      requirement: nextRequirement,
+      plan: nextPlan,
+      graph: nextGraph,
+      metadata: { actor: "user.local" },
+    } as const;
+    const reconciled = store.reconcileRequirements(command);
+
+    expect(reconciled).toMatchObject({
+      duplicate: false,
+      events: [
+        { sequence: 4, eventType: "task.requirements_reconciled" },
+        { sequence: 5, eventType: "task.plan_reconciled" },
+        { sequence: 6, eventType: "task.graph_reconciled" },
+      ],
+      task: {
+        taskVersion: 4,
+        activeRequirement: { revisionId: nextRequirement.revisionId, revisionNumber: 2 },
+        confirmedPlan: { revisionId: nextPlan.revisionId, revisionNumber: 2 },
+        activeGraph: { revisionId: nextGraph.revisionId, revisionNumber: 2 },
+        activeReconciliation: {
+          reconciliationId: nextRequirement.revisionId,
+          appliedAtTaskVersion: 4,
+          impact: "restructuring",
+          changes: {
+            preservedPlanStepIds: [preservedStep.stepId],
+            addedPlanStepIds: [addedStep.stepId],
+            removedPlanStepIds: [removedStep.stepId],
+            preservedNodeIds: [previousGraph.nodes[0]!.nodeId],
+            addedNodeIds: [addedNodeId],
+            removedNodeIds: [previousGraph.nodes[1]!.nodeId],
+            dependencyChangedNodeIds: [],
+            revalidationNodeIds: [],
+          },
+        },
+      },
+    });
+    expect(reconciled.task.activeGraph?.nodes.map((node) => node.status)).toEqual([
+      "pending",
+      "pending",
+    ]);
+    expect(store.inspect()).toMatchObject({ eventCount: 6, lastSequence: 6 });
+
+    const additiveRequirement = requirement({
+      sourceText: "在已调和目标中补充一个新增待办。",
+      objective: nextRequirement.objective,
+      constraints: nextRequirement.constraints,
+      acceptanceCriteria: nextRequirement.acceptanceCriteria,
+    });
+    const additiveStep = {
+      stepId: randomUUID(),
+      title: "新增验证",
+      description: "只增加工作，不删除或重排现有工作。",
+      acceptanceCriteria: ["影响等级为 additive"],
+    };
+    const additivePlan = plan(additiveRequirement.revisionId, {
+      status: "confirmed",
+      steps: [...nextPlan.steps, additiveStep],
+    });
+    const additiveNodeId = randomUUID();
+    const additiveGraph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: additivePlan.revisionId,
+      nodes: [
+        ...nextGraph.nodes,
+        {
+          nodeId: additiveNodeId,
+          sourcePlanStepId: additiveStep.stepId,
+          title: additiveStep.title,
+          description: additiveStep.description,
+          acceptanceCriteria: additiveStep.acceptanceCriteria,
+          dependsOnNodeIds: [addedNodeId],
+        },
+      ],
+    };
+    const additive = store.reconcileRequirements({
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 4,
+      expectedTaskVersion: reconciled.task.taskVersion,
+      previousRequirementRevisionId: nextRequirement.revisionId,
+      previousPlanRevisionId: nextPlan.revisionId,
+      previousGraphRevisionId: nextGraph.revisionId,
+      requirement: additiveRequirement,
+      plan: additivePlan,
+      graph: additiveGraph,
+    });
+    expect(additive.task).toMatchObject({
+      taskVersion: 5,
+      activeReconciliation: {
+        impact: "additive",
+        changes: {
+          addedPlanStepIds: [additiveStep.stepId],
+          addedNodeIds: [additiveNodeId],
+          removedPlanStepIds: [],
+          removedNodeIds: [],
+          planOrderChanged: false,
+          graphOrderChanged: false,
+        },
+      },
+    });
+    expect(store.inspect()).toMatchObject({ eventCount: 9, lastSequence: 9 });
+    store.close();
+
+    const reopened = await openStore(path);
+    expect(reopened.readTask(input.taskId)).toEqual(additive.task);
+  });
+
+  it("preserves stable IDs across dependency changes and records their impact", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const input = createInput();
+    const created = store.createTask(input);
+    const firstStep = plan(input.requirement.revisionId).steps[0]!;
+    const secondStep = {
+      stepId: randomUUID(),
+      title: "第二项工作",
+      description: "验证依赖变化。",
+      acceptanceCriteria: ["依赖差异被记录"],
+    };
+    const confirmed = plan(input.requirement.revisionId, {
+      status: "confirmed",
+      steps: [firstStep, secondStep],
+    });
+    const planned = store.revisePlan({
+      eventId: confirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: confirmed,
+    });
+    const nodeIds = [randomUUID(), randomUUID()];
+    const previousGraph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: confirmed.revisionId,
+      nodes: confirmed.steps.map((step, index) => ({
+        nodeId: nodeIds[index]!,
+        sourcePlanStepId: step.stepId,
+        title: step.title,
+        description: step.description,
+        acceptanceCriteria: step.acceptanceCriteria,
+        dependsOnNodeIds: [],
+      })),
+    };
+    const committed = store.commitTaskGraph({
+      eventId: previousGraph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: planned.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph: previousGraph,
+    });
+    const nextRequirement = requirement({ sourceText: "仅澄清文字并调整执行依赖。" });
+    const nextPlan = plan(nextRequirement.revisionId, {
+      status: "confirmed",
+      steps: confirmed.steps,
+    });
+    const nextGraph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: nextPlan.revisionId,
+      nodes: [...previousGraph.nodes].reverse().map((node) => ({
+        ...node,
+        dependsOnNodeIds: node.nodeId === nodeIds[1] ? [nodeIds[0]!] : [],
+      })),
+    };
+
+    const reconciled = store.reconcileRequirements({
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 3,
+      expectedTaskVersion: committed.task.taskVersion,
+      previousRequirementRevisionId: input.requirement.revisionId,
+      previousPlanRevisionId: confirmed.revisionId,
+      previousGraphRevisionId: previousGraph.revisionId,
+      requirement: nextRequirement,
+      plan: nextPlan,
+      graph: nextGraph,
+    });
+
+    expect(reconciled.task.activeReconciliation).toMatchObject({
+      impact: "restructuring",
+      changes: {
+        preservedPlanStepIds: confirmed.steps.map((step) => step.stepId),
+        preservedNodeIds: [nodeIds[1], nodeIds[0]],
+        graphOrderChanged: true,
+        dependencyChangedNodeIds: [nodeIds[1]],
+      },
+    });
+  });
+
+  it("rejects semantic ID reuse and partial batch collisions without changing the task", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const input = createInput();
+    const created = store.createTask(input);
+    const confirmed = plan(input.requirement.revisionId, { status: "confirmed" });
+    const planned = store.revisePlan({
+      eventId: confirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: confirmed,
+    });
+    const previousGraph = taskGraph(confirmed);
+    const committed = store.commitTaskGraph({
+      eventId: previousGraph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: planned.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph: previousGraph,
+    });
+    const nextRequirement = requirement();
+    const changedStepPlan = plan(nextRequirement.revisionId, {
+      status: "confirmed",
+      steps: [
+        {
+          ...confirmed.steps[0]!,
+          acceptanceCriteria: ["改变后的验收条件不能沿用旧 ID"],
+        },
+      ],
+    });
+    const changedStepGraph = taskGraph(changedStepPlan);
+    const baseCommand = {
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 3,
+      expectedTaskVersion: committed.task.taskVersion,
+      previousRequirementRevisionId: input.requirement.revisionId,
+      previousPlanRevisionId: confirmed.revisionId,
+      previousGraphRevisionId: previousGraph.revisionId,
+    };
+    let captured: unknown;
+    try {
+      store.reconcileRequirements({
+        ...baseCommand,
+        requirement: nextRequirement,
+        plan: changedStepPlan,
+        graph: changedStepGraph,
+      });
+    } catch (error: unknown) {
+      captured = error;
+    }
+    expect(captured).toMatchObject({ code: "conflict" });
+    expect(String(captured)).not.toContain("改变后的验收条件");
+
+    const changedNodeRequirement = requirement();
+    const unchangedStepPlan = plan(changedNodeRequirement.revisionId, {
+      status: "confirmed",
+      steps: confirmed.steps,
+    });
+    const changedNodeGraph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: unchangedStepPlan.revisionId,
+      nodes: previousGraph.nodes.map((node) => ({
+        ...node,
+        description: "改变后的节点语义不能沿用旧 ID。",
+      })),
+    };
+    expect(() =>
+      store.reconcileRequirements({
+        ...baseCommand,
+        requirement: changedNodeRequirement,
+        plan: unchangedStepPlan,
+        graph: changedNodeGraph,
+      }),
+    ).toThrowError(TaskPlanError);
+
+    const collisionRequirement = requirement();
+    const collisionPlan = plan(collisionRequirement.revisionId, {
+      status: "confirmed",
+      steps: confirmed.steps,
+    });
+    const collisionGraph = {
+      ...taskGraph(collisionPlan),
+      revisionId: input.requirement.revisionId,
+      nodes: previousGraph.nodes.map((node) => ({ ...node })),
+    };
+    expect(() =>
+      store.reconcileRequirements({
+        ...baseCommand,
+        requirement: collisionRequirement,
+        plan: collisionPlan,
+        graph: collisionGraph,
+      }),
+    ).toThrowError(TaskPlanError);
+    const candidateRequirement = requirement();
+    const candidatePlan = plan(candidateRequirement.revisionId, { steps: confirmed.steps });
+    const candidateGraph = {
+      ...taskGraph(candidatePlan),
+      nodes: previousGraph.nodes.map((node) => ({ ...node })),
+    };
+    let invalidCandidate: unknown;
+    try {
+      store.reconcileRequirements({
+        ...baseCommand,
+        requirement: candidateRequirement,
+        plan: candidatePlan,
+        graph: candidateGraph,
+      });
+    } catch (error: unknown) {
+      invalidCandidate = error;
+    }
+    expect(invalidCandidate).toMatchObject({ code: "invalid_input" });
+    expect(store.readTask(input.taskId)).toEqual(committed.task);
+    expect(store.inspect()).toMatchObject({ eventCount: 3, lastSequence: 3 });
+  });
+
+  it("keeps complete reconciliation retries idempotent after later candidate plans", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const input = createInput();
+    const created = store.createTask(input);
+    const confirmed = plan(input.requirement.revisionId, { status: "confirmed" });
+    const planned = store.revisePlan({
+      eventId: confirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: confirmed,
+    });
+    const previousGraph = taskGraph(confirmed);
+    const committed = store.commitTaskGraph({
+      eventId: previousGraph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: planned.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph: previousGraph,
+    });
+    const nextRequirement = requirement({ sourceText: "只调整需求原文的表达。" });
+    const nextPlan = plan(nextRequirement.revisionId, {
+      status: "confirmed",
+      steps: confirmed.steps,
+    });
+    const nextGraph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: nextPlan.revisionId,
+      nodes: previousGraph.nodes.map((node) => ({ ...node })),
+    };
+    const command = {
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 3,
+      expectedTaskVersion: committed.task.taskVersion,
+      previousRequirementRevisionId: input.requirement.revisionId,
+      previousPlanRevisionId: confirmed.revisionId,
+      previousGraphRevisionId: previousGraph.revisionId,
+      requirement: nextRequirement,
+      plan: nextPlan,
+      graph: nextGraph,
+    } as const;
+    const reconciled = store.reconcileRequirements(command);
+    expect(reconciled.task.activeReconciliation?.impact).toBe("editorial");
+    const candidate = plan(nextRequirement.revisionId);
+    const later = store.revisePlan({
+      eventId: candidate.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 4,
+      expectedTaskVersion: reconciled.task.taskVersion,
+      previousPlanRevisionId: nextPlan.revisionId,
+      plan: candidate,
+    });
+    const retried = store.reconcileRequirements(command);
+
+    expect(retried).toMatchObject({
+      duplicate: true,
+      events: reconciled.events,
+      task: { taskVersion: later.task.taskVersion },
+    });
+    expect(retried.task.activeReconciliation).toEqual(later.task.activeReconciliation);
+    expect(store.inspect()).toMatchObject({ eventCount: 7, lastSequence: 7 });
+  });
+
   it("keeps graph retries idempotent and rolls back invalid graph commands", async () => {
     const path = await privateDatabasePath();
     const store = await openStore(path);
@@ -550,7 +996,7 @@ describe("persistent task and plan store", () => {
     expect(store.inspect()).toMatchObject({ eventCount: 4, lastSequence: 4 });
   });
 
-  it("rebuilds a legacy v1 task projection into the v2 graph-aware shape", async () => {
+  it("rebuilds a legacy v1 task projection into the v3 reconciliation-aware shape", async () => {
     const path = await privateDatabasePath();
     const input = createInput();
     const legacyProjection: ProjectionDefinition = {
@@ -603,6 +1049,7 @@ describe("persistent task and plan store", () => {
     expect(upgraded.readTask(input.taskId)).toMatchObject({
       taskVersion: 1,
       activeGraph: null,
+      activeReconciliation: null,
       lastGraphRevisionNumber: 0,
     });
   });
@@ -662,7 +1109,36 @@ describe("persistent task and plan store", () => {
       taskVersion: 3,
       activeGraph: { revisionId: graph.revisionId },
     });
-    const projectedBytes = Buffer.byteLength(JSON.stringify(committed.task), "utf8");
+    const nextRequirement = requirement({
+      ...largeRequirement,
+      revisionId: randomUUID(),
+      sourceText: `t${largeRequirement.sourceText.slice(1)}`,
+    });
+    const nextPlan = plan(nextRequirement.revisionId, {
+      status: "confirmed",
+      steps: confirmed.steps,
+    });
+    const nextGraph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: nextPlan.revisionId,
+      nodes: graph.nodes.map((node) => ({ ...node })),
+    };
+    const reconciled = store.reconcileRequirements({
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 3,
+      expectedTaskVersion: committed.task.taskVersion,
+      previousRequirementRevisionId: largeRequirement.revisionId,
+      previousPlanRevisionId: confirmed.revisionId,
+      previousGraphRevisionId: graph.revisionId,
+      requirement: nextRequirement,
+      plan: nextPlan,
+      graph: nextGraph,
+    });
+    expect(reconciled.task).toMatchObject({
+      taskVersion: 4,
+      activeReconciliation: { impact: "editorial" },
+    });
+    const projectedBytes = Buffer.byteLength(JSON.stringify(reconciled.task), "utf8");
     expect(projectedBytes).toBeGreaterThan(750 * 1024);
     expect(projectedBytes).toBeLessThan(1024 * 1024);
   });
