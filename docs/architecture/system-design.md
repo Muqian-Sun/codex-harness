@@ -156,6 +156,10 @@ Task 到 Project 的权威归属使用独立单调 ownership version。首次归
 
 影子路由内核使用固定策略版本和结构化特征快照确定性计算候选档位。简单且低复杂度、低歧义、局部、短步骤、少工具的任务可选择 `fast`；一般代码变更和常规分析至少选择 `standard`；架构决策、系统性诊断、高复杂度、跨系统、高歧义、长步骤或广泛工具任务选择 `deep`。安全敏感、数据迁移、并发敏感、公共 API 变更、生产影响、不可逆操作或权限边界变更中的任一信号都会把安全下限提升到 `deep`；最终档位只能取候选档位与安全下限中的较高者。输出保存冻结的输入特征、稳定理由码、配置修订与实际模型快照，并固定为 `shadow` 且不可执行。该纯内核不证明特征来源；模型或用户提供的低风险声明不能直接成为权威安全事实，来源协调、模型目录和执行前复核完成前不得接入运行路径。
 
+权威 route feature snapshot 从经过领域校验的 Task 当前投影和恢复 freshness fence 确定性构造，并支持绑定当前 DAG 中的可选节点。snapshot 保存 Task 阶段、需求项数、当前权威与候选计划步骤数、图节点/依赖数和节点依赖闭包，不复制完整需求文本；Task、Requirement、Plan、Graph、Reconciliation 任一修订或内容摘要变化都会使旧 snapshot 失效。Task 结构提供 complexity、scope、ambiguity 和 estimated steps 基线；在任务类型与工具计划没有权威来源时，策略分别至少使用 `analysis` 和 `multiple`，避免未经证明地进入 `fast`。用户或模型 candidate 统一标记为 advisory，只能按字段强度保持或提高基线，不能降低；source 标签仅用于审计，不赋予权限。
+
+安全信号严格区分“candidate 报告存在风险”和“尚未证明不存在风险”。candidate `true` 可以保守设置风险下限，candidate `false` 仍记录为 unresolved。当前尚无权限计划、静态分析、运行目标和外部副作用证据来提供权威负面观察，因此 V1 feature snapshot 固定 `deep` routing floor、`shadow` 和不可执行。snapshot decoder 会重建有效特征、provenance、未解决列表和 SHA-256 摘要；实际使用方仍必须在安全串行边界针对最新 Task 重新构造并比较。该能力不修改现有 RouteDecision 事件，解除 deep floor 必须由后续安全证据 PR 逐项完成。
+
 影子 RouteDecision 由 Harness 从命令特征和当前 profile 配置重新计算，调用方不能提交最终档位、理由或模型目标。记录绑定 decision、Task/version、可选节点、profile、配置 revision fence 和发生时间，以 `taskId/decisionId` 作为只增审计投影键；决策 decoder 会重新运行固定策略并核对全部派生字段。写入前先按 decision ID 查询：已存在时只接受所有业务字段、特征、配置 fence 和 metadata 均相同的历史重试，即使 profile 后来更新也返回原决策；不存在时必须证明期望配置仍是 profile 当前 revision，且 decision 时间不早于该 revision 的生效时间，过期 fence 或不可能的时间线不得创建新决策。记录始终保持 `shadow` 与不可执行，不成为权限或调度授权。
 
 模型目录事实来自同一 Codex App Server worker 认证会话的完整 `model/list(includeHidden=true)` 分页结果，不能来自 Harness 内置的静态模型名单。目录快照绑定 daemon 分配的 snapshot ID、worker session ID、provider 和观察时间，不保存账号或凭据；第一页、游标链、末页闭合、模型与 effort 唯一性都必须验证，旧目录缺失 `inputModalities` 时按 App Server 兼容规则视为 `text` 与 `image`。只有当前 daemon 进程内经过完整分页工厂创建的冻结实例具有验证资格，序列化、克隆或进程重启不继承该资格。用户三档目标只按精确 provider、model 和 reasoning effort 检查，结果区分已观测可用、provider 未观测、model 不可用和 effort 不支持，不猜测名称、不自动回退。快照只证明该认证边界在该时间点的目录事实，固定不可授权执行；worker 断线、重启或重新认证后的失效，以及执行前的当前目录复核，由后续 worker manager 和运行时门禁负责。
@@ -270,7 +274,7 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
-7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、带安全下限的影子分类和 RouteDecision 审计已完成；权威特征来源、目录 freshness、组合 coordinator 和影子评估待后续 PR。
+7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot 和 RouteDecision 审计已完成；安全信号的权威负面证据、目录 freshness、组合 coordinator 和影子评估待后续 PR。
 8. 串行调度。
 9. 安全 Electron 桌面壳与任务 UI。
 10. 审批、证据、运行恢复和打包门禁。
