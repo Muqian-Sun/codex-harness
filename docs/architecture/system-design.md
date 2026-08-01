@@ -110,11 +110,15 @@ Harness 而不是模型拥有节点和 DAG 的权威状态。高级模型可以�
 
 DAG 由 Harness 的计划规范化器和调度器共同产生：规范化器把需求与候选计划转换为稳定节点；调度器根据依赖和状态计算可运行集合。V1 串行领取一个 `ready` 节点，避免并发写冲突；后续并行能力必须引入资源锁、冲突域和确定性恢复设计。
 
+节点/DAG 领域内核把已确认计划规范化为版本化 Graph Revision，并作为 `task.graph_committed` 事件与 Task 当前投影原子提交。每个节点保存稳定 UUID、来源计划步骤、描述、验收条件和前驱节点 UUID；Harness 要求所有已确认计划步骤被覆盖，拒绝重复、缺失引用、自依赖和环，并按节点输入顺序为并列根生成确定性拓扑序。Graph 提交时节点只能由 Harness 初始化为 `pending`，模型不能在 Graph 输入中声明 `ready`、`running` 或 `succeeded`。需求修订或新的 confirmed plan 会立即清除 active graph；仅 candidate plan 不会替换当前权威 DAG。Graph 历史保留在事件日志，当前投影只保存 active graph 和单调修订计数。节点状态流转、审批/证据门禁和调度器完成前，该内核不接入 daemon 运行路径。
+
 ## 8. 持久计划与上下文压缩恢复
 
 结构化 Codex plan 事件保存为带版本的候选计划。Harness 持久化稳定步骤 ID、目标、未完成工作、约束、决定、依赖、验收条件和证据引用。文本中的待办列表可以被识别为候选计划，但在规范化和确认前不是权威状态。
 
 任务与计划领域内核使用独立 `task.plan` 事件流保存 Task 创建、Requirement Revision 和 Plan Revision。Task 使用单调版本做事务内乐观并发校验；每个修订 UUID 同时作为对应事件 UUID，利用事件日志的全局唯一约束阻止修订 ID 被复用。Requirement Revision 保存用户原文、规范化目标、约束和验收条件，Plan Revision 区分 `candidate` 与 `confirmed` 并为每个步骤分配稳定 UUID；单项和单次修订的文本容量均受限，避免合法字段组合放大为无界投影。当前投影保留 active requirement、latest plan 和 last confirmed plan，完整修订历史留在不可变事件日志。需求修订会清除基于旧需求的 latest candidate，但保留 last confirmed plan 作为历史参照；新计划必须显式绑定当前 requirement revision。候选计划仍不能直接调度，必须由后续节点/DAG 规范化与确认门禁转换。
+
+用户在任务中途补充或纠正需求时，Harness 先保存新的 Requirement Revision，并使旧 active graph 保守失效；不得继续领取旧节点，也不得把旧 TODO 静默改写为新需求。后续需求变更协调器负责比较旧需求、用户增量、当前计划和执行证据，保留语义未变节点的稳定 ID，为新增工作创建节点，把删除或改变验收条件的工作形成可审阅差异，并在重新验证后提交新的 Plan/Graph Revision。正在运行和已经成功的节点不能因文本修订自动继承有效性；具体中断、重新验证和确认策略作为独立能力交付。
 
 每个安全轮次边界，Harness 为 Codex 构造最小恢复上下文，包括当前目标、活动需求修订、未完成节点、关键约束、已确认决定和所需证据。注入内容来自持久状态，而不是依赖旧对话的自然语言摘要。
 

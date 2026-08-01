@@ -24,10 +24,55 @@ export async function smokeTaskPlanStore() {
       },
       metadata: { actor: "system.smoke" },
     });
+    store.revisePlan({
+      eventId: "00000000-0000-4000-8000-000000000004",
+      taskId: "00000000-0000-4000-8000-000000000002",
+      occurredAtMs: 1_750_000_000_002,
+      expectedTaskVersion: 1,
+      previousPlanRevisionId: null,
+      plan: {
+        revisionId: "00000000-0000-4000-8000-000000000004",
+        status: "confirmed",
+        basedOnRequirementRevisionId: "00000000-0000-4000-8000-000000000003",
+        steps: [
+          {
+            stepId: "00000000-0000-4000-8000-000000000005",
+            title: "Persist the task graph",
+            description: "Commit a validated graph before reopening the compiled store.",
+            acceptanceCriteria: ["The graph remains active after reopen."],
+          },
+        ],
+      },
+    });
+    store.commitTaskGraph({
+      eventId: "00000000-0000-4000-8000-000000000007",
+      taskId: "00000000-0000-4000-8000-000000000002",
+      occurredAtMs: 1_750_000_000_003,
+      expectedTaskVersion: 2,
+      previousGraphRevisionId: null,
+      graph: {
+        revisionId: "00000000-0000-4000-8000-000000000007",
+        basedOnPlanRevisionId: "00000000-0000-4000-8000-000000000004",
+        nodes: [
+          {
+            nodeId: "00000000-0000-4000-8000-000000000006",
+            sourcePlanStepId: "00000000-0000-4000-8000-000000000005",
+            title: "Persist the task graph",
+            description: "Verify compiled DAG persistence.",
+            acceptanceCriteria: ["The node remains pending after reopen."],
+            dependsOnNodeIds: [],
+          },
+        ],
+      },
+    });
     store.close();
-    store = await TaskPlanStore.open({ path, now: () => 1_750_000_000_002 });
+    store = await TaskPlanStore.open({ path, now: () => 1_750_000_000_004 });
     const task = store.readTask("00000000-0000-4000-8000-000000000002");
-    if (task.taskVersion !== 1 || task.activeRequirement.revisionNumber !== 1) {
+    if (
+      task.taskVersion !== 3 ||
+      task.activeRequirement.revisionNumber !== 1 ||
+      task.activeGraph?.nodes[0]?.status !== "pending"
+    ) {
       throw new Error("The compiled task plan store smoke result was invalid.");
     }
   } finally {
