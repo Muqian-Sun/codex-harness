@@ -146,7 +146,9 @@ Harness 只使用逻辑档位：
 
 模型配置领域内核把用户输入规范化为版本化的完整三档映射。每个配置修订包含 UUID、正整数修订序号以及 `fast`、`standard`、`deep` 三个必填目标；每个目标严格包含 provider、model 和 reasoning effort。Harness 允许用户把多个逻辑档位映射到同一实际目标，不根据名称猜测模型强弱。解析逻辑只接受逻辑档位，并返回包含配置修订和实际目标的冻结快照；它不选择权限、不查询模型目录，也不在配置无效或不可用时静默回退。当前纯内核只证明单个对象结构合法；跨修订序号单调性由后续持久化提交门禁保证，账户可用性、模型目录、预算、限流和执行前复核属于后续策略与运行时门禁。
 
-模型路由配置以稳定 profile ID 形成独立事件流，当前投影保存 profile version、活动配置和创建/更新时间。首次配置必须从 version 0 提交 revision 1；后续配置同时校验期望 profile version、前一 revision ID、严格加一的新 revision number 和不回退的事件时间。配置 revision ID 同时作为 event ID，完整相同重试幂等，stale fence、跳号或冲突内容整体回滚。路由 profile repository 接受 daemon 统一拥有的事件库并要求对应投影已经注册，不自行打开或关闭 SQLite；active profile 与 Project 的绑定、模型目录和 RouteDecision 仍属于后续能力。
+模型路由配置以稳定 profile ID 形成独立事件流，当前投影保存 profile version、活动配置和创建/更新时间。首次配置必须从 version 0 提交 revision 1；后续配置同时校验期望 profile version、前一 revision ID、严格加一的新 revision number 和不回退的事件时间。配置 revision ID 同时作为 event ID，完整相同重试幂等，stale fence、跳号或冲突内容整体回滚。路由 profile repository 接受 daemon 统一拥有的事件库并要求对应投影已经注册，不自行打开或关闭 SQLite；它本身不决定 Project 绑定、模型目录或 RouteDecision。
+
+Project 通过独立的单调 binding version 引用一个活动路由 profile。首次绑定必须从 version 0 和空 previous profile 开始；改绑同时校验当前 binding version、前一 profile、目标 profile 的当前 version/config revision 以及不早于目标 profile 生效时间的事件时间，禁止对当前同一 profile 产生无意义的新绑定。绑定事件保存写入时观察到的 profile version 与 configuration revision 作为审计快照，但 profile 后续配置更新会自动成为该 Project 的当前配置，不要求重新绑定。历史 event ID 的完全一致重试先于当前 profile 和绑定检查，因此在 profile 更新或 Project 改绑后仍返回原历史结果；内容或 metadata 变化保持冲突。当前投影只保存每个 Project 的最新绑定，完整历史保留在事件日志。该 repository 复用统一 EventStore 并要求 profile 与 binding 投影均已注册；Project registry、Task 到 Project 的归属、目录复核和运行时路由仍未接入，不能据此启动执行。
 
 影子路由内核使用固定策略版本和结构化特征快照确定性计算候选档位。简单且低复杂度、低歧义、局部、短步骤、少工具的任务可选择 `fast`；一般代码变更和常规分析至少选择 `standard`；架构决策、系统性诊断、高复杂度、跨系统、高歧义、长步骤或广泛工具任务选择 `deep`。安全敏感、数据迁移、并发敏感、公共 API 变更、生产影响、不可逆操作或权限边界变更中的任一信号都会把安全下限提升到 `deep`；最终档位只能取候选档位与安全下限中的较高者。输出保存冻结的输入特征、稳定理由码、配置修订与实际模型快照，并固定为 `shadow` 且不可执行。该纯内核不证明特征来源；模型或用户提供的低风险声明不能直接成为权威安全事实，来源协调、模型目录和执行前复核完成前不得接入运行路径。
 

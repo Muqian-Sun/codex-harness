@@ -32,5 +32,9 @@ const { smokeShadowRouteDecisionRepository } =
   await import("./smoke-shadow-route-decision-repository.mjs");
 await smokeShadowRouteDecisionRepository();
 
+const { smokeProjectRoutingProfileBinding } =
+  await import("./smoke-project-routing-profile-binding.mjs");
+await smokeProjectRoutingProfileBinding();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();
