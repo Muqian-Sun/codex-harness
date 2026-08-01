@@ -26,6 +26,8 @@ Codex Harness 在 Codex App Server 外增加一个本地控制层。Codex 继续
 
 - V1 不提供桌面关闭后继续执行的常驻后台 daemon。
 - V1 不支持连接到任意已存在 daemon；Electron main 每次只拥有一个子 daemon。
+- V1 平台交付顺序为 macOS、Windows、Linux。macOS 是首发、打包和端到端验收平台；Windows named pipe 和 Job Object 在第二阶段交付；Linux 的 POSIX 差异、CI 和发布验证排在 Windows 之后。每个平台完成独立实现与证据门禁前，不得宣称该平台生产可用。
+- 必需 CI 跟随当前交付平台：macOS 阶段使用固定 macOS runner；Windows 和 Linux 的必需 job 在对应平台能力开始交付时分别加入，不用尚未支持的平台结果阻塞当前平台 PR。
 - V1 不保证操作系统或断电故障、两个监督者同时消失，或恶意后代进程逃逸受控 Unix 进程组后的强隔离。
 - V1 先采用串行调度；并行调度必须作为后续独立能力设计。
 - 模型不能直接提交权威任务状态，也不能自行提高权限。
@@ -71,6 +73,8 @@ V1 使用现有两个监督角色处理单一监督者故障：
 - 超过优雅关闭时限后，监督者按 graceful termination、`SIGTERM`、`SIGKILL` 的顺序升级。
 
 同时失去两个监督者、操作系统崩溃、断电或故意逃逸进程组不属于 Unix 硬保证。重启后相关运行只能标记为 `interrupted` 或 `containment_unknown` 并等待核对，不能推断为完成，也不能自动恢复写操作。
+
+macOS 首发的 daemon 运行时只接受位于当前用户私有目录中的绝对 Unix socket 路径，拒绝复用已存在端点，监听后将 socket 权限固定为 `0600`。启动 capability 必须从 FD 3 有界读取且在启动前完成规范校验；FD 4 的 EOF、错误或异常关闭触发一次保守排空。运行时按 `starting`、`listening`、`quiescing`、`closed` 转换，停止监听后先冲刷已排队响应，再在超时后销毁连接；库层不得直接退出进程。Electron main 的 spawn、独立进程组和升级终止策略在该 daemon 运行时之上实现。
 
 ## 6. 领域模型
 
