@@ -174,6 +174,8 @@ main 与 daemon 使用换行分隔 JSON。每个连接的第一帧必须是严�
 
 daemon 的连接核心与具体 Unix socket 或 named pipe 解耦：`@codex-harness/protocol` 统一提供双端共用的有界增量 JSONL 帧解码与严格 envelope parser，依次完成字节上限、换行边界和 fatal UTF-8 校验；连接状态机再执行首次 hello、启动 capability 认证、版本与 capability 协商以及 RPC 分发。`system.shutdown` 只产生一次请求排空的生命周期信号；连接层本身不直接终止进程。实际监听器、父进程存活检测和进程组监督在该连接核心之上实现。
 
+Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，并使用启动 capability 完成首次 hello。客户端在请求发送前执行方法参数验证，在响应进入应用逻辑前执行角色、协议版本、请求 ID 和方法结果验证；未知或重复响应、坏帧、截断流与事件序号缺口都会保守关闭连接并拒绝全部待决请求。请求超时后的执行结果视为未知，客户端不得自动重放。daemon 的启动、kill domain、升级终止和受控重连由独立的进程监督层负责，不能混入 RPC 客户端。
+
 握手后连接固定到精确匹配的应用协议版本。V1 wire version 为 `1`，应用协议版本为 `1.0`。应用层使用 `request`、`response`、`error` 和 `event` 四类 envelope；V1 只允许 main 发起 RPC。
 
 关键约束：
