@@ -12,5 +12,8 @@ for (const artifact of buildArtifacts) {
 const { smokeEventStore } = await import("./smoke-event-store.mjs");
 await smokeEventStore();
 
+const { smokeTaskPlanStore } = await import("./smoke-task-plan-store.mjs");
+await smokeTaskPlanStore();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();
