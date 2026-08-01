@@ -1,4 +1,5 @@
 node_modules/
 dist/
 coverage/
+packages/app-server-adapter/schema/codex-app-server.schema.json
 pnpm-lock.yaml

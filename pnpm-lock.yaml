@@ -48,6 +48,15 @@ importers:
         specifier: workspace:*
         version: link:../../packages/protocol
 
+  packages/app-server-adapter:
+    dependencies:
+      '@codex-harness/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+
   packages/protocol:
     dependencies:
       zod:

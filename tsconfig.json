@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/protocol" },
+    { "path": "./packages/app-server-adapter" },
     { "path": "./apps/harnessd" },
     { "path": "./apps/desktop" }
   ]

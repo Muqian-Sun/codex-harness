@@ -33,6 +33,7 @@ export default tseslint.config(
     files: [
       "apps/desktop/src/main/**/*.ts",
       "apps/harnessd/**/*.ts",
+      "packages/app-server-adapter/**/*.ts",
       "packages/protocol/**/*.ts",
       "vitest.config.ts",
     ],
