@@ -6,3 +6,4 @@ export const desktopBootstrapMetadata = Object.freeze({
 });
 
 export * from "./harness-rpc-client.js";
+export * from "./daemon-process-supervisor.js";
