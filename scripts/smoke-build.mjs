@@ -15,5 +15,8 @@ await smokeEventStore();
 const { smokeTaskPlanStore } = await import("./smoke-task-plan-store.mjs");
 await smokeTaskPlanStore();
 
+const { smokeModelRoutingConfiguration } = await import("./smoke-model-routing-config.mjs");
+await smokeModelRoutingConfiguration();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();
