@@ -1,4 +1,4 @@
-import { MAX_FRAME_BYTES } from "@codex-harness/protocol";
+import { MAX_FRAME_BYTES } from "./constants.js";
 
 export type FrameDecoderFailureCode = "decoder_closed" | "frame_too_large" | "invalid_chunk";
 

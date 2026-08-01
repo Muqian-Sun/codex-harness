@@ -1,5 +1,6 @@
 export * from "./constants.js";
 export * from "./internal-error.js";
+export * from "./jsonl-frame-decoder.js";
 export * from "./json-value.js";
 export * from "./methods.js";
 export * from "./negotiation.js";
