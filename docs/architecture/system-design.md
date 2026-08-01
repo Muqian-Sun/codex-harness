@@ -26,7 +26,8 @@ Codex Harness 在 Codex App Server 外增加一个本地控制层。Codex 继续
 
 - V1 不提供桌面关闭后继续执行的常驻后台 daemon。
 - V1 不支持连接到任意已存在 daemon；Electron main 每次只拥有一个子 daemon。
-- V1 首发、打包和端到端验收平台为 macOS；Linux 用于验证共享的 POSIX 协议与构建契约，Windows named pipe 和 Job Object 作为后续独立平台能力交付，未完成前不得宣称 Windows 生产可用。
+- V1 平台交付顺序为 macOS、Windows、Linux。macOS 是首发、打包和端到端验收平台；Windows named pipe 和 Job Object 在第二阶段交付；Linux 的 POSIX 差异、CI 和发布验证排在 Windows 之后。每个平台完成独立实现与证据门禁前，不得宣称该平台生产可用。
+- 必需 CI 跟随当前交付平台：macOS 阶段使用固定 macOS runner；Windows 和 Linux 的必需 job 在对应平台能力开始交付时分别加入，不用尚未支持的平台结果阻塞当前平台 PR。
 - V1 不保证操作系统或断电故障、两个监督者同时消失，或恶意后代进程逃逸受控 Unix 进程组后的强隔离。
 - V1 先采用串行调度；并行调度必须作为后续独立能力设计。
 - 模型不能直接提交权威任务状态，也不能自行提高权限。
