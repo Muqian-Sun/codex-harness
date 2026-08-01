@@ -16,11 +16,15 @@ const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const MAX_BUSY_TIMEOUT_MS = 60_000;
 const MAX_DATABASE_PATH_BYTES = 1_024;
 const MAX_EVENT_JSON_BYTES = 1024 * 1024;
+const MAX_APPEND_BATCH_SIZE = 16;
+const MAX_APPEND_BATCH_EVENT_JSON_BYTES = 4 * 1024 * 1024;
 const MAX_PROJECTION_STATE_JSON_BYTES = 1024 * 1024;
 const MAX_PROJECTION_STATE_BYTES_PER_EVENT = 4 * 1024 * 1024;
+const MAX_PROJECTION_STATE_BYTES_PER_BATCH = 8 * 1024 * 1024;
 const MAX_READ_LIMIT = 1_000;
 const MAX_PROJECTIONS = 64;
 const MAX_PROJECTION_KEYS_PER_EVENT = 1_000;
+const MAX_PROJECTION_KEYS_PER_BATCH = 4_000;
 const MAX_PROJECTION_KEY_BYTES = 256;
 const EVENT_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -169,6 +173,11 @@ export type AppendEventResult = Readonly<{
   duplicate: boolean;
 }>;
 
+export type AppendEventBatchResult = Readonly<{
+  events: readonly StoredEvent[];
+  duplicate: boolean;
+}>;
+
 export type ProjectionMutation =
   | Readonly<{ type: "keep" }>
   | Readonly<{ type: "set"; state: JsonValue }>
@@ -242,6 +251,11 @@ type ProjectionApplyBudget = {
   remainingStateBytes: number;
 };
 
+type ProjectionApplyUsage = Readonly<{
+  keys: number;
+  stateBytes: number;
+}>;
+
 export class HarnessEventStore {
   readonly #database: DatabaseSync;
   readonly #insertEvent: StatementSync;
@@ -312,35 +326,74 @@ export class HarnessEventStore {
   }
 
   append(input: EventToAppend): AppendEventResult {
+    const appended = this.appendBatch([input]);
+    const event = appended.events[0];
+    if (event === undefined) {
+      throw new EventStoreError("storage_failure");
+    }
+    return Object.freeze({ event, duplicate: appended.duplicate });
+  }
+
+  appendBatch(input: readonly EventToAppend[]): AppendEventBatchResult {
     this.#assertOpen();
-    const event = normalizeEvent(input);
+    const events = normalizeEventBatch(input);
     try {
       this.#database.exec("BEGIN IMMEDIATE");
-      const existingRow = this.#findByEventId.get(event.eventId);
-      if (existingRow !== undefined) {
-        const existing = decodeStoredEvent(existingRow);
-        if (!storedEventMatches(existing, event)) {
+      const existing = events.map((event) => {
+        const row = this.#findByEventId.get(event.eventId);
+        return row === undefined ? undefined : decodeStoredEvent(row);
+      });
+      const existingCount = existing.filter((event) => event !== undefined).length;
+      if (existingCount > 0) {
+        if (existingCount !== events.length) {
+          throw new EventStoreError("conflict");
+        }
+        const stored = existing as StoredEvent[];
+        if (
+          stored.some((event, index) => !storedEventMatches(event, events[index]!)) ||
+          stored.some(
+            (event, index) => index > 0 && event.sequence !== stored[index - 1]!.sequence + 1,
+          )
+        ) {
           throw new EventStoreError("conflict");
         }
         this.#database.exec("COMMIT");
-        return Object.freeze({ event: existing, duplicate: true });
+        return Object.freeze({ events: Object.freeze(stored), duplicate: true });
       }
 
-      const inserted = this.#insertEvent.run(
-        event.eventId,
-        event.streamType,
-        event.streamId,
-        event.eventType,
-        event.eventVersion,
-        event.occurredAtMs,
-        event.payloadJson,
-        event.metadataJson,
-      );
-      const sequence = safeInteger(inserted.lastInsertRowid);
-      const stored = materializeEvent(sequence, event);
-      applyEventToProjections(this.#database, [...this.#projections.values()], stored);
+      const stored: StoredEvent[] = [];
+      let projectionKeys = 0;
+      let projectionStateBytes = 0;
+      for (const event of events) {
+        const inserted = this.#insertEvent.run(
+          event.eventId,
+          event.streamType,
+          event.streamId,
+          event.eventType,
+          event.eventVersion,
+          event.occurredAtMs,
+          event.payloadJson,
+          event.metadataJson,
+        );
+        const sequence = safeInteger(inserted.lastInsertRowid);
+        const appended = materializeEvent(sequence, event);
+        const usage = applyEventToProjections(
+          this.#database,
+          [...this.#projections.values()],
+          appended,
+        );
+        projectionKeys += usage.keys;
+        projectionStateBytes += usage.stateBytes;
+        if (
+          projectionKeys > MAX_PROJECTION_KEYS_PER_BATCH ||
+          projectionStateBytes > MAX_PROJECTION_STATE_BYTES_PER_BATCH
+        ) {
+          throw new EventStoreError("projection_failure");
+        }
+        stored.push(appended);
+      }
       this.#database.exec("COMMIT");
-      return Object.freeze({ event: stored, duplicate: false });
+      return Object.freeze({ events: Object.freeze(stored), duplicate: false });
     } catch (error: unknown) {
       rollback(this.#database);
       if (error instanceof EventStoreError) {
@@ -1167,11 +1220,15 @@ function applyEventToProjections(
   database: DatabaseSync,
   definitions: readonly NormalizedProjectionDefinition[],
   event: StoredEvent,
-): void {
+): ProjectionApplyUsage {
   const budget = createProjectionApplyBudget();
   for (const definition of definitions) {
     applyEventToProjection(database, definition, event, budget);
   }
+  return Object.freeze({
+    keys: MAX_PROJECTION_KEYS_PER_EVENT - budget.remainingKeys,
+    stateBytes: MAX_PROJECTION_STATE_BYTES_PER_EVENT - budget.remainingStateBytes,
+  });
 }
 
 function applyEventToProjection(
@@ -1397,6 +1454,56 @@ function normalizeEvent(input: unknown): NormalizedEvent {
       payloadJson,
       metadataJson,
     });
+  } catch (error: unknown) {
+    if (error instanceof EventStoreError) {
+      throw error;
+    }
+    throw new EventStoreError("invalid_event");
+  }
+}
+
+function normalizeEventBatch(input: unknown): readonly NormalizedEvent[] {
+  try {
+    if (
+      !Array.isArray(input) ||
+      Object.getPrototypeOf(input) !== Array.prototype ||
+      input.length < 1 ||
+      input.length > MAX_APPEND_BATCH_SIZE
+    ) {
+      throw new EventStoreError("invalid_event");
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    const keys = Reflect.ownKeys(descriptors);
+    const allowed = new Set<string>(["length"]);
+    const values: unknown[] = [];
+    for (let index = 0; index < input.length; index += 1) {
+      const key = String(index);
+      allowed.add(key);
+      const descriptor = descriptors[key];
+      if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new EventStoreError("invalid_event");
+      }
+      values.push(descriptor.value);
+    }
+    if (
+      keys.some((key) => typeof key !== "string" || !allowed.has(key)) ||
+      allowed.size !== keys.length
+    ) {
+      throw new EventStoreError("invalid_event");
+    }
+    const normalized = values.map((event) => normalizeEvent(event));
+    if (new Set(normalized.map((event) => event.eventId)).size !== normalized.length) {
+      throw new EventStoreError("invalid_event");
+    }
+    const totalJsonBytes = normalized.reduce(
+      (total, event) =>
+        total + Buffer.byteLength(event.payloadJson) + Buffer.byteLength(event.metadataJson),
+      0,
+    );
+    if (totalJsonBytes > MAX_APPEND_BATCH_EVENT_JSON_BYTES) {
+      throw new EventStoreError("invalid_event");
+    }
+    return Object.freeze(normalized);
   } catch (error: unknown) {
     if (error instanceof EventStoreError) {
       throw error;
