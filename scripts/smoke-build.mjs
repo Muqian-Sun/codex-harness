@@ -9,5 +9,8 @@ for (const artifact of buildArtifacts) {
   await import(new URL(artifact, import.meta.url));
 }
 
+const { smokeEventStore } = await import("./smoke-event-store.mjs");
+await smokeEventStore();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();

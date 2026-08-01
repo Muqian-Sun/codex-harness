@@ -151,6 +151,8 @@ Markdown 可作为面向用户的导出、快照或审阅格式，但不是调�
 
 持久层采用事件日志与当前投影结合的方式：状态变更先以带序号事件持久化，再在同一事务中更新查询投影。恢复时校验事件连续性和投影版本；无法证明一致的运行进入保守中断状态。
 
+事件日志内核运行在固定 Node 24 daemon 内，并通过窄封装使用内置 `node:sqlite`；该 API 在当前运行时仍标记为 experimental，因此运行时版本、driver 能力与 migration checksum 必须固定验证，领域层不得依赖 driver 类型。数据库使用 WAL、`synchronous=FULL`、foreign keys、`trusted_schema=OFF`、defensive mode、禁扩展和 exclusive locking mode。事件表全局序号严格递增且由 trigger 禁止更新或删除；event ID 的同内容重试幂等，不同内容冲突。数据库文件位于当前用户私有目录且固定为 `0600`，原始 SQL、路径、payload 和底层异常不得进入公开错误。事件 store 在任务投影与恢复门禁完成前保持未接入 daemon 启动路径。
+
 ## 11. Codex App Server 边界
 
 Harness daemon 通过 stdio 上的 JSONL 拥有 Codex App Server worker。每条消息独占一行，stdout 只解析协议；stderr 单独采集并脱敏。连接必须先完成 `initialize`，再发送 `initialized`，之后才允许 thread、turn、模型查询、审批和事件处理。
