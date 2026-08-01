@@ -8,3 +8,6 @@ const buildArtifacts = [
 for (const artifact of buildArtifacts) {
   await import(new URL(artifact, import.meta.url));
 }
+
+const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
+await smokeDaemonRuntime();
