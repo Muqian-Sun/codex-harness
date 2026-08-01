@@ -11,6 +11,11 @@ export async function smokeTaskPlanStore() {
     const { TaskPlanStore } = await import("../apps/harnessd/dist/domain/task-plan-store.js");
     const { buildTaskRecoveryCapsule, isTaskRecoveryCapsuleCurrent } =
       await import("../apps/harnessd/dist/domain/task-recovery-context.js");
+    const {
+      applyTaskRecoveryLifecycleSignal,
+      createTaskRecoveryBoundary,
+      prepareNextTurnRecovery,
+    } = await import("../apps/harnessd/dist/domain/task-recovery-boundary.js");
     store = await TaskPlanStore.open({ path, now: () => 1_750_000_000_000 });
     store.createTask({
       eventId: "00000000-0000-4000-8000-000000000003",
@@ -131,6 +136,32 @@ export async function smokeTaskPlanStore() {
       !isTaskRecoveryCapsuleCurrent(task, recoveryCapsule)
     ) {
       throw new Error("The compiled task recovery capsule smoke result was invalid.");
+    }
+    let recoveryBoundary = createTaskRecoveryBoundary({
+      taskId: task.taskId,
+      threadId: "thread-smoke",
+      turnId: "turn-smoke",
+    });
+    recoveryBoundary = applyTaskRecoveryLifecycleSignal(recoveryBoundary, {
+      type: "context_compaction_started",
+      threadId: "thread-smoke",
+      turnId: "turn-smoke",
+      itemId: "compaction-smoke",
+    });
+    recoveryBoundary = applyTaskRecoveryLifecycleSignal(recoveryBoundary, {
+      type: "turn_completed",
+      threadId: "thread-smoke",
+      turnId: "turn-smoke",
+      status: "completed",
+      contextCompactionItemIds: ["compaction-smoke"],
+    });
+    const preparation = prepareNextTurnRecovery(recoveryBoundary, task, recoveryCapsule);
+    if (
+      preparation.kind !== "ready" ||
+      preparation.resultTrust !== "revalidation_required" ||
+      preparation.fence.digest !== recoveryCapsule.fence.digest
+    ) {
+      throw new Error("The compiled task recovery boundary smoke result was invalid.");
     }
   } finally {
     store?.close();

@@ -130,6 +130,8 @@ V1 恢复胶囊只生成符合固定 App Server Schema 的单个 `turn/start` te
 
 外部 Harness 无法在模型同一轮发生上下文压缩后透明修改其正在进行的推理。V1 只保证在下一个安全轮次边界重新注入状态，并把压缩后、重新注入前产生的输出标记为需要重新验证。
 
+安全轮次恢复门禁使用固定 Task/thread/turn 绑定，确定性归并经过适配器校验的生命周期信号。重复信号幂等，乱序的 started/completed/turn-summary 压缩事实只累加、不回退；错绑定和冲突终止状态保守失败，单个 turn 最多保存 1,024 个不同压缩 item 的观察事实。活动 turn 始终禁止恢复，任一 `completed`、`interrupted` 或 `failed` 终止边界都要求下一 turn 重新注入权威胶囊，而不是只在已观察到压缩时恢复；观察到任一压缩事实时，当前 turn 结果还必须标记为需要重新验证。准备下一轮时重新比较最新 Task 与恢复胶囊 freshness，只有终止边界、Task 绑定和新鲜胶囊同时成立才产生冻结的准备结果。该结果不是可长期缓存的授权，实际发送方仍必须在同一串行临界区立即复核并构造 `turn/start`。门禁内核本身不建立 Run 映射、不调用 App Server，也不把 turn 终止解释为节点证据通过。
+
 在固定的 App Server 协议中，`thread/compact/start` 只表示开始压缩并立即返回空结果，实际生命周期通过 `turn/*`、`item/*` 和 `contextCompaction` item 事件观察；`turn/steer` 只会追加到仍在执行的当前 turn，不能作为压缩后的同轮修复通道。因此协调器必须等待 `turn/completed` 等可证明的安全边界，再把 freshness fence 仍有效的胶囊加入下一次 `turn/start`；不得承诺在正在执行的 turn 内透明修复。
 
 ## 9. 智能模型路由
