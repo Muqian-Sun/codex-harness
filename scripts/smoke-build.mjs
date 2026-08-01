@@ -21,6 +21,10 @@ await smokeModelRoutingConfiguration();
 const { smokeModelRouteClassifier } = await import("./smoke-model-route-classifier.mjs");
 await smokeModelRouteClassifier();
 
+const { smokeShadowRouteFeatureSnapshot } =
+  await import("./smoke-shadow-route-feature-snapshot.mjs");
+await smokeShadowRouteFeatureSnapshot();
+
 const { smokeModelCatalog } = await import("./smoke-model-catalog.mjs");
 await smokeModelCatalog();
 
