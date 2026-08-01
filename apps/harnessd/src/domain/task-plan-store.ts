@@ -8,13 +8,27 @@ import {
   type ProjectionDefinition,
   type StoredEvent,
 } from "../persistence/event-store.js";
+import {
+  TaskGraphValidationError,
+  decodeTaskGraphRevision,
+  materializeTaskGraph,
+  normalizeTaskGraphDraft,
+  type TaskGraphDraft,
+  type TaskGraphRevision,
+} from "./task-graph.js";
 
 const TASK_STREAM_TYPE = "task.plan";
 const TASK_PROJECTION_NAME = "task.current_plan";
 const TASK_CREATED = "task.created";
 const REQUIREMENTS_REVISED = "task.requirements_revised";
 const PLAN_REVISED = "task.plan_revised";
-const TASK_EVENT_TYPES = new Set([TASK_CREATED, REQUIREMENTS_REVISED, PLAN_REVISED]);
+const GRAPH_COMMITTED = "task.graph_committed";
+const TASK_EVENT_TYPES = new Set([
+  TASK_CREATED,
+  REQUIREMENTS_REVISED,
+  PLAN_REVISED,
+  GRAPH_COMMITTED,
+]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_TITLE_BYTES = 256;
 const MAX_SOURCE_TEXT_BYTES = 64 * 1024;
@@ -60,6 +74,8 @@ export type TaskPlanRecord = Readonly<{
   activeRequirement: RequirementRevision;
   latestPlan: PlanRevision | null;
   confirmedPlan: PlanRevision | null;
+  activeGraph: TaskGraphRevision | null;
+  lastGraphRevisionNumber: number;
 }>;
 
 export type RequirementDraft = Readonly<{
@@ -106,6 +122,16 @@ export type RevisePlanInput = Readonly<{
   metadata?: EventMetadata;
 }>;
 
+export type CommitTaskGraphInput = Readonly<{
+  eventId: string;
+  taskId: string;
+  occurredAtMs: number;
+  expectedTaskVersion: number;
+  previousGraphRevisionId: string | null;
+  graph: TaskGraphDraft;
+  metadata?: EventMetadata;
+}>;
+
 export type TaskCommandResult = Readonly<{
   duplicate: boolean;
   event: StoredEvent;
@@ -141,7 +167,7 @@ export class TaskPlanError extends Error {
 
 const TASK_PROJECTION: ProjectionDefinition = Object.freeze({
   name: TASK_PROJECTION_NAME,
-  version: 1,
+  version: 2,
   selectKeys: (event) =>
     event.streamType === TASK_STREAM_TYPE &&
     TASK_EVENT_TYPES.has(event.eventType) &&
@@ -233,6 +259,26 @@ export class TaskPlanStore {
         expectedTaskVersion: normalized.expectedTaskVersion,
         previousPlanRevisionId: normalized.previousPlanRevisionId,
         plan: requireJsonValue(normalized.plan),
+      },
+      ...(normalized.metadata === undefined ? {} : { metadata: normalized.metadata }),
+    });
+  }
+
+  commitTaskGraph(input: CommitTaskGraphInput): TaskCommandResult {
+    this.#assertOpen();
+    const normalized = normalizeCommitTaskGraphInput(input);
+    return this.#appendAndRead({
+      eventId: normalized.eventId,
+      streamType: TASK_STREAM_TYPE,
+      streamId: normalized.taskId,
+      eventType: GRAPH_COMMITTED,
+      eventVersion: 1,
+      occurredAtMs: normalized.occurredAtMs,
+      payload: {
+        taskId: normalized.taskId,
+        expectedTaskVersion: normalized.expectedTaskVersion,
+        previousGraphRevisionId: normalized.previousGraphRevisionId,
+        graph: requireJsonValue(normalized.graph),
       },
       ...(normalized.metadata === undefined ? {} : { metadata: normalized.metadata }),
     });
@@ -339,6 +385,8 @@ function reduceTaskEvent(current: JsonValue | undefined, event: StoredEvent): Ta
       activeRequirement: Object.freeze({ ...requirement, revisionNumber: 1 }),
       latestPlan: null,
       confirmedPlan: null,
+      activeGraph: null,
+      lastGraphRevisionNumber: 0,
     });
   }
 
@@ -376,6 +424,7 @@ function reduceTaskEvent(current: JsonValue | undefined, event: StoredEvent): Ta
         revisionNumber: incrementVersion(task.activeRequirement.revisionNumber),
       }),
       latestPlan: null,
+      activeGraph: null,
     });
   }
   if (event.eventType === PLAN_REVISED) {
@@ -410,7 +459,49 @@ function reduceTaskEvent(current: JsonValue | undefined, event: StoredEvent): Ta
       taskVersion: incrementVersion(task.taskVersion),
       updatedAtMs: event.occurredAtMs,
       latestPlan: revision,
-      ...(revision.status === "confirmed" ? { confirmedPlan: revision } : {}),
+      ...(revision.status === "confirmed"
+        ? {
+            confirmedPlan: revision,
+            activeGraph: null,
+          }
+        : {}),
+    });
+  }
+  if (event.eventType === GRAPH_COMMITTED) {
+    const payload = requireRecord(event.payload, [
+      "expectedTaskVersion",
+      "graph",
+      "previousGraphRevisionId",
+      "taskId",
+    ]);
+    const previousGraphRevisionId = requireNullableUuid(payload.previousGraphRevisionId);
+    if (
+      requireUuid(payload.taskId) !== task.taskId ||
+      requirePositiveInteger(payload.expectedTaskVersion) !== task.taskVersion ||
+      previousGraphRevisionId !== (task.activeGraph?.revisionId ?? null) ||
+      task.confirmedPlan === null ||
+      task.confirmedPlan.basedOnRequirementRevisionId !== task.activeRequirement.revisionId
+    ) {
+      throw new TaskPlanError("conflict");
+    }
+    const graph = requireTaskGraphDraft(
+      payload.graph,
+      task.confirmedPlan.steps.map((step) => step.stepId),
+    );
+    if (
+      graph.revisionId !== event.eventId ||
+      graph.basedOnPlanRevisionId !== task.confirmedPlan.revisionId ||
+      graph.revisionId === previousGraphRevisionId
+    ) {
+      throw new TaskPlanError("conflict");
+    }
+    const revisionNumber = incrementVersion(task.lastGraphRevisionNumber);
+    return freezeTask({
+      ...task,
+      taskVersion: incrementVersion(task.taskVersion),
+      updatedAtMs: event.occurredAtMs,
+      activeGraph: requireTaskGraphRevision(graph, revisionNumber),
+      lastGraphRevisionNumber: revisionNumber,
     });
   }
   throw new TaskPlanError("conflict");
@@ -502,6 +593,31 @@ function normalizeRevisePlanInput(input: unknown): RevisePlanInput {
     expectedTaskVersion: requirePositiveInteger(record.expectedTaskVersion),
     previousPlanRevisionId: requireNullableUuid(record.previousPlanRevisionId),
     plan,
+    ...(record.metadata === undefined ? {} : { metadata: record.metadata as EventMetadata }),
+  });
+}
+
+function normalizeCommitTaskGraphInput(input: unknown): CommitTaskGraphInput {
+  const record = normalizeCommandRecord(input, [
+    "eventId",
+    "expectedTaskVersion",
+    "graph",
+    "occurredAtMs",
+    "previousGraphRevisionId",
+    "taskId",
+  ]);
+  const eventId = requireUuid(record.eventId);
+  const graph = requireTaskGraphDraft(record.graph);
+  if (eventId !== graph.revisionId) {
+    throw new TaskPlanError("invalid_input");
+  }
+  return Object.freeze({
+    eventId,
+    taskId: requireUuid(record.taskId),
+    occurredAtMs: requireNonNegativeInteger(record.occurredAtMs),
+    expectedTaskVersion: requirePositiveInteger(record.expectedTaskVersion),
+    previousGraphRevisionId: requireNullableUuid(record.previousGraphRevisionId),
+    graph,
     ...(record.metadata === undefined ? {} : { metadata: record.metadata as EventMetadata }),
   });
 }
@@ -609,8 +725,10 @@ function decodeTaskRecord(input: unknown): TaskPlanRecord {
     }
     const record = requireRecord(input, [
       "activeRequirement",
+      "activeGraph",
       "confirmedPlan",
       "createdAtMs",
+      "lastGraphRevisionNumber",
       "latestPlan",
       "taskId",
       "taskVersion",
@@ -621,6 +739,16 @@ function decodeTaskRecord(input: unknown): TaskPlanRecord {
     const latestPlan = record.latestPlan === null ? null : decodePlanRevision(record.latestPlan);
     const confirmedPlan =
       record.confirmedPlan === null ? null : decodePlanRevision(record.confirmedPlan);
+    let activeGraph: TaskGraphRevision | null = null;
+    if (record.activeGraph !== null) {
+      if (confirmedPlan === null) {
+        throw new TaskPlanError("storage_failure");
+      }
+      activeGraph = requireDecodedTaskGraphRevision(
+        record.activeGraph,
+        confirmedPlan.steps.map((step) => step.stepId),
+      );
+    }
     if (confirmedPlan !== null && confirmedPlan.status !== "confirmed") {
       throw new TaskPlanError("storage_failure");
     }
@@ -633,6 +761,8 @@ function decodeTaskRecord(input: unknown): TaskPlanRecord {
       activeRequirement,
       latestPlan,
       confirmedPlan,
+      activeGraph,
+      lastGraphRevisionNumber: requireNonNegativeInteger(record.lastGraphRevisionNumber),
     });
     if (
       decoded.createdAtMs > decoded.updatedAtMs ||
@@ -640,7 +770,13 @@ function decodeTaskRecord(input: unknown): TaskPlanRecord {
       (decoded.latestPlan !== null &&
         decoded.latestPlan.basedOnRequirementRevisionId !== decoded.activeRequirement.revisionId) ||
       (decoded.latestPlan?.status === "confirmed" &&
-        decoded.latestPlan.revisionId !== decoded.confirmedPlan?.revisionId)
+        decoded.latestPlan.revisionId !== decoded.confirmedPlan?.revisionId) ||
+      decoded.lastGraphRevisionNumber > decoded.taskVersion ||
+      (decoded.activeGraph !== null &&
+        (decoded.activeGraph.revisionNumber !== decoded.lastGraphRevisionNumber ||
+          decoded.activeGraph.basedOnPlanRevisionId !== decoded.confirmedPlan?.revisionId ||
+          decoded.confirmedPlan?.basedOnRequirementRevisionId !==
+            decoded.activeRequirement.revisionId))
     ) {
       throw new TaskPlanError("storage_failure");
     }
@@ -688,6 +824,41 @@ function decodePlanRevision(input: unknown): PlanRevision {
     }),
     revisionNumber: requirePositiveInteger(record.revisionNumber),
   });
+}
+
+function requireTaskGraphDraft(
+  input: unknown,
+  allowedPlanStepIds?: readonly string[],
+): TaskGraphDraft {
+  try {
+    return normalizeTaskGraphDraft(input, allowedPlanStepIds);
+  } catch (error: unknown) {
+    if (error instanceof TaskGraphValidationError) {
+      throw new TaskPlanError("invalid_input");
+    }
+    throw error;
+  }
+}
+
+function requireTaskGraphRevision(
+  draft: TaskGraphDraft,
+  revisionNumber: number,
+): TaskGraphRevision {
+  try {
+    return materializeTaskGraph(draft, revisionNumber);
+  } catch (error: unknown) {
+    if (error instanceof TaskGraphValidationError) {
+      throw new TaskPlanError("conflict");
+    }
+    throw error;
+  }
+}
+
+function requireDecodedTaskGraphRevision(
+  input: unknown,
+  allowedPlanStepIds: readonly string[],
+): TaskGraphRevision {
+  return decodeTaskGraphRevision(input, allowedPlanStepIds);
 }
 
 function freezeTask(input: TaskPlanRecord): TaskPlanRecord {

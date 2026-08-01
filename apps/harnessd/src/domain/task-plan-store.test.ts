@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { HarnessEventStore, type ProjectionDefinition } from "../persistence/event-store.js";
+import type { TaskGraphDraft } from "./task-graph.js";
 import {
   TaskPlanError,
   TaskPlanStore,
@@ -57,6 +59,22 @@ function plan(
       },
     ],
     ...overrides,
+  };
+}
+
+function taskGraph(planRevision: PlanRevisionDraft): TaskGraphDraft {
+  const nodeIds = planRevision.steps.map(() => randomUUID());
+  return {
+    revisionId: randomUUID(),
+    basedOnPlanRevisionId: planRevision.revisionId,
+    nodes: planRevision.steps.map((step, index) => ({
+      nodeId: nodeIds[index]!,
+      sourcePlanStepId: step.stepId,
+      title: step.title,
+      description: step.description,
+      acceptanceCriteria: step.acceptanceCriteria,
+      dependsOnNodeIds: index === 0 ? [] : [nodeIds[index - 1]!],
+    })),
   };
 }
 
@@ -331,6 +349,322 @@ describe("persistent task and plan store", () => {
     expect(store.listTasks(firstId, 1).map((task) => task.taskId)).toEqual([secondId]);
     expect(() => store.readTask(randomUUID())).toThrowError(TaskPlanError);
     expect(() => store.readTask("invalid")).toThrowError(TaskPlanError);
+  });
+
+  it("commits a validated DAG with pending nodes and recovers it after reopening", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const input = createInput();
+    const created = store.createTask(input);
+    const confirmed = plan(input.requirement.revisionId, {
+      status: "confirmed",
+      steps: [
+        ...plan(input.requirement.revisionId).steps,
+        {
+          stepId: randomUUID(),
+          title: "恢复节点",
+          description: "重启后恢复 DAG。",
+          acceptanceCriteria: ["拓扑序保持稳定"],
+        },
+      ],
+    });
+    const planned = store.revisePlan({
+      eventId: confirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: confirmed,
+    });
+    const graph = taskGraph(confirmed);
+    const committed = store.commitTaskGraph({
+      eventId: graph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: planned.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph,
+    });
+
+    expect(committed.task).toMatchObject({
+      taskVersion: 3,
+      lastGraphRevisionNumber: 1,
+      activeGraph: {
+        revisionId: graph.revisionId,
+        revisionNumber: 1,
+        basedOnPlanRevisionId: confirmed.revisionId,
+      },
+    });
+    expect(committed.task.activeGraph?.nodes.map((node) => node.status)).toEqual([
+      "pending",
+      "pending",
+    ]);
+    expect(committed.task.activeGraph?.topologicalOrder).toEqual(
+      graph.nodes.map((node) => node.nodeId),
+    );
+    store.close();
+
+    const reopened = await openStore(path);
+    expect(reopened.readTask(input.taskId)).toEqual(committed.task);
+  });
+
+  it("keeps a graph for a candidate plan but invalidates it on confirmed plan or requirement changes", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const input = createInput();
+    const created = store.createTask(input);
+    const firstConfirmed = plan(input.requirement.revisionId, { status: "confirmed" });
+    const firstPlan = store.revisePlan({
+      eventId: firstConfirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: firstConfirmed,
+    });
+    const firstGraph = taskGraph(firstConfirmed);
+    const firstCommitted = store.commitTaskGraph({
+      eventId: firstGraph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: firstPlan.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph: firstGraph,
+    });
+    const candidate = plan(input.requirement.revisionId);
+    const candidateResult = store.revisePlan({
+      eventId: candidate.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 3,
+      expectedTaskVersion: firstCommitted.task.taskVersion,
+      previousPlanRevisionId: firstConfirmed.revisionId,
+      plan: candidate,
+    });
+    expect(candidateResult.task.activeGraph?.revisionId).toBe(firstGraph.revisionId);
+
+    const secondConfirmed = plan(input.requirement.revisionId, {
+      status: "confirmed",
+      steps: candidate.steps,
+    });
+    const secondPlan = store.revisePlan({
+      eventId: secondConfirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 4,
+      expectedTaskVersion: candidateResult.task.taskVersion,
+      previousPlanRevisionId: candidate.revisionId,
+      plan: secondConfirmed,
+    });
+    expect(secondPlan.task).toMatchObject({ activeGraph: null, lastGraphRevisionNumber: 1 });
+
+    const secondGraph = taskGraph(secondConfirmed);
+    const secondCommitted = store.commitTaskGraph({
+      eventId: secondGraph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 5,
+      expectedTaskVersion: secondPlan.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph: secondGraph,
+    });
+    expect(secondCommitted.task.activeGraph?.revisionNumber).toBe(2);
+
+    const revisedRequirement = requirement();
+    const revised = store.reviseRequirements({
+      eventId: revisedRequirement.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 6,
+      expectedTaskVersion: secondCommitted.task.taskVersion,
+      previousRequirementRevisionId: input.requirement.revisionId,
+      requirement: revisedRequirement,
+    });
+    expect(revised.task).toMatchObject({ activeGraph: null, lastGraphRevisionNumber: 2 });
+  });
+
+  it("keeps graph retries idempotent and rolls back invalid graph commands", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const input = createInput();
+    const created = store.createTask(input);
+    const confirmed = plan(input.requirement.revisionId, { status: "confirmed" });
+    const planned = store.revisePlan({
+      eventId: confirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: confirmed,
+    });
+    const graph = taskGraph(confirmed);
+    const command = {
+      eventId: graph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: planned.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph,
+    };
+    const committed = store.commitTaskGraph(command);
+    const candidate = plan(input.requirement.revisionId);
+    store.revisePlan({
+      eventId: candidate.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 3,
+      expectedTaskVersion: committed.task.taskVersion,
+      previousPlanRevisionId: confirmed.revisionId,
+      plan: candidate,
+    });
+
+    expect(store.commitTaskGraph(command)).toMatchObject({
+      duplicate: true,
+      task: { taskVersion: 4 },
+    });
+    const invalidGraph = taskGraph(confirmed);
+    expect(() =>
+      store.commitTaskGraph({
+        ...command,
+        eventId: invalidGraph.revisionId,
+        expectedTaskVersion: 4,
+        previousGraphRevisionId: graph.revisionId,
+        graph: {
+          ...invalidGraph,
+          nodes: invalidGraph.nodes.map((node) => ({
+            ...node,
+            dependsOnNodeIds: [node.nodeId],
+          })),
+        },
+      }),
+    ).toThrowError(TaskPlanError);
+    const wrongPlanGraph = {
+      ...taskGraph(confirmed),
+      basedOnPlanRevisionId: randomUUID(),
+    };
+    expect(() =>
+      store.commitTaskGraph({
+        eventId: wrongPlanGraph.revisionId,
+        taskId: input.taskId,
+        occurredAtMs: input.occurredAtMs + 4,
+        expectedTaskVersion: 4,
+        previousGraphRevisionId: graph.revisionId,
+        graph: wrongPlanGraph,
+      }),
+    ).toThrowError(TaskPlanError);
+    expect(store.inspect()).toMatchObject({ eventCount: 4, lastSequence: 4 });
+  });
+
+  it("rebuilds a legacy v1 task projection into the v2 graph-aware shape", async () => {
+    const path = await privateDatabasePath();
+    const input = createInput();
+    const legacyProjection: ProjectionDefinition = {
+      name: "task.current_plan",
+      version: 1,
+      selectKeys: (event) =>
+        event.streamType === "task.plan" && event.eventType === "task.created"
+          ? [event.streamId]
+          : [],
+      reduce: ({ event }) => ({
+        type: "set",
+        state: {
+          taskId: input.taskId,
+          title: input.title,
+          taskVersion: 1,
+          createdAtMs: event.occurredAtMs,
+          updatedAtMs: event.occurredAtMs,
+          activeRequirement: {
+            ...input.requirement,
+            constraints: [...input.requirement.constraints],
+            acceptanceCriteria: [...input.requirement.acceptanceCriteria],
+            revisionNumber: 1,
+          },
+          latestPlan: null,
+          confirmedPlan: null,
+        },
+      }),
+    };
+    const legacy = await HarnessEventStore.open({ path, projections: [legacyProjection] });
+    legacy.append({
+      eventId: input.eventId,
+      streamType: "task.plan",
+      streamId: input.taskId,
+      eventType: "task.created",
+      eventVersion: 1,
+      occurredAtMs: input.occurredAtMs,
+      payload: {
+        taskId: input.taskId,
+        title: input.title,
+        requirement: {
+          ...input.requirement,
+          constraints: [...input.requirement.constraints],
+          acceptanceCriteria: [...input.requirement.acceptanceCriteria],
+        },
+      },
+    });
+    legacy.close();
+
+    const upgraded = await openStore(path);
+    expect(upgraded.readTask(input.taskId)).toMatchObject({
+      taskVersion: 1,
+      activeGraph: null,
+      lastGraphRevisionNumber: 0,
+    });
+  });
+
+  it("keeps a near-limit requirement, confirmed plan, and graph within the projection budget", async () => {
+    const path = await privateDatabasePath();
+    const store = await openStore(path);
+    const largeRequirement = requirement({
+      sourceText: "s".repeat(64 * 1024),
+      objective: "o".repeat(16 * 1024),
+      constraints: Array.from({ length: 40 }, () => "c".repeat(4 * 1024)),
+      acceptanceCriteria: Array.from({ length: 2 }, () => "a".repeat(4 * 1024)),
+    });
+    const input = createInput({
+      eventId: largeRequirement.revisionId,
+      requirement: largeRequirement,
+    });
+    const created = store.createTask(input);
+    const steps = Array.from({ length: 30 }, (_, index) => ({
+      stepId: randomUUID(),
+      title: `步骤 ${index + 1}`,
+      description: "p".repeat(8 * 1024),
+      acceptanceCriteria: ["验证容量"],
+    }));
+    const confirmed = plan(input.requirement.revisionId, { status: "confirmed", steps });
+    const planned = store.revisePlan({
+      eventId: confirmed.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 1,
+      expectedTaskVersion: created.task.taskVersion,
+      previousPlanRevisionId: null,
+      plan: confirmed,
+    });
+    const nodeIds = steps.map(() => randomUUID());
+    const graph = {
+      revisionId: randomUUID(),
+      basedOnPlanRevisionId: confirmed.revisionId,
+      nodes: steps.map((step, index) => ({
+        nodeId: nodeIds[index]!,
+        sourcePlanStepId: step.stepId,
+        title: step.title,
+        description: "g".repeat(2 * 1024),
+        acceptanceCriteria: ["验证组合投影容量"],
+        dependsOnNodeIds: index === 0 ? [] : [nodeIds[index - 1]!],
+      })),
+    };
+
+    const committed = store.commitTaskGraph({
+      eventId: graph.revisionId,
+      taskId: input.taskId,
+      occurredAtMs: input.occurredAtMs + 2,
+      expectedTaskVersion: planned.task.taskVersion,
+      previousGraphRevisionId: null,
+      graph,
+    });
+    expect(committed.task).toMatchObject({
+      taskVersion: 3,
+      activeGraph: { revisionId: graph.revisionId },
+    });
+    const projectedBytes = Buffer.byteLength(JSON.stringify(committed.task), "utf8");
+    expect(projectedBytes).toBeGreaterThan(750 * 1024);
+    expect(projectedBytes).toBeLessThan(1024 * 1024);
   });
 
   it("closes idempotently and rejects later operations", async () => {
