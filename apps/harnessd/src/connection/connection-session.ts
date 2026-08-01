@@ -4,6 +4,7 @@ import {
   APPLICATION_PROTOCOL_VERSION,
   BOOTSTRAP_WIRE_VERSION,
   INTERNAL_ERROR_PUBLIC_MESSAGE,
+  JsonlFrameDecoder,
   MAX_FRAME_BYTES,
   ProductVersionSchema,
   RPC_ERROR_CODES,
@@ -16,7 +17,6 @@ import {
   type JsonValue,
 } from "@codex-harness/protocol";
 
-import { JsonlFrameDecoder } from "./frame-decoder.js";
 import { generateStreamId, startupCapabilitiesEqual } from "./identifiers.js";
 import { dispatchRpcRequest } from "./rpc-dispatcher.js";
 

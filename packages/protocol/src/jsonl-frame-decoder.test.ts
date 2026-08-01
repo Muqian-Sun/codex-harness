@@ -1,10 +1,10 @@
 import { TextEncoder } from "node:util";
 
-import { MAX_FRAME_BYTES } from "@codex-harness/protocol";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { JsonlFrameDecoder } from "./frame-decoder.js";
+import { MAX_FRAME_BYTES } from "./constants.js";
+import { JsonlFrameDecoder } from "./jsonl-frame-decoder.js";
 
 const encoder = new TextEncoder();
 
