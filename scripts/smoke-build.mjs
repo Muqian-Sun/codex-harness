@@ -25,5 +25,9 @@ const { smokeModelRoutingProfileRepository } =
   await import("./smoke-model-routing-profile-repository.mjs");
 await smokeModelRoutingProfileRepository();
 
+const { smokeShadowRouteDecisionRepository } =
+  await import("./smoke-shadow-route-decision-repository.mjs");
+await smokeShadowRouteDecisionRepository();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();
