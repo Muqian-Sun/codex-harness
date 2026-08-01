@@ -146,6 +146,8 @@ Harness 只使用逻辑档位：
 
 模型配置领域内核把用户输入规范化为版本化的完整三档映射。每个配置修订包含 UUID、正整数修订序号以及 `fast`、`standard`、`deep` 三个必填目标；每个目标严格包含 provider、model 和 reasoning effort。Harness 允许用户把多个逻辑档位映射到同一实际目标，不根据名称猜测模型强弱。解析逻辑只接受逻辑档位，并返回包含配置修订和实际目标的冻结快照；它不选择权限、不查询模型目录，也不在配置无效或不可用时静默回退。当前纯内核只证明单个对象结构合法；跨修订序号单调性由后续持久化提交门禁保证，账户可用性、模型目录、预算、限流和执行前复核属于后续策略与运行时门禁。
 
+模型路由配置以稳定 profile ID 形成独立事件流，当前投影保存 profile version、活动配置和创建/更新时间。首次配置必须从 version 0 提交 revision 1；后续配置同时校验期望 profile version、前一 revision ID、严格加一的新 revision number 和不回退的事件时间。配置 revision ID 同时作为 event ID，完整相同重试幂等，stale fence、跳号或冲突内容整体回滚。路由 profile repository 接受 daemon 统一拥有的事件库并要求对应投影已经注册，不自行打开或关闭 SQLite；active profile 与 Project 的绑定、模型目录和 RouteDecision 仍属于后续能力。
+
 影子路由内核使用固定策略版本和结构化特征快照确定性计算候选档位。简单且低复杂度、低歧义、局部、短步骤、少工具的任务可选择 `fast`；一般代码变更和常规分析至少选择 `standard`；架构决策、系统性诊断、高复杂度、跨系统、高歧义、长步骤或广泛工具任务选择 `deep`。安全敏感、数据迁移、并发敏感、公共 API 变更、生产影响、不可逆操作或权限边界变更中的任一信号都会把安全下限提升到 `deep`；最终档位只能取候选档位与安全下限中的较高者。输出保存冻结的输入特征、稳定理由码、配置修订与实际模型快照，并固定为 `shadow` 且不可执行。该纯内核不证明特征来源；模型或用户提供的低风险声明不能直接成为权威安全事实，来源协调、模型目录和执行前复核完成前不得接入运行路径。
 
 路由按以下顺序决策：
@@ -174,6 +176,8 @@ Markdown 可作为面向用户的导出、快照或审阅格式，但不是调�
 事件日志内核运行在固定 Node 24 daemon 内，并通过窄封装使用内置 `node:sqlite`；该 API 在当前运行时仍标记为 experimental，因此运行时版本、driver 能力与 migration checksum 必须固定验证，领域层不得依赖 driver 类型。数据库使用 WAL、`synchronous=FULL`、foreign keys、`trusted_schema=OFF`、defensive mode、禁扩展和 exclusive locking mode。事件表全局序号严格递增且由 trigger 禁止更新或删除；event ID 的同内容重试幂等，不同内容冲突。数据库文件位于当前用户私有目录且固定为 `0600`，原始 SQL、路径、payload 和底层异常不得进入公开错误。事件 store 在任务投影与恢复门禁完成前保持未接入 daemon 启动路径。
 
 投影使用注册时固定的名称、版本、事件选键函数和同步 reducer。新增事件、所有已注册投影状态和各自 checkpoint 必须在同一写事务内提交；任一 reducer 失败或返回非法结果时整体回滚。投影输入是递归冻结的事件与当前 JSON 状态，输出只允许 `keep`、`set` 或 `delete`，并经过与事件相同的有界 JSON 和 canonical 序列化检查；单个事件跨全部投影还共享 key 数和状态字节预算，防止放大写入。打开数据库时先以只读方式验证既有 migration 前缀、对应版本 schema、事件连续性和投影结构，再逐级迁移并处理恢复：缺失 checkpoint 全量回放、同版本落后 checkpoint 增量追赶、版本变化清空对应状态并全量重建，checkpoint 超前或状态来源序号越界则保守失败。未注册投影保留但不执行；具体任务投影仍需在后续 PR 提供自己的确定性回放测试，完成前事件 store 继续不接入 daemon 启动路径。
+
+领域 repository 不得各自拥有同一数据库的独立 writer。路由 profile repository 采用注入式事件库并在任何 append 前验证投影已经注册，数据库生命周期保留给调用方；未来 daemon 存储协调器必须把 Task、路由、Run、审批和证据投影一次性注册到同一个 `HarnessEventStore`。早期 `TaskPlanStore` 的独立包装在统一协调器交付前仍不与该 repository 同时接入生产路径。
 
 需要原子切换多个领域修订时，事件 store 提供有界批次追加：单批 1–16 个事件在事务前全部完成规范化、批内 event ID 唯一和 4 MiB 聚合 JSON 校验，再按输入顺序分配连续全局序号并逐事件更新投影。批次保留每事件投影预算，并额外限制整批最多 4,000 个投影 key 和 8 MiB 投影状态写入。幂等重试只接受整批事件均已存在、内容逐项相同且序号连续；部分存在、内容冲突、顺序异常或任一 reducer 失败都会回滚，禁止自动补写半个批次。该原语用于后续把 Requirement、confirmed Plan 和 Graph Revision 作为一个可恢复状态转换提交，不改变事件格式或 SQLite schema。
 
@@ -252,7 +256,7 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
-7. 模型配置和影子路由：三档配置、确定性解析以及带安全下限的影子分类内核已完成，特征来源、持久化、目录策略和影子评估待后续 PR。
+7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化以及带安全下限的影子分类内核已完成；active profile 绑定、特征来源、RouteDecision 审计、目录策略和影子评估待后续 PR。
 8. 串行调度。
 9. 安全 Electron 桌面壳与任务 UI。
 10. 审批、证据、运行恢复和打包门禁。
