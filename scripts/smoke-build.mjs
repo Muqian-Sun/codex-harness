@@ -18,5 +18,8 @@ await smokeTaskPlanStore();
 const { smokeModelRoutingConfiguration } = await import("./smoke-model-routing-config.mjs");
 await smokeModelRoutingConfiguration();
 
+const { smokeModelRouteClassifier } = await import("./smoke-model-route-classifier.mjs");
+await smokeModelRouteClassifier();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();
