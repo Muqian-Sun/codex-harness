@@ -6,7 +6,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { EventStoreError, HarnessEventStore, type EventToAppend } from "./event-store.js";
+import {
+  EventStoreError,
+  HarnessEventStore,
+  type EventToAppend,
+  type ProjectionDefinition,
+} from "./event-store.js";
 
 const temporaryDirectories: string[] = [];
 const stores: HarnessEventStore[] = [];
@@ -20,15 +25,58 @@ async function privateDatabasePath(): Promise<{ directory: string; path: string 
 
 async function openStore(
   path: string,
-  options?: Readonly<{ busyTimeoutMs?: number }>,
+  options?: Readonly<{
+    busyTimeoutMs?: number;
+    projections?: readonly ProjectionDefinition[];
+  }>,
 ): Promise<HarnessEventStore> {
   const store = await HarnessEventStore.open({
     path,
     busyTimeoutMs: options?.busyTimeoutMs ?? 100,
     now: () => 1_750_000_000_000,
+    ...(options?.projections === undefined ? {} : { projections: options.projections }),
   });
   stores.push(store);
   return store;
+}
+
+function counterProjection(
+  version = 1,
+  increment = 1,
+  name = "task.counter",
+): ProjectionDefinition {
+  return {
+    name,
+    version,
+    selectKeys: (stored) => (stored.streamType === "task" ? ["summary"] : []),
+    reduce: ({ current, event: stored }) => {
+      const count =
+        typeof current === "object" &&
+        current !== null &&
+        !Array.isArray(current) &&
+        typeof current.count === "number"
+          ? current.count
+          : 0;
+      return {
+        type: "set",
+        state: { count: count + increment, lastEventType: stored.eventType },
+      };
+    },
+  };
+}
+
+function downgradeToSchemaV1(path: string): void {
+  const raw = new DatabaseSync(path);
+  raw.exec("DROP TABLE projection_state");
+  raw.exec("DROP TRIGGER schema_migrations_no_delete");
+  raw.exec("DELETE FROM schema_migrations WHERE version = 2");
+  raw.exec(`CREATE TRIGGER schema_migrations_no_delete
+BEFORE DELETE ON schema_migrations
+BEGIN
+  SELECT RAISE(ABORT, 'schema_migrations_immutable');
+END;`);
+  raw.exec("PRAGMA user_version = 1");
+  raw.close();
 }
 
 function event(overrides?: Partial<EventToAppend>): EventToAppend {
@@ -69,10 +117,11 @@ describe("SQLite Harness event store", () => {
 
     expect(appended.event.sequence).toBe(1);
     expect(store.inspect()).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       eventCount: 1,
       lastSequence: 1,
       journalMode: "wal",
+      projectionCount: 0,
       sqliteVersion: expect.stringMatching(/^3\./),
     });
     expect((await lstat(path)).mode & 0o777).toBe(0o600);
@@ -146,6 +195,202 @@ describe("SQLite Harness event store", () => {
     const reopened = await openStore(path);
     expect(reopened.readAfter(0)).toEqual([appended.event]);
     expect(reopened.inspect()).toMatchObject({ eventCount: 1, lastSequence: 1 });
+  });
+
+  it("updates registered projections atomically and does not replay duplicate events", async () => {
+    const { path } = await privateDatabasePath();
+    const projection = counterProjection();
+    const store = await openStore(path, { projections: [projection] });
+    const firstInput = event();
+    store.append(firstInput);
+    store.append(firstInput);
+    store.append(event({ eventType: "task.updated" }));
+
+    expect(store.readProjectionState(projection.name, "summary")).toEqual({
+      projectionName: projection.name,
+      key: "summary",
+      sourceSequence: 2,
+      state: { count: 2, lastEventType: "task.updated" },
+    });
+    expect(store.listProjectionStates(projection.name)).toEqual([
+      store.readProjectionState(projection.name, "summary"),
+    ]);
+    expect(Object.isFrozen(store.readProjectionState(projection.name, "summary")?.state)).toBe(
+      true,
+    );
+    expect(store.inspect()).toMatchObject({ eventCount: 2, projectionCount: 1 });
+    expect(() => store.readProjectionState("task.unknown", "summary")).toThrowError(
+      EventStoreError,
+    );
+    expect(() => store.listProjectionStates(projection.name, "invalid key")).toThrowError(
+      EventStoreError,
+    );
+  });
+
+  it("rolls back the event and every projection when one reducer fails", async () => {
+    const { path } = await privateDatabasePath();
+    const good = counterProjection(1, 1, "task.a_good");
+    const failing: ProjectionDefinition = {
+      name: "task.z_failing",
+      version: 1,
+      selectKeys: () => ["summary"],
+      reduce: () => {
+        throw new Error("secret reducer detail");
+      },
+    };
+    const store = await openStore(path, { projections: [good, failing] });
+
+    let captured: unknown;
+    try {
+      store.append(event());
+    } catch (error: unknown) {
+      captured = error;
+    }
+    expect(captured).toMatchObject({ code: "projection_failure" });
+    expect(String(captured)).not.toContain("secret reducer detail");
+    expect(store.inspect()).toMatchObject({ eventCount: 0, lastSequence: 0, projectionCount: 2 });
+    expect(store.readProjectionState(good.name, "summary")).toBeUndefined();
+    expect(store.readProjectionState(failing.name, "summary")).toBeUndefined();
+  });
+
+  it("replays missing projections, catches up a valid stale checkpoint, and rebuilds versions", async () => {
+    const { path } = await privateDatabasePath();
+    const first = await openStore(path);
+    first.append(event({ eventType: "task.created" }));
+    first.append(event({ eventType: "task.updated" }));
+    first.close();
+
+    const versionOne = counterProjection();
+    const replayed = await openStore(path, { projections: [versionOne] });
+    expect(replayed.readProjectionState(versionOne.name, "summary")?.state).toEqual({
+      count: 2,
+      lastEventType: "task.updated",
+    });
+    replayed.close();
+
+    const raw = new DatabaseSync(path);
+    raw
+      .prepare(
+        `UPDATE projection_state
+         SET state_json = ?, source_sequence = 1
+         WHERE projection_name = ? AND projection_key = ?`,
+      )
+      .run('{"count":1,"lastEventType":"task.created"}', versionOne.name, "summary");
+    raw
+      .prepare(
+        `UPDATE projection_checkpoints SET last_sequence = 1
+         WHERE projection_name = ?`,
+      )
+      .run(versionOne.name);
+    raw.close();
+
+    const caughtUp = await openStore(path, { projections: [versionOne] });
+    expect(caughtUp.readProjectionState(versionOne.name, "summary")?.state).toEqual({
+      count: 2,
+      lastEventType: "task.updated",
+    });
+    caughtUp.close();
+
+    const versionTwo = counterProjection(2, 10);
+    const rebuilt = await openStore(path, { projections: [versionTwo] });
+    expect(rebuilt.readProjectionState(versionTwo.name, "summary")?.state).toEqual({
+      count: 20,
+      lastEventType: "task.updated",
+    });
+  });
+
+  it("rejects invalid projection definitions and reducer outputs", async () => {
+    const duplicate = await privateDatabasePath();
+    await expect(
+      openStore(duplicate.path, { projections: [counterProjection(), counterProjection()] }),
+    ).rejects.toMatchObject({ code: "invalid_configuration" });
+
+    const invalidKeys = await privateDatabasePath();
+    const duplicateKeys: ProjectionDefinition = {
+      name: "task.duplicate_keys",
+      version: 1,
+      selectKeys: () => ["same", "same"],
+      reduce: () => ({ type: "keep" }),
+    };
+    const store = await openStore(invalidKeys.path, { projections: [duplicateKeys] });
+    expect(() => store.append(event())).toThrowError(EventStoreError);
+    expect(store.inspect().eventCount).toBe(0);
+
+    const invalidState = await privateDatabasePath();
+    const oversized: ProjectionDefinition = {
+      name: "task.oversized",
+      version: 1,
+      selectKeys: () => ["summary"],
+      reduce: () => ({ type: "set", state: { value: "x".repeat(1024 * 1024) } }),
+    };
+    const oversizedStore = await openStore(invalidState.path, { projections: [oversized] });
+    expect(() => oversizedStore.append(event())).toThrowError(EventStoreError);
+    expect(oversizedStore.inspect().eventCount).toBe(0);
+
+    const amplified = await privateDatabasePath();
+    const largeValue = "x".repeat(900_000);
+    const projectionNames = ["alpha", "bravo", "charlie", "delta", "echo"];
+    const projections = projectionNames.map((suffix): ProjectionDefinition => ({
+      name: `task.amplified_${suffix}`,
+      version: 1,
+      selectKeys: () => ["summary"],
+      reduce: () => ({ type: "set", state: { value: largeValue } }),
+    }));
+    const amplifiedStore = await openStore(amplified.path, { projections });
+    expect(() => amplifiedStore.append(event())).toThrowError(EventStoreError);
+    expect(amplifiedStore.inspect()).toMatchObject({ eventCount: 0, projectionCount: 5 });
+  });
+
+  it("upgrades a schema v1 database without rewriting migration history", async () => {
+    const { path } = await privateDatabasePath();
+    const current = await openStore(path);
+    current.append(event());
+    current.close();
+
+    downgradeToSchemaV1(path);
+
+    const upgraded = await openStore(path);
+    expect(upgraded.inspect()).toMatchObject({
+      schemaVersion: 2,
+      eventCount: 1,
+      projectionCount: 0,
+    });
+    upgraded.close();
+    const verified = new DatabaseSync(path);
+    expect(verified.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toMatchObject(
+      { count: 2 },
+    );
+    verified.close();
+  });
+
+  it("validates existing migration history before applying the next version", async () => {
+    const { path } = await privateDatabasePath();
+    const current = await openStore(path);
+    current.close();
+    downgradeToSchemaV1(path);
+
+    const corrupted = new DatabaseSync(path);
+    corrupted.exec("DROP TRIGGER schema_migrations_no_update");
+    corrupted.exec(`UPDATE schema_migrations SET checksum = '${"0".repeat(64)}' WHERE version = 1`);
+    corrupted.exec(`CREATE TRIGGER schema_migrations_no_update
+BEFORE UPDATE ON schema_migrations
+BEGIN
+  SELECT RAISE(ABORT, 'schema_migrations_immutable');
+END;`);
+    corrupted.close();
+
+    await expect(openStore(path)).rejects.toMatchObject({ code: "migration_mismatch" });
+    const unchanged = new DatabaseSync(path);
+    expect(unchanged.prepare("PRAGMA user_version").get()).toMatchObject({ user_version: 1 });
+    expect(
+      unchanged
+        .prepare(
+          `SELECT COUNT(*) AS count FROM sqlite_schema
+           WHERE type = 'table' AND name = 'projection_state'`,
+        )
+        .get(),
+    ).toMatchObject({ count: 0 });
+    unchanged.close();
   });
 
   it("allows only one exclusive writer connection", async () => {
@@ -260,6 +505,41 @@ describe("SQLite Harness event store", () => {
       );
     dataRaw.close();
     await expect(openStore(dataTampered.path)).rejects.toMatchObject({ code: "corrupt_data" });
+  });
+
+  it("rejects projection state tampering before recovery can write", async () => {
+    const nonCanonical = await privateDatabasePath();
+    const projection = counterProjection();
+    const stateStore = await openStore(nonCanonical.path, { projections: [projection] });
+    stateStore.append(event());
+    stateStore.close();
+    const stateRaw = new DatabaseSync(nonCanonical.path);
+    stateRaw
+      .prepare(
+        `UPDATE projection_state SET state_json = ?
+         WHERE projection_name = ? AND projection_key = ?`,
+      )
+      .run('{"lastEventType":"task.created","count":1}', projection.name, "summary");
+    stateRaw.close();
+    await expect(openStore(nonCanonical.path, { projections: [projection] })).rejects.toMatchObject(
+      { code: "corrupt_data" },
+    );
+
+    const ahead = await privateDatabasePath();
+    const aheadStore = await openStore(ahead.path, { projections: [projection] });
+    aheadStore.append(event());
+    aheadStore.close();
+    const aheadRaw = new DatabaseSync(ahead.path);
+    aheadRaw
+      .prepare(
+        `UPDATE projection_checkpoints SET last_sequence = 2
+         WHERE projection_name = ?`,
+      )
+      .run(projection.name);
+    aheadRaw.close();
+    await expect(openStore(ahead.path, { projections: [projection] })).rejects.toMatchObject({
+      code: "corrupt_data",
+    });
   });
 
   it("closes idempotently and rejects later operations", async () => {
