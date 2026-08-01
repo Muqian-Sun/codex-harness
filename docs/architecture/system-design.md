@@ -114,6 +114,8 @@ DAG 由 Harness 的计划规范化器和调度器共同产生：规范化器把�
 
 结构化 Codex plan 事件保存为带版本的候选计划。Harness 持久化稳定步骤 ID、目标、未完成工作、约束、决定、依赖、验收条件和证据引用。文本中的待办列表可以被识别为候选计划，但在规范化和确认前不是权威状态。
 
+任务与计划领域内核使用独立 `task.plan` 事件流保存 Task 创建、Requirement Revision 和 Plan Revision。Task 使用单调版本做事务内乐观并发校验；每个修订 UUID 同时作为对应事件 UUID，利用事件日志的全局唯一约束阻止修订 ID 被复用。Requirement Revision 保存用户原文、规范化目标、约束和验收条件，Plan Revision 区分 `candidate` 与 `confirmed` 并为每个步骤分配稳定 UUID；单项和单次修订的文本容量均受限，避免合法字段组合放大为无界投影。当前投影保留 active requirement、latest plan 和 last confirmed plan，完整修订历史留在不可变事件日志。需求修订会清除基于旧需求的 latest candidate，但保留 last confirmed plan 作为历史参照；新计划必须显式绑定当前 requirement revision。候选计划仍不能直接调度，必须由后续节点/DAG 规范化与确认门禁转换。
+
 每个安全轮次边界，Harness 为 Codex 构造最小恢复上下文，包括当前目标、活动需求修订、未完成节点、关键约束、已确认决定和所需证据。注入内容来自持久状态，而不是依赖旧对话的自然语言摘要。
 
 外部 Harness 无法在模型同一轮发生上下文压缩后透明修改其正在进行的推理。V1 只保证在下一个安全轮次边界重新注入状态，并把压缩后、重新注入前产生的输出标记为需要重新验证。
