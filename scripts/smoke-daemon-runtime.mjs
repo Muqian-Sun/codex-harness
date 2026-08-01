@@ -7,71 +7,64 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 export async function smokeDaemonRuntime() {
-  if (process.platform === "win32") {
+  if (process.platform !== "darwin") {
     return;
   }
 
   const directory = await mkdtemp(join(tmpdir(), "ch-smoke-"));
   await chmod(directory, 0o700);
   const endpoint = join(directory, "harnessd.sock");
-  const capability = randomBytes(32).toString("base64url");
   const cliPath = fileURLToPath(new URL("../apps/harnessd/dist/cli.js", import.meta.url));
-  const child = spawn(process.execPath, [cliPath, "--endpoint", endpoint], {
-    stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
-  });
-  let client;
-  let stderr = "";
+  let supervisor;
 
   try {
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    const capabilityPipe = child.stdio[3];
-    const watchdogPipe = child.stdio[4];
-    if (!capabilityPipe || !watchdogPipe || !("write" in capabilityPipe)) {
-      throw new Error("The daemon inherited pipes were not created.");
-    }
-    capabilityPipe.on("error", () => undefined);
-    watchdogPipe.on("error", () => undefined);
-    capabilityPipe.end(capability);
-
-    await waitForSocket(endpoint, child);
-    const { HarnessRpcClient } = await import("../apps/desktop/dist/main/index.js");
-    client = await HarnessRpcClient.connect({
-      endpoint,
-      startupCapability: capability,
+    const { DaemonProcessSupervisor } = await import("../apps/desktop/dist/main/index.js");
+    supervisor = await DaemonProcessSupervisor.start({
+      command: process.execPath,
+      args: [cliPath],
+      runtimeRoot: directory,
       clientVersion: "0.0.0",
-      connectTimeoutMs: 5_000,
-      handshakeTimeoutMs: 5_000,
-      requestTimeoutMs: 5_000,
     });
-    const health = await client.health();
+    const health = await supervisor.client.health();
     if (health.status !== "ok") {
-      throw new Error("The desktop RPC client health smoke response was invalid.");
+      throw new Error("The supervised daemon health smoke response was invalid.");
     }
-    const shutdown = await client.requestShutdown("build.smoke");
-    if (!shutdown.accepted) {
-      throw new Error("The desktop RPC client shutdown smoke response was invalid.");
+    const stopped = await supervisor.stop();
+    if (
+      !stopped.expected ||
+      stopped.exitCode !== 0 ||
+      stopped.signal !== null ||
+      stopped.containment !== "graceful" ||
+      stopped.runtimeDirectoryCleanup !== "removed"
+    ) {
+      throw new Error("The supervised daemon did not stop cleanly.");
     }
-
-    const [exitCode, signal] = await waitForExit(child, 5_000);
-    if (exitCode !== 0 || signal !== null) {
-      throw new Error(`The daemon smoke process failed: ${stderr.trim()}`);
-    }
+    await smokeSupervisorRpcLoss(DaemonProcessSupervisor, cliPath, directory);
     await smokeParentWatchdog(cliPath, endpoint);
     await smokeInvalidCapability(cliPath, endpoint);
   } finally {
-    client?.close();
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      await Promise.race([once(child, "exit"), delay(2_000)]);
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await once(child, "exit");
-      }
+    if (supervisor && supervisor.state !== "closed") {
+      await supervisor.stop();
     }
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function smokeSupervisorRpcLoss(DaemonProcessSupervisor, cliPath, runtimeRoot) {
+  const supervisor = await DaemonProcessSupervisor.start({
+    command: process.execPath,
+    args: [cliPath],
+    runtimeRoot,
+    clientVersion: "0.0.0",
+  });
+  supervisor.client.close();
+  const closed = await supervisor.closed;
+  if (
+    closed.expected ||
+    closed.containment === "containment_unknown" ||
+    closed.runtimeDirectoryCleanup !== "removed"
+  ) {
+    throw new Error("The supervisor did not contain an unexpected RPC disconnect.");
   }
 }
 
