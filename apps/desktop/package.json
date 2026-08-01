@@ -1,0 +1,12 @@
+{
+  "name": "@codex-harness/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@codex-harness/protocol": "workspace:*"
+  }
+}

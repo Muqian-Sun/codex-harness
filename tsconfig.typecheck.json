@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "paths": {
+      "@codex-harness/protocol": ["./packages/protocol/src/index.ts"]
+    },
+    "types": ["node", "vitest/globals"]
+  },
+  "include": [
+    "apps/desktop/src/main/**/*.ts",
+    "apps/harnessd/src/**/*.ts",
+    "apps/**/*.test.ts",
+    "apps/**/*.test.tsx",
+    "apps/**/*.spec.ts",
+    "apps/**/*.spec.tsx",
+    "apps/**/src/test-fixtures.ts",
+    "packages/*/src/**/*.ts",
+    "packages/*/src/**/*.tsx",
+    "vitest.config.ts"
+  ]
+}
