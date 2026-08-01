@@ -9,6 +9,8 @@ export async function smokeTaskPlanStore() {
   let store;
   try {
     const { TaskPlanStore } = await import("../apps/harnessd/dist/domain/task-plan-store.js");
+    const { buildTaskRecoveryCapsule, isTaskRecoveryCapsuleCurrent } =
+      await import("../apps/harnessd/dist/domain/task-recovery-context.js");
     store = await TaskPlanStore.open({ path, now: () => 1_750_000_000_000 });
     store.createTask({
       eventId: "00000000-0000-4000-8000-000000000003",
@@ -119,6 +121,16 @@ export async function smokeTaskPlanStore() {
       task.activeReconciliation?.impact !== "editorial"
     ) {
       throw new Error("The compiled task plan store smoke result was invalid.");
+    }
+    const recoveryCapsule = buildTaskRecoveryCapsule(task);
+    if (
+      recoveryCapsule.fence.taskVersion !== task.taskVersion ||
+      recoveryCapsule.fence.reconciliationId !== task.activeReconciliation.reconciliationId ||
+      !recoveryCapsule.input.text.startsWith("CODEX_HARNESS_RECOVERY_V1\n") ||
+      !recoveryCapsule.input.text.includes('"phase":"active_graph"') ||
+      !isTaskRecoveryCapsuleCurrent(task, recoveryCapsule)
+    ) {
+      throw new Error("The compiled task recovery capsule smoke result was invalid.");
     }
   } finally {
     store?.close();

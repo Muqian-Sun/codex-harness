@@ -124,7 +124,13 @@ DAG 由 Harness 的计划规范化器和调度器共同产生：规范化器把�
 
 每个安全轮次边界，Harness 为 Codex 构造最小恢复上下文，包括当前目标、活动需求修订、未完成节点、关键约束、已确认决定和所需证据。注入内容来自持久状态，而不是依赖旧对话的自然语言摘要。
 
+恢复上下文内核从经过领域校验的 Task 当前投影确定性构造版本化胶囊。胶囊使用固定前缀和按键排序的规范 JSON，包含 Task/version、活动 Requirement、当前权威 confirmed Plan、尚不可执行的 candidate Plan、DAG 拓扑、未完成节点的完整工作语义、终态节点的最小摘要以及最近一次需求调和差异。它明确区分仅有需求、候选计划待确认、已确认计划待建图、活动 DAG 和活动 DAG 上存在新候选计划五种阶段；新 candidate Plan 不会抹掉仍绑定当前 Requirement 的 confirmed Plan，后者继续作为权威计划随胶囊恢复，前者只作为待确认提案。基于旧 Requirement 的 confirmed Plan 只作为历史修订 ID 暴露，不得成为当前执行依据。恢复文本不含时间戳，SHA-256 摘要和 Task/Requirement/Plan/Graph/Reconciliation 修订 ID 共同组成 freshness fence；发送前必须从最新投影重建并逐项比较，任何状态或内容变化都使旧胶囊失效。
+
+V1 恢复胶囊只生成符合固定 App Server Schema 的单个 `turn/start` text input，并同时限制为最多 1,000,000 个 JavaScript 字符和 1 MiB UTF-8 字节；超限或关系不一致时保守失败，不截断 TODO、验收条件或未完成节点。该领域内核本身不调用 App Server、不改变出站方法白名单，也不建立 Task/Run 与 Codex thread/turn 的映射；这些连接属于后续安全轮次协调器。
+
 外部 Harness 无法在模型同一轮发生上下文压缩后透明修改其正在进行的推理。V1 只保证在下一个安全轮次边界重新注入状态，并把压缩后、重新注入前产生的输出标记为需要重新验证。
+
+在固定的 App Server 协议中，`thread/compact/start` 只表示开始压缩并立即返回空结果，实际生命周期通过 `turn/*`、`item/*` 和 `contextCompaction` item 事件观察；`turn/steer` 只会追加到仍在执行的当前 turn，不能作为压缩后的同轮修复通道。因此协调器必须等待 `turn/completed` 等可证明的安全边界，再把 freshness fence 仍有效的胶囊加入下一次 `turn/start`；不得承诺在正在执行的 turn 内透明修复。
 
 ## 9. 智能模型路由
 
