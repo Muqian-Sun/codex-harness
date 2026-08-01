@@ -1,14 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-
-const BOOTSTRAP_WIRE_VERSION = "1";
-const APPLICATION_PROTOCOL_VERSION = "1.0";
 
 export async function smokeDaemonRuntime() {
   if (process.platform === "win32") {
@@ -23,7 +19,7 @@ export async function smokeDaemonRuntime() {
   const child = spawn(process.execPath, [cliPath, "--endpoint", endpoint], {
     stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
   });
-  let socket;
+  let client;
   let stderr = "";
 
   try {
@@ -41,39 +37,22 @@ export async function smokeDaemonRuntime() {
     capabilityPipe.end(capability);
 
     await waitForSocket(endpoint, child);
-    socket = createConnection({ path: endpoint });
-    await once(socket, "connect");
-
-    const helloResponse = readFrame(socket);
-    writeFrame(socket, {
-      kind: "bootstrap-request",
-      wireVersion: BOOTSTRAP_WIRE_VERSION,
-      id: "smoke-hello",
-      method: "system.hello",
-      params: {
-        client: { name: "CodexHarnessBuildSmoke", version: "0.0.0" },
-        supportedProtocolVersions: [APPLICATION_PROTOCOL_VERSION],
-        capabilities: { supported: [], required: [] },
-        startupCapability: capability,
-      },
+    const { HarnessRpcClient } = await import("../apps/desktop/dist/main/index.js");
+    client = await HarnessRpcClient.connect({
+      endpoint,
+      startupCapability: capability,
+      clientVersion: "0.0.0",
+      connectTimeoutMs: 5_000,
+      handshakeTimeoutMs: 5_000,
+      requestTimeoutMs: 5_000,
     });
-    const hello = await helloResponse;
-    if (hello.kind !== "bootstrap-response" || hello.id !== "smoke-hello") {
-      throw new Error("The daemon bootstrap smoke response was invalid.");
+    const health = await client.health();
+    if (health.status !== "ok") {
+      throw new Error("The desktop RPC client health smoke response was invalid.");
     }
-
-    const shutdownResponse = readFrame(socket);
-    writeFrame(socket, {
-      kind: "request",
-      wireVersion: BOOTSTRAP_WIRE_VERSION,
-      protocolVersion: APPLICATION_PROTOCOL_VERSION,
-      id: "smoke-shutdown",
-      method: "system.shutdown",
-      params: { reason: "build.smoke" },
-    });
-    const shutdown = await shutdownResponse;
-    if (shutdown.kind !== "response" || shutdown.id !== "smoke-shutdown") {
-      throw new Error("The daemon shutdown smoke response was invalid.");
+    const shutdown = await client.requestShutdown("build.smoke");
+    if (!shutdown.accepted) {
+      throw new Error("The desktop RPC client shutdown smoke response was invalid.");
     }
 
     const [exitCode, signal] = await waitForExit(child, 5_000);
@@ -83,7 +62,7 @@ export async function smokeDaemonRuntime() {
     await smokeParentWatchdog(cliPath, endpoint);
     await smokeInvalidCapability(cliPath, endpoint);
   } finally {
-    socket?.destroy();
+    client?.close();
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
       await Promise.race([once(child, "exit"), delay(2_000)]);
@@ -209,41 +188,6 @@ async function waitForExit(child, timeoutMs) {
       resolve([exitCode, signal]);
     };
     child.once("exit", onExit);
-  });
-}
-
-function writeFrame(socket, value) {
-  socket.write(`${JSON.stringify(value)}\n`);
-}
-
-async function readFrame(socket) {
-  return await new Promise((resolve, reject) => {
-    let buffered = Buffer.alloc(0);
-    const onData = (chunk) => {
-      buffered = Buffer.concat([buffered, chunk]);
-      const newline = buffered.indexOf(0x0a);
-      if (newline < 0) {
-        return;
-      }
-      cleanup();
-      resolve(JSON.parse(buffered.subarray(0, newline).toString("utf8")));
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error("The daemon socket closed before returning a frame."));
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const cleanup = () => {
-      socket.off("data", onData);
-      socket.off("close", onClose);
-      socket.off("error", onError);
-    };
-    socket.on("data", onData);
-    socket.once("close", onClose);
-    socket.once("error", onError);
   });
 }
 
