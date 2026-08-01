@@ -19,6 +19,7 @@ import {
 
 const TASK_STREAM_TYPE = "task.plan";
 const TASK_PROJECTION_NAME = "task.current_plan";
+const TASK_PROJECTION_PROBE_KEY = "00000000-0000-4000-8000-000000000000";
 const TASK_CREATED = "task.created";
 const REQUIREMENTS_REVISED = "task.requirements_revised";
 const REQUIREMENTS_RECONCILED = "task.requirements_reconciled";
@@ -217,7 +218,7 @@ export class TaskPlanError extends Error {
   }
 }
 
-const TASK_PROJECTION: ProjectionDefinition = Object.freeze({
+export const TASK_PLAN_PROJECTION: ProjectionDefinition = Object.freeze({
   name: TASK_PROJECTION_NAME,
   version: 3,
   selectKeys: (event) =>
@@ -232,33 +233,20 @@ const TASK_PROJECTION: ProjectionDefinition = Object.freeze({
   }),
 });
 
-export class TaskPlanStore {
+export class TaskPlanRepository {
   readonly #events: HarnessEventStore;
-  #closed = false;
 
-  private constructor(events: HarnessEventStore) {
-    this.#events = events;
-  }
-
-  static async open(config: TaskPlanStoreConfig): Promise<TaskPlanStore> {
+  constructor(events: HarnessEventStore) {
     try {
-      const normalized = normalizeConfig(config);
-      const events = await HarnessEventStore.open({
-        path: normalized.path,
-        projections: [TASK_PROJECTION],
-        ...(normalized.busyTimeoutMs === undefined
-          ? {}
-          : { busyTimeoutMs: normalized.busyTimeoutMs }),
-        ...(normalized.now === undefined ? {} : { now: normalized.now }),
-      });
-      return new TaskPlanStore(events);
+      events.readProjectionState(TASK_PROJECTION_NAME, TASK_PROJECTION_PROBE_KEY);
+      this.#events = events;
     } catch (error: unknown) {
-      throw mapTaskPlanOpenError(error);
+      throw mapTaskPlanError(error);
     }
   }
 
   createTask(input: CreateTaskInput): TaskCommandResult {
-    this.#assertOpen();
+    this.assertAvailable();
     const normalized = normalizeCreateTaskInput(input);
     return this.#appendAndRead({
       eventId: normalized.eventId,
@@ -277,7 +265,7 @@ export class TaskPlanStore {
   }
 
   reviseRequirements(input: ReviseRequirementsInput): TaskCommandResult {
-    this.#assertOpen();
+    this.assertAvailable();
     const normalized = normalizeReviseRequirementsInput(input);
     return this.#appendAndRead({
       eventId: normalized.eventId,
@@ -297,7 +285,7 @@ export class TaskPlanStore {
   }
 
   revisePlan(input: RevisePlanInput): TaskCommandResult {
-    this.#assertOpen();
+    this.assertAvailable();
     const normalized = normalizeRevisePlanInput(input);
     return this.#appendAndRead({
       eventId: normalized.eventId,
@@ -317,7 +305,7 @@ export class TaskPlanStore {
   }
 
   commitTaskGraph(input: CommitTaskGraphInput): TaskCommandResult {
-    this.#assertOpen();
+    this.assertAvailable();
     const normalized = normalizeCommitTaskGraphInput(input);
     return this.#appendAndRead({
       eventId: normalized.eventId,
@@ -337,7 +325,7 @@ export class TaskPlanStore {
   }
 
   reconcileRequirements(input: ReconcileTaskInput): TaskReconciliationResult {
-    this.#assertOpen();
+    this.assertAvailable();
     const normalized = normalizeReconcileTaskInput(input);
     try {
       const appended = this.#events.appendBatch([
@@ -400,7 +388,7 @@ export class TaskPlanStore {
   }
 
   readTask(taskId: string): TaskPlanRecord {
-    this.#assertOpen();
+    this.assertAvailable();
     if (!isUuid(taskId)) {
       throw new TaskPlanError("invalid_input");
     }
@@ -416,7 +404,7 @@ export class TaskPlanStore {
   }
 
   listTasks(afterTaskId = "", limit = 100): readonly TaskPlanRecord[] {
-    this.#assertOpen();
+    this.assertAvailable();
     if (
       (afterTaskId !== "" && !isUuid(afterTaskId)) ||
       !Number.isSafeInteger(limit) ||
@@ -437,21 +425,9 @@ export class TaskPlanStore {
   }
 
   inspect(): EventStoreInspection {
-    this.#assertOpen();
+    this.assertAvailable();
     try {
       return this.#events.inspect();
-    } catch (error: unknown) {
-      throw mapTaskPlanError(error);
-    }
-  }
-
-  close(): void {
-    if (this.#closed) {
-      return;
-    }
-    this.#closed = true;
-    try {
-      this.#events.close();
     } catch (error: unknown) {
       throw mapTaskPlanError(error);
     }
@@ -467,10 +443,57 @@ export class TaskPlanStore {
     }
   }
 
-  #assertOpen(): void {
-    if (this.#closed) {
+  protected assertAvailable(): void {
+    if (!this.isAvailable()) {
       throw new TaskPlanError("closed");
     }
+  }
+
+  protected isAvailable(): boolean {
+    return true;
+  }
+}
+
+export class TaskPlanStore extends TaskPlanRepository {
+  readonly #ownedEvents: HarnessEventStore;
+  #closed = false;
+
+  private constructor(events: HarnessEventStore) {
+    super(events);
+    this.#ownedEvents = events;
+  }
+
+  static async open(config: TaskPlanStoreConfig): Promise<TaskPlanStore> {
+    try {
+      const normalized = normalizeConfig(config);
+      const events = await HarnessEventStore.open({
+        path: normalized.path,
+        projections: [TASK_PLAN_PROJECTION],
+        ...(normalized.busyTimeoutMs === undefined
+          ? {}
+          : { busyTimeoutMs: normalized.busyTimeoutMs }),
+        ...(normalized.now === undefined ? {} : { now: normalized.now }),
+      });
+      return new TaskPlanStore(events);
+    } catch (error: unknown) {
+      throw mapTaskPlanOpenError(error);
+    }
+  }
+
+  close(): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    try {
+      this.#ownedEvents.close();
+    } catch (error: unknown) {
+      throw mapTaskPlanError(error);
+    }
+  }
+
+  protected override isAvailable(): boolean {
+    return !this.#closed;
   }
 }
 
