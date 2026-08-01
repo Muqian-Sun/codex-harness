@@ -181,6 +181,8 @@ Markdown 可作为面向用户的导出、快照或审阅格式，但不是调�
 
 需要原子切换多个领域修订时，事件 store 提供有界批次追加：单批 1–16 个事件在事务前全部完成规范化、批内 event ID 唯一和 4 MiB 聚合 JSON 校验，再按输入顺序分配连续全局序号并逐事件更新投影。批次保留每事件投影预算，并额外限制整批最多 4,000 个投影 key 和 8 MiB 投影状态写入。幂等重试只接受整批事件均已存在、内容逐项相同且序号连续；部分存在、内容冲突、顺序异常或任一 reducer 失败都会回滚，禁止自动补写半个批次。该原语用于后续把 Requirement、confirmed Plan 和 Graph Revision 作为一个可恢复状态转换提交，不改变事件格式或 SQLite schema。
 
+事件 store 还提供仅限 daemon 内部领域层使用的精确 event ID 查询。查询只接受规范 UUID，复用 event ID 唯一索引和统一事件解码器，返回深度冻结的完整事件或未命中；它不提供任意 SQL、模糊检索或 payload 搜索，也不进入 desktop/renderer 协议。该能力用于在当前投影已经前进后区分历史命令的完整幂等重试与使用过期 fence 的新写入。
+
 ## 11. Codex App Server 边界
 
 Harness daemon 通过 stdio 上的 JSONL 拥有 Codex App Server worker。每条消息独占一行，stdout 只解析协议；stderr 单独采集并脱敏。连接必须先完成 `initialize`，再发送 `initialized`，之后才允许 thread、turn、模型查询、审批和事件处理。

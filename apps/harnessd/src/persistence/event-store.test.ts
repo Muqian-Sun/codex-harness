@@ -149,6 +149,27 @@ describe("SQLite Harness event store", () => {
     expect(Object.isFrozen((first.event.payload as { nested: object }).nested)).toBe(true);
   });
 
+  it("reads an exact immutable event by its identifier without scanning", async () => {
+    const { path } = await privateDatabasePath();
+    const store = await openStore(path);
+    const firstInput = event();
+    const first = store.append(firstInput).event;
+
+    const found = store.readByEventId(firstInput.eventId);
+    expect(found).toEqual(first);
+    expect(Object.isFrozen(found)).toBe(true);
+    expect(Object.isFrozen(found?.payload)).toBe(true);
+    expect(store.readByEventId(randomUUID())).toBeUndefined();
+    expect(() => store.readByEventId("not-an-event-id")).toThrowError(
+      expect.objectContaining({ code: "invalid_query" }),
+    );
+
+    store.close();
+    expect(() => store.readByEventId(firstInput.eventId)).toThrowError(
+      expect.objectContaining({ code: "closed" }),
+    );
+  });
+
   it("appends an ordered batch atomically and makes the complete retry idempotent", async () => {
     const { path } = await privateDatabasePath();
     const projection = counterProjection();

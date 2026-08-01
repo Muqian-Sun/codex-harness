@@ -43,6 +43,7 @@ export async function smokeEventStore() {
     const duplicate = store.appendBatch(batch);
     const inspection = store.inspect();
     const projected = store.readProjectionState(projection.name, "summary");
+    const exact = store.readByEventId(batch[1].eventId);
     if (
       appended.duplicate ||
       !duplicate.duplicate ||
@@ -50,7 +51,9 @@ export async function smokeEventStore() {
       inspection.eventCount !== 3 ||
       inspection.lastSequence !== 3 ||
       inspection.projectionCount !== 1 ||
-      projected?.state.count !== 3
+      projected?.state.count !== 3 ||
+      exact?.eventId !== batch[1].eventId ||
+      exact.payload.index !== 1
     ) {
       throw new Error("The compiled SQLite event store smoke result was invalid.");
     }
