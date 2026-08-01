@@ -8,6 +8,7 @@ import {
   MODEL_ROUTE_POLICY_VERSION,
   ModelRouteClassificationError,
   classifyShadowModelRoute,
+  decodeShadowModelRouteDecision,
   normalizeModelRouteFeatures,
   type ModelRouteSafetySignals,
 } from "./model-route-classifier.js";
@@ -175,6 +176,27 @@ describe("shadow model route classifier", () => {
     expect(Object.isFrozen(first.candidateReasons)).toBe(true);
     expect(Object.isFrozen(first.safetyReasons)).toBe(true);
     expect(Object.isFrozen(first.resolvedTarget)).toBe(true);
+  });
+
+  it("strictly decodes only decisions reproducible by the pinned routing policy", () => {
+    const decision = classifyShadowModelRoute(features(), configuration());
+    expect(decodeShadowModelRouteDecision(decision)).toEqual(decision);
+
+    const invalid = [
+      { ...decision, unexpected: true },
+      { ...decision, mode: "active" },
+      { ...decision, executionAuthorized: true },
+      { ...decision, selectedTier: "deep" },
+      { ...decision, candidateReasons: ["task_analysis"] },
+      { ...decision, policyVersion: "model-route-policy-v2" },
+      { ...decision, resolvedTarget: { ...decision.resolvedTarget, tier: "standard" } },
+      { ...decision, resolvedTarget: { ...decision.resolvedTarget, model: " invalid " } },
+    ];
+    for (const candidate of invalid) {
+      expect(() => decodeShadowModelRouteDecision(candidate)).toThrowError(
+        expect.objectContaining({ code: "invalid_decision" }),
+      );
+    }
   });
 
   it("strictly rejects malformed, incomplete, accessor-backed, and oversized features", () => {

@@ -1,6 +1,7 @@
 import { validateJsonValue } from "@codex-harness/protocol";
 
 import {
+  normalizeModelRoutingConfiguration,
   resolveModelTier,
   type ModelRoutingConfiguration,
   type ModelTier,
@@ -86,15 +87,20 @@ export type ShadowModelRouteDecision = Readonly<{
   resolvedTarget: ResolvedModelTier;
 }>;
 
-export type ModelRouteClassificationErrorCode = "invalid_features";
+export type ModelRouteClassificationErrorCode = "invalid_decision" | "invalid_features";
+
+const ERROR_MESSAGES: Readonly<Record<ModelRouteClassificationErrorCode, string>> = Object.freeze({
+  invalid_decision: "The shadow model route decision is invalid.",
+  invalid_features: "The model route features are invalid.",
+});
 
 export class ModelRouteClassificationError extends Error {
   readonly code: ModelRouteClassificationErrorCode;
 
-  constructor() {
-    super("The model route features are invalid.");
+  constructor(code: ModelRouteClassificationErrorCode = "invalid_features") {
+    super(ERROR_MESSAGES[code]);
     this.name = "ModelRouteClassificationError";
-    this.code = "invalid_features";
+    this.code = code;
   }
 }
 
@@ -121,6 +127,84 @@ export function classifyShadowModelRoute(
     safetyReasons,
     resolvedTarget,
   });
+}
+
+export function decodeShadowModelRouteDecision(input: unknown): ShadowModelRouteDecision {
+  try {
+    if (!validateJsonValue(input).ok) {
+      throw new ModelRouteClassificationError("invalid_decision");
+    }
+    const record = requireExactRecord(
+      input,
+      [
+        "candidateReasons",
+        "candidateTier",
+        "executionAuthorized",
+        "features",
+        "mode",
+        "policyVersion",
+        "resolvedTarget",
+        "safetyFloorTier",
+        "safetyReasons",
+        "schemaVersion",
+        "selectedTier",
+      ],
+      "invalid_decision",
+    );
+    const target = requireExactRecord(
+      record.resolvedTarget,
+      [
+        "configurationRevisionId",
+        "configurationRevisionNumber",
+        "model",
+        "provider",
+        "reasoningEffort",
+        "tier",
+      ],
+      "invalid_decision",
+    );
+    const targetFields = {
+      provider: target.provider,
+      model: target.model,
+      reasoningEffort: target.reasoningEffort,
+    };
+    const configuration = normalizeModelRoutingConfiguration({
+      schemaVersion: 1,
+      revisionId: target.configurationRevisionId,
+      revisionNumber: target.configurationRevisionNumber,
+      tiers: {
+        fast: targetFields,
+        standard: targetFields,
+        deep: targetFields,
+      },
+    });
+    const expected = classifyShadowModelRoute(record.features, configuration);
+    if (
+      record.schemaVersion !== expected.schemaVersion ||
+      record.mode !== expected.mode ||
+      record.executionAuthorized !== expected.executionAuthorized ||
+      record.policyVersion !== expected.policyVersion ||
+      record.candidateTier !== expected.candidateTier ||
+      record.safetyFloorTier !== expected.safetyFloorTier ||
+      record.selectedTier !== expected.selectedTier ||
+      !unknownArrayEquals(record.candidateReasons, expected.candidateReasons) ||
+      !unknownArrayEquals(record.safetyReasons, expected.safetyReasons) ||
+      target.tier !== expected.resolvedTarget.tier ||
+      target.configurationRevisionId !== expected.resolvedTarget.configurationRevisionId ||
+      target.configurationRevisionNumber !== expected.resolvedTarget.configurationRevisionNumber ||
+      target.provider !== expected.resolvedTarget.provider ||
+      target.model !== expected.resolvedTarget.model ||
+      target.reasoningEffort !== expected.resolvedTarget.reasoningEffort
+    ) {
+      throw new ModelRouteClassificationError("invalid_decision");
+    }
+    return expected;
+  } catch (error: unknown) {
+    if (error instanceof ModelRouteClassificationError && error.code === "invalid_decision") {
+      throw error;
+    }
+    throw new ModelRouteClassificationError("invalid_decision");
+  }
 }
 
 export function normalizeModelRouteFeatures(input: unknown): ModelRouteFeatures {
@@ -262,18 +346,27 @@ function higherTier(left: ModelTier, right: ModelTier): ModelTier {
 function requireExactRecord(
   input: unknown,
   expectedKeys: readonly string[],
+  code: ModelRouteClassificationErrorCode = "invalid_features",
 ): Record<string, unknown> {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    throw new ModelRouteClassificationError();
+    throw new ModelRouteClassificationError(code);
   }
   const keys = Object.keys(input).sort();
   if (
     keys.length !== expectedKeys.length ||
     keys.some((key, index) => key !== expectedKeys[index])
   ) {
-    throw new ModelRouteClassificationError();
+    throw new ModelRouteClassificationError(code);
   }
   return input as Record<string, unknown>;
+}
+
+function unknownArrayEquals(input: unknown, expected: readonly string[]): boolean {
+  return (
+    Array.isArray(input) &&
+    input.length === expected.length &&
+    input.every((value, index) => value === expected[index])
+  );
 }
 
 function requireTaskKind(input: unknown): ModelRouteTaskKind {
