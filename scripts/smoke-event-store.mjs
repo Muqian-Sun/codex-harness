@@ -29,24 +29,28 @@ export async function smokeEventStore() {
       now: () => 1_750_000_000_000,
       projections: [projection],
     });
-    store.append({
+    const batch = Array.from({ length: 3 }, (_, index) => ({
       eventId: randomUUID(),
       streamType: "system",
       streamId: "build-smoke",
       eventType: "system.smoke_recorded",
       eventVersion: 1,
-      occurredAtMs: 1_750_000_000_001,
-      payload: { source: "compiled.build" },
+      occurredAtMs: 1_750_000_000_001 + index,
+      payload: { index, source: "compiled.build" },
       metadata: { actor: "system.smoke" },
-    });
+    }));
+    const appended = store.appendBatch(batch);
+    const duplicate = store.appendBatch(batch);
     const inspection = store.inspect();
     const projected = store.readProjectionState(projection.name, "summary");
     if (
+      appended.duplicate ||
+      !duplicate.duplicate ||
       inspection.schemaVersion !== 2 ||
-      inspection.eventCount !== 1 ||
-      inspection.lastSequence !== 1 ||
+      inspection.eventCount !== 3 ||
+      inspection.lastSequence !== 3 ||
       inspection.projectionCount !== 1 ||
-      projected?.state.count !== 1
+      projected?.state.count !== 3
     ) {
       throw new Error("The compiled SQLite event store smoke result was invalid.");
     }

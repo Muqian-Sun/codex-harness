@@ -149,6 +149,144 @@ describe("SQLite Harness event store", () => {
     expect(Object.isFrozen((first.event.payload as { nested: object }).nested)).toBe(true);
   });
 
+  it("appends an ordered batch atomically and makes the complete retry idempotent", async () => {
+    const { path } = await privateDatabasePath();
+    const projection = counterProjection();
+    const store = await openStore(path, { projections: [projection] });
+    const inputs = [
+      event({ eventType: "task.created" }),
+      event({ eventType: "task.updated" }),
+      event({ eventType: "task.confirmed" }),
+    ];
+    const appended = store.appendBatch(inputs);
+    const duplicate = store.appendBatch(inputs);
+
+    expect(appended).toMatchObject({
+      duplicate: false,
+      events: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }],
+    });
+    expect(duplicate).toEqual({ duplicate: true, events: appended.events });
+    for (const conflictingRetry of [
+      [inputs[0]!, { ...inputs[1]!, payload: { changed: true } }, inputs[2]!],
+      [...inputs].reverse(),
+    ]) {
+      let captured: unknown;
+      try {
+        store.appendBatch(conflictingRetry);
+      } catch (error: unknown) {
+        captured = error;
+      }
+      expect(captured).toMatchObject({ code: "conflict" });
+    }
+    expect(Object.isFrozen(appended.events)).toBe(true);
+    expect(store.readProjectionState(projection.name, "summary")?.state).toEqual({
+      count: 3,
+      lastEventType: "task.confirmed",
+    });
+    expect(store.inspect()).toMatchObject({ eventCount: 3, lastSequence: 3 });
+  });
+
+  it("rolls back every event and projection when a later batch reducer fails", async () => {
+    const { path } = await privateDatabasePath();
+    const projection: ProjectionDefinition = {
+      name: "task.batch_rollback",
+      version: 1,
+      selectKeys: () => ["summary"],
+      reduce: ({ current, event: stored }) => {
+        if (stored.eventType === "task.fail") {
+          throw new Error("secret batch reducer detail");
+        }
+        const count =
+          typeof current === "object" &&
+          current !== null &&
+          !Array.isArray(current) &&
+          typeof current.count === "number"
+            ? current.count
+            : 0;
+        return { type: "set", state: { count: count + 1 } };
+      },
+    };
+    const store = await openStore(path, { projections: [projection] });
+    let captured: unknown;
+    try {
+      store.appendBatch([
+        event({ eventType: "task.created" }),
+        event({ eventType: "task.fail" }),
+        event({ eventType: "task.never_applied" }),
+      ]);
+    } catch (error: unknown) {
+      captured = error;
+    }
+
+    expect(captured).toMatchObject({ code: "projection_failure" });
+    expect(String(captured)).not.toContain("secret batch reducer detail");
+    expect(store.inspect()).toMatchObject({ eventCount: 0, lastSequence: 0 });
+    expect(store.readProjectionState(projection.name, "summary")).toBeUndefined();
+    expect(store.append(event({ eventType: "task.recovered" })).event.sequence).toBe(1);
+  });
+
+  it("rejects partial, conflicting, and malformed batch retries without filling gaps", async () => {
+    const { path } = await privateDatabasePath();
+    const store = await openStore(path);
+    const first = event();
+    const second = event({ eventType: "task.updated" });
+    store.append(first);
+
+    let captured: unknown;
+    try {
+      store.appendBatch([first, second]);
+    } catch (error: unknown) {
+      captured = error;
+    }
+    expect(captured).toMatchObject({ code: "conflict" });
+    expect(() => store.appendBatch([first, { ...first, payload: { changed: true } }])).toThrowError(
+      EventStoreError,
+    );
+    expect(store.inspect()).toMatchObject({ eventCount: 1, lastSequence: 1 });
+  });
+
+  it("rejects empty, duplicate, sparse, accessor, oversized, and amplified batches", async () => {
+    const invalidPath = await privateDatabasePath();
+    const store = await openStore(invalidPath.path);
+    expect(() => store.appendBatch([])).toThrowError(EventStoreError);
+    const duplicate = event();
+    expect(() => store.appendBatch([duplicate, duplicate])).toThrowError(EventStoreError);
+    expect(() => store.appendBatch(new Array(1) as never)).toThrowError(EventStoreError);
+    const accessorBatch = [event()];
+    let accessorCalled = false;
+    Object.defineProperty(accessorBatch, "0", {
+      enumerable: true,
+      get: () => {
+        accessorCalled = true;
+        return event();
+      },
+    });
+    expect(() => store.appendBatch(accessorBatch)).toThrowError(EventStoreError);
+    expect(accessorCalled).toBe(false);
+    const tooMany = Array.from({ length: 17 }, () => event());
+    expect(() => store.appendBatch(tooMany)).toThrowError(EventStoreError);
+    const oversized = Array.from({ length: 5 }, () =>
+      event({ payload: { value: "x".repeat(900_000) } }),
+    );
+    expect(() => store.appendBatch(oversized)).toThrowError(EventStoreError);
+    expect(store.inspect().eventCount).toBe(0);
+
+    const amplifiedPath = await privateDatabasePath();
+    const largeValue = "x".repeat(900_000);
+    const projections = ["alpha", "bravo", "charlie"].map((suffix): ProjectionDefinition => ({
+      name: `task.batch_amplified_${suffix}`,
+      version: 1,
+      selectKeys: () => ["summary"],
+      reduce: () => ({ type: "set", state: { value: largeValue } }),
+    }));
+    const amplified = await openStore(amplifiedPath.path, { projections });
+    expect(() => amplified.appendBatch(Array.from({ length: 4 }, () => event()))).toThrowError(
+      EventStoreError,
+    );
+    expect(amplified.inspect()).toMatchObject({ eventCount: 0, lastSequence: 0 });
+    expect(amplified.readProjectionState(projections[0]!.name, "summary")).toBeUndefined();
+  });
+
   it("rejects conflicting event IDs and rolls the transaction back", async () => {
     const { path } = await privateDatabasePath();
     const store = await openStore(path);
