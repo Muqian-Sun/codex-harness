@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { chmod, lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -15,12 +15,16 @@ export async function smokeDaemonRuntime() {
 
   const directory = await mkdtemp(join(tmpdir(), "ch-smoke-"));
   await chmod(directory, 0o700);
+  const runtimeRoot = join(directory, "runtime");
+  const stateRoot = join(directory, "state");
+  const stateDatabasePath = join(stateRoot, "harness.db");
   const endpoint = join(directory, "harnessd.sock");
   const codexExecutable = join(directory, "fake-codex.mjs");
   const cliPath = fileURLToPath(new URL("../apps/harnessd/dist/cli.js", import.meta.url));
   let supervisor;
 
   try {
+    await Promise.all([mkdir(runtimeRoot, { mode: 0o700 }), mkdir(stateRoot, { mode: 0o700 })]);
     await writeFile(codexExecutable, fakeCodexSource(), { encoding: "utf8", mode: 0o700 });
     await chmod(codexExecutable, 0o700);
     const { DaemonProcessSupervisor } = await import("../apps/desktop/dist/main/index.js");
@@ -32,7 +36,8 @@ export async function smokeDaemonRuntime() {
       command: process.execPath,
       codexExecutable,
       args: [cliPath],
-      runtimeRoot: directory,
+      runtimeRoot,
+      stateDatabasePath,
       clientVersion: "0.0.0",
       onAccountStatusChanged: resolveAccountEvent,
     });
@@ -89,10 +94,24 @@ export async function smokeDaemonRuntime() {
     ) {
       throw new Error("The supervised daemon did not stop cleanly.");
     }
-    await smokeSupervisorRpcLoss(DaemonProcessSupervisor, cliPath, codexExecutable, directory);
-    await smokeParentWatchdog(cliPath, endpoint, codexExecutable);
-    await smokeInvalidCapability(cliPath, endpoint, codexExecutable);
-    await smokeUnsupportedCodex(cliPath, endpoint);
+    const firstStateIdentity = await verifyStateDatabase(stateRoot);
+    await smokeSupervisorRpcLoss(
+      DaemonProcessSupervisor,
+      cliPath,
+      codexExecutable,
+      runtimeRoot,
+      stateDatabasePath,
+    );
+    const recoveredStateIdentity = await verifyStateDatabase(stateRoot);
+    if (
+      recoveredStateIdentity.device !== firstStateIdentity.device ||
+      recoveredStateIdentity.inode !== firstStateIdentity.inode
+    ) {
+      throw new Error("The supervised daemon replaced its persistent state database on restart.");
+    }
+    await smokeParentWatchdog(cliPath, endpoint, codexExecutable, stateDatabasePath);
+    await smokeInvalidCapability(cliPath, endpoint, codexExecutable, stateDatabasePath);
+    await smokeUnsupportedCodex(cliPath, endpoint, stateDatabasePath);
   } finally {
     if (supervisor && supervisor.state !== "closed") {
       await supervisor.stop();
@@ -106,12 +125,14 @@ async function smokeSupervisorRpcLoss(
   cliPath,
   codexExecutable,
   runtimeRoot,
+  stateDatabasePath,
 ) {
   const supervisor = await DaemonProcessSupervisor.start({
     command: process.execPath,
     codexExecutable,
     args: [cliPath],
     runtimeRoot,
+    stateDatabasePath,
     clientVersion: "0.0.0",
   });
   supervisor.client.close();
@@ -125,11 +146,19 @@ async function smokeSupervisorRpcLoss(
   }
 }
 
-async function smokeInvalidCapability(cliPath, endpoint, codexExecutable) {
+async function smokeInvalidCapability(cliPath, endpoint, codexExecutable, stateDatabasePath) {
   const invalidCapability = `${"A".repeat(42)}B`;
   const child = spawn(
     process.execPath,
-    [cliPath, "--endpoint", endpoint, "--codex-executable", codexExecutable],
+    [
+      cliPath,
+      "--endpoint",
+      endpoint,
+      "--codex-executable",
+      codexExecutable,
+      "--state-database",
+      stateDatabasePath,
+    ],
     {
       stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
     },
@@ -156,7 +185,7 @@ async function smokeInvalidCapability(cliPath, endpoint, codexExecutable) {
       stderr !== "harnessd startup failed (invalid_capability).\n" ||
       stderr.includes(invalidCapability)
     ) {
-      throw new Error("The daemon exposed unsafe startup diagnostics.");
+      throw new Error(`The daemon exposed unsafe startup diagnostics: ${stderr.trim()}`);
     }
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
@@ -166,11 +195,19 @@ async function smokeInvalidCapability(cliPath, endpoint, codexExecutable) {
   }
 }
 
-async function smokeParentWatchdog(cliPath, endpoint, codexExecutable) {
+async function smokeParentWatchdog(cliPath, endpoint, codexExecutable, stateDatabasePath) {
   const capability = randomBytes(32).toString("base64url");
   const child = spawn(
     process.execPath,
-    [cliPath, "--endpoint", endpoint, "--codex-executable", codexExecutable],
+    [
+      cliPath,
+      "--endpoint",
+      endpoint,
+      "--codex-executable",
+      codexExecutable,
+      "--state-database",
+      stateDatabasePath,
+    ],
     {
       stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
     },
@@ -194,7 +231,13 @@ async function smokeParentWatchdog(cliPath, endpoint, codexExecutable) {
     capabilityPipe.on("error", () => undefined);
     watchdogPipe.on("error", () => undefined);
     capabilityPipe.end(capability);
-    await waitForSocket(endpoint, child);
+    try {
+      await waitForSocket(endpoint, child);
+    } catch (error) {
+      throw new Error(`The daemon parent-watchdog endpoint failed: ${stderr.trim()}`, {
+        cause: error,
+      });
+    }
     watchdogPipe.end();
     const [exitCode, signal] = await waitForExit(child, 5_000);
     if (exitCode !== 0 || signal !== null) {
@@ -212,11 +255,19 @@ async function smokeParentWatchdog(cliPath, endpoint, codexExecutable) {
   }
 }
 
-async function smokeUnsupportedCodex(cliPath, endpoint) {
+async function smokeUnsupportedCodex(cliPath, endpoint, stateDatabasePath) {
   const capability = randomBytes(32).toString("base64url");
   const child = spawn(
     process.execPath,
-    [cliPath, "--endpoint", endpoint, "--codex-executable", process.execPath],
+    [
+      cliPath,
+      "--endpoint",
+      endpoint,
+      "--codex-executable",
+      process.execPath,
+      "--state-database",
+      stateDatabasePath,
+    ],
     {
       stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
     },
@@ -271,6 +322,18 @@ async function waitForSocket(endpoint, child) {
     await delay(10);
   }
   throw new Error("The daemon did not create its local endpoint in time.");
+}
+
+async function verifyStateDatabase(stateRoot) {
+  const entries = (await readdir(stateRoot)).sort();
+  if (entries.length !== 1 || entries[0] !== "harness.db") {
+    throw new Error("The supervised daemon left an invalid persistent state layout.");
+  }
+  const metadata = await lstat(join(stateRoot, "harness.db"));
+  if (!metadata.isFile() || (metadata.mode & 0o777) !== 0o600) {
+    throw new Error("The supervised daemon created an insecure persistent state database.");
+  }
+  return { device: metadata.dev, inode: metadata.ino };
 }
 
 async function waitForExit(child, timeoutMs) {

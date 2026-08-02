@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,7 @@ import {
   DesktopRuntimeResourceError,
   DesktopRuntimeRootError,
   ensurePrivateDesktopRuntimeRoot,
+  ensurePrivateDesktopStateDatabasePath,
   resolveDesktopRuntimeResources,
 } from "./runtime-resources.js";
 
@@ -119,6 +120,28 @@ describe("desktop runtime root", () => {
     await symlink(target, join(directory, "runtime"));
 
     await expect(ensurePrivateDesktopRuntimeRoot(directory)).rejects.toBeInstanceOf(
+      DesktopRuntimeRootError,
+    );
+  });
+
+  it("creates a separate owner-private stable state database parent", async () => {
+    const directory = await temporaryDirectory();
+    const databasePath = await ensurePrivateDesktopStateDatabasePath(directory);
+    const stateRoot = join(directory, "state");
+    await chmod(stateRoot, 0o755);
+
+    await expect(ensurePrivateDesktopStateDatabasePath(directory)).resolves.toBe(databasePath);
+    expect(databasePath).toBe(join(stateRoot, "harness.db"));
+    expect((await lstat(stateRoot)).mode & 0o777).toBe(0o700);
+  });
+
+  it("rejects a symbolic-link state root", async () => {
+    const directory = await temporaryDirectory();
+    const target = join(directory, "target-state");
+    await ensureDirectoryAndFile(target, join(target, "marker"), false);
+    await symlink(target, join(directory, "state"));
+
+    await expect(ensurePrivateDesktopStateDatabasePath(directory)).rejects.toBeInstanceOf(
       DesktopRuntimeRootError,
     );
   });

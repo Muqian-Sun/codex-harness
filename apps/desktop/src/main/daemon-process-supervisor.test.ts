@@ -30,6 +30,7 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
         codexExecutable: process.execPath,
         args: [],
         runtimeRoot,
+        stateDatabasePath: join(runtimeRoot, "harness.db"),
         clientVersion: "0.0.0",
       }),
     ).rejects.toMatchObject({ code: "invalid_configuration" });
@@ -43,6 +44,7 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
         codexExecutable: "codex",
         args: [],
         runtimeRoot,
+        stateDatabasePath: join(runtimeRoot, "harness.db"),
         clientVersion: "0.0.0",
       }),
     ).rejects.toMatchObject({ code: "invalid_configuration" });
@@ -55,6 +57,7 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
         codexExecutable: nonExecutable,
         args: [],
         runtimeRoot,
+        stateDatabasePath: join(runtimeRoot, "harness.db"),
         clientVersion: "0.0.0",
       }),
     ).rejects.toMatchObject({ code: "invalid_configuration" });
@@ -67,6 +70,8 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
       "--endpoint=/tmp/other.sock",
       "--codex-executable",
       "--codex-executable=/tmp/other-codex",
+      "--state-database",
+      "--state-database=/tmp/other.db",
     ]) {
       await expect(
         DaemonProcessSupervisor.start({
@@ -74,6 +79,7 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
           codexExecutable: process.execPath,
           args: [reservedArgument],
           runtimeRoot,
+          stateDatabasePath: join(runtimeRoot, "harness.db"),
           clientVersion: "0.0.0",
         }),
       ).rejects.toMatchObject({ code: "invalid_configuration" });
@@ -89,6 +95,34 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
         codexExecutable: process.execPath,
         args: [],
         runtimeRoot,
+        stateDatabasePath: join(runtimeRoot, "harness.db"),
+        clientVersion: "0.0.0",
+      }),
+    ).rejects.toMatchObject({ code: "runtime_root_insecure" });
+  });
+
+  it("rejects malformed state paths and state parents accessible by other users", async () => {
+    const runtimeRoot = await privateRuntimeRoot();
+    await expect(
+      DaemonProcessSupervisor.start({
+        command: process.execPath,
+        codexExecutable: process.execPath,
+        args: [],
+        runtimeRoot,
+        stateDatabasePath: join(runtimeRoot, "other.db"),
+        clientVersion: "0.0.0",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_configuration" });
+
+    const stateRoot = await privateRuntimeRoot();
+    await chmod(stateRoot, 0o755);
+    await expect(
+      DaemonProcessSupervisor.start({
+        command: process.execPath,
+        codexExecutable: process.execPath,
+        args: [],
+        runtimeRoot,
+        stateDatabasePath: join(stateRoot, "harness.db"),
         clientVersion: "0.0.0",
       }),
     ).rejects.toMatchObject({ code: "runtime_root_insecure" });
@@ -105,6 +139,7 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
         codexExecutable: process.execPath,
         args: [],
         runtimeRoot: await privateRuntimeRoot(),
+        stateDatabasePath: join(await privateRuntimeRoot(), "harness.db"),
         clientVersion: "0.0.0",
         electronRunAsNode: "yes",
       }),
@@ -115,6 +150,7 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
         codexExecutable: process.execPath,
         args: [],
         runtimeRoot: await privateRuntimeRoot(),
+        stateDatabasePath: join(await privateRuntimeRoot(), "harness.db"),
         clientVersion: "0.0.0",
         onAccountStatusChanged: "yes",
       }),

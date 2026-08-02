@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -105,6 +105,18 @@ async function runScenario({
     const runtimeEntries = await readdir(join(directory, "runtime"));
     if (runtimeEntries.length !== 0) {
       throw new Error(`The Electron desktop ${expected} smoke left daemon runtime entries.`);
+    }
+    const stateEntries = await readdir(join(directory, "state"));
+    if (expected === "ready") {
+      if (stateEntries.length !== 1 || stateEntries[0] !== "harness.db") {
+        throw new Error("The Electron desktop ready smoke left an invalid state database layout.");
+      }
+      const stateMetadata = await lstat(join(directory, "state", "harness.db"));
+      if (!stateMetadata.isFile() || (stateMetadata.mode & 0o777) !== 0o600) {
+        throw new Error("The Electron desktop ready smoke created an insecure state database.");
+      }
+    } else if (stateEntries.length !== 0) {
+      throw new Error("The Electron desktop failed smoke created state before worker readiness.");
     }
     if (/Electron Security Warning/i.test(stderr)) {
       throw new Error(`The Electron desktop ${expected} smoke emitted a security warning.`);

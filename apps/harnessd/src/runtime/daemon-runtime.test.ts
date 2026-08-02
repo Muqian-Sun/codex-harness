@@ -15,6 +15,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DaemonRuntime } from "./daemon-runtime.js";
+import { DaemonStateStore } from "./daemon-state-store.js";
 import type {
   AppServerWorkerCloseResult,
   AppServerWorkerConfig,
@@ -290,6 +291,52 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       endpointCleanup: "removed",
     });
     expect(runtime.state).toBe("closed");
+  });
+
+  it("keeps recovered state open through readiness and closes it after listener shutdown", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-state-"));
+    temporaryDirectories.push(directory);
+    await chmod(directory, 0o700);
+    const stateStore = await DaemonStateStore.open({ databasePath: join(directory, "harness.db") });
+    const runtime = await DaemonRuntime.start({
+      endpoint: join(directory, "harnessd.sock"),
+      startupCapability: STARTUP_CAPABILITY,
+      serverVersion: "0.0.0",
+      platform: "posix",
+      drainTimeoutMs: 100,
+      handshakeTimeoutMs: 100,
+      stateStore,
+    });
+    runtimes.push(runtime);
+
+    expect(runtime.state).toBe("listening");
+    expect(stateStore.state).toBe("ready");
+    expect(stateStore.inspect()).toMatchObject({ eventCount: 0, projectionCount: 8 });
+    runtime.requestQuiesce("requested");
+    await expect(runtime.closed).resolves.toEqual({
+      reason: "requested",
+      endpointCleanup: "removed",
+    });
+    expect(stateStore.state).toBe("closed");
+  });
+
+  it("rejects and retains no closed state store during startup", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-state-"));
+    temporaryDirectories.push(directory);
+    await chmod(directory, 0o700);
+    const stateStore = await DaemonStateStore.open({ databasePath: join(directory, "harness.db") });
+    stateStore.close();
+
+    await expect(
+      DaemonRuntime.start({
+        endpoint: join(directory, "harnessd.sock"),
+        startupCapability: STARTUP_CAPABILITY,
+        serverVersion: "0.0.0",
+        platform: "posix",
+        stateStore,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_configuration" });
+    await expect(lstat(join(directory, "harnessd.sock"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects concurrent clients while preserving the active connection", async () => {
