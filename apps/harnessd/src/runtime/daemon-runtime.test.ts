@@ -30,6 +30,7 @@ import { monitorParentWatchdog } from "./parent-watchdog.js";
 const STARTUP_CAPABILITY = "A".repeat(43);
 const WORKER_SESSION_ID = "00000000-0000-4000-8000-000000000611";
 const SNAPSHOT_ID = "00000000-0000-4000-8000-000000000612";
+const ACCOUNT_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000613";
 const temporaryDirectories: string[] = [];
 const runtimes: DaemonRuntime[] = [];
 const sockets: Socket[] = [];
@@ -91,6 +92,10 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
     };
   }
 
+  async readAccount(): Promise<JsonValue> {
+    return { account: null, requiresOpenaiAuth: true };
+  }
+
   async close(): Promise<AppServerWorkerCloseResult> {
     this.closeCalls += 1;
     if (this.state === "closed") {
@@ -126,7 +131,7 @@ function runtimeWorkerClose(
 }
 
 async function createWorkerManager(worker: RuntimeFakeWorker): Promise<AppServerWorkerManager> {
-  const ids = [WORKER_SESSION_ID, SNAPSHOT_ID];
+  const ids = [WORKER_SESSION_ID, SNAPSHOT_ID, ACCOUNT_SNAPSHOT_ID];
   const dependencies: AppServerWorkerManagerDependencies = Object.freeze({
     startWorker: async () => worker,
     newId: () => ids.shift() ?? "missing-id",

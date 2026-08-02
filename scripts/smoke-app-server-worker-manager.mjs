@@ -30,9 +30,16 @@ export async function smokeAppServerWorkerManager() {
     });
 
     const first = manager.catalog;
+    const account = manager.accountStatus;
     if (
       first === null ||
+      account === null ||
       !manager.isCatalogCurrent(first) ||
+      !manager.isAccountStatusCurrent(account) ||
+      account.status !== "authenticated" ||
+      account.credentialKind !== "chatgpt" ||
+      account.planType !== "plus" ||
+      JSON.stringify(account).includes("private@example.com") ||
       first.models.map((model) => model.model).join(",") !== "smoke-a,smoke-b"
     ) {
       throw new Error("The compiled worker manager initial catalog was invalid.");
@@ -43,16 +50,32 @@ export async function smokeAppServerWorkerManager() {
       manager.catalog !== refreshed ||
       manager.isCatalogCurrent(first) ||
       !manager.isCatalogCurrent(refreshed) ||
+      manager.accountStatus !== account ||
+      !manager.isAccountStatusCurrent(account) ||
       refreshed.workerSessionId !== first.workerSessionId ||
       refreshed.snapshotId === first.snapshotId
     ) {
       throw new Error("The compiled worker manager freshness result was invalid.");
+    }
+    const refreshedAccount = await manager.refreshAccountStatus();
+    if (
+      manager.state !== "ready" ||
+      manager.accountStatus !== refreshedAccount ||
+      manager.isAccountStatusCurrent(account) ||
+      !manager.isAccountStatusCurrent(refreshedAccount) ||
+      manager.catalog !== refreshed ||
+      !manager.isCatalogCurrent(refreshed) ||
+      refreshedAccount.workerSessionId !== account.workerSessionId ||
+      refreshedAccount.snapshotId === account.snapshotId
+    ) {
+      throw new Error("The compiled worker manager account freshness result was invalid.");
     }
 
     const closed = await manager.close();
     if (
       manager.state !== "closed" ||
       manager.catalog !== null ||
+      manager.accountStatus !== null ||
       closed.reason !== "requested" ||
       closed.containment !== "graceful" ||
       closed.exitCode !== 0 ||
@@ -114,6 +137,20 @@ if (args.length === 1 && args[0] === "--version") {
           : cursor === "page-2"
             ? { data: [model("smoke-a", "low")], nextCursor: null }
             : { data: [], nextCursor: null }
+      });
+    } else if (message.method === "account/read" && initialized && message.params.refreshToken === false) {
+      send({
+        id: message.id,
+        result: {
+          account: {
+            type: "chatgpt",
+            email: "private@example.com",
+            planType: "plus",
+            accessToken: "must-not-survive"
+          },
+          requiresOpenaiAuth: true,
+          futureSecret: "must-not-survive"
+        }
       });
     } else {
       process.exit(65);

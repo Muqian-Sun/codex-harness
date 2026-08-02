@@ -4,6 +4,8 @@ import type { z } from "zod";
 import { deepFreezeJsonValue } from "./json.js";
 import { adapterFailure, adapterSuccess, type AdapterResult } from "./result.js";
 import {
+  AccountReadParamsSchema,
+  AccountReadResponseSchema,
   EmptyResponseSchema,
   ModelListParamsSchema,
   ModelListResponseSchema,
@@ -27,6 +29,7 @@ interface RuntimeSchema {
 }
 
 const METHOD_REGISTRY = {
+  "account/read": [AccountReadParamsSchema, AccountReadResponseSchema],
   "model/list": [ModelListParamsSchema, ModelListResponseSchema],
   "thread/start": [ThreadStartParamsSchema, ThreadResponseSchema],
   "thread/resume": [ThreadResumeParamsSchema, ThreadResponseSchema],

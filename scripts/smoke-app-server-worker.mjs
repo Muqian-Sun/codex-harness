@@ -25,12 +25,17 @@ export async function smokeAppServerWorker() {
       sigkillTimeoutMs: 2_000,
     });
     const result = await worker.listModels({ includeHidden: true, limit: 1 });
+    const account = await worker.readAccount();
     const closed = await worker.close();
     if (
       !Object.isFrozen(result) ||
       !Array.isArray(result.data) ||
       result.data[0]?.model !== "smoke-model" ||
       result.nextCursor !== null ||
+      account.account?.type !== "chatgpt" ||
+      account.account.planType !== "plus" ||
+      "email" in account.account ||
+      JSON.stringify(account).includes("private@example.com") ||
       worker.supportedCodexCliVersion !== "0.146.0-alpha.9.2" ||
       worker.state !== "closed" ||
       closed.reason !== "requested" ||
@@ -83,6 +88,20 @@ if (args.length === 1 && args[0] === "--version") {
         result: {
           data: [{ id: "smoke-model-id", model: "smoke-model" }],
           nextCursor: null
+        }
+      });
+    } else if (message.method === "account/read" && initialized && message.params.refreshToken === false) {
+      send({
+        id: message.id,
+        result: {
+          account: {
+            type: "chatgpt",
+            email: "private@example.com",
+            planType: "plus",
+            accessToken: "must-not-survive"
+          },
+          requiresOpenaiAuth: true,
+          futureSecret: "must-not-survive"
         }
       });
     } else {

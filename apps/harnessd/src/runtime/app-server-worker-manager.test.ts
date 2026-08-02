@@ -14,9 +14,16 @@ import {
 } from "./app-server-worker-manager.js";
 
 const WORKER_SESSION_ID = "00000000-0000-4000-8000-000000000601";
-const FIRST_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000602";
-const SECOND_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000603";
+const FIRST_CATALOG_ID = "00000000-0000-4000-8000-000000000602";
+const FIRST_ACCOUNT_ID = "00000000-0000-4000-8000-000000000603";
+const SECOND_CATALOG_ID = "00000000-0000-4000-8000-000000000604";
+const SECOND_ACCOUNT_ID = "00000000-0000-4000-8000-000000000605";
 const DUMMY_WORKER_CONFIG = {} as AppServerWorkerConfig;
+
+const SIGNED_OUT_ACCOUNT: JsonValue = Object.freeze({
+  account: null,
+  requiresOpenaiAuth: true,
+});
 
 function model(name: string, effort = "medium"): JsonValue {
   return {
@@ -52,6 +59,8 @@ class FakeWorker implements ManagedAppServerWorker {
   state: AppServerWorkerState = "ready";
   readonly requests: unknown[] = [];
   readonly #responses: PendingResponse[];
+  readonly accountRequests: number[] = [];
+  readonly #accountResponses: PendingResponse[];
   readonly #closeResult: AppServerWorkerCloseResult;
   readonly closed: Promise<AppServerWorkerCloseResult>;
   #resolveClosed!: (result: AppServerWorkerCloseResult) => void;
@@ -60,8 +69,10 @@ class FakeWorker implements ManagedAppServerWorker {
   constructor(
     responses: readonly PendingResponse[],
     closeResult: AppServerWorkerCloseResult = workerClose(),
+    accountResponses: readonly PendingResponse[] = [SIGNED_OUT_ACCOUNT],
   ) {
     this.#responses = [...responses];
+    this.#accountResponses = [...accountResponses];
     this.#closeResult = closeResult;
     this.closed = new Promise((resolve) => {
       this.#resolveClosed = resolve;
@@ -79,6 +90,21 @@ class FakeWorker implements ManagedAppServerWorker {
     }
     if (response === undefined) {
       throw new Error("missing fake response");
+    }
+    return response as JsonValue;
+  }
+
+  async readAccount(): Promise<JsonValue> {
+    this.accountRequests.push(this.accountRequests.length + 1);
+    const response = this.#accountResponses.shift();
+    if (response instanceof Error) {
+      throw response;
+    }
+    if (response !== undefined && "promise" in Object(response)) {
+      return await (response as Readonly<{ promise: Promise<JsonValue> }>).promise;
+    }
+    if (response === undefined) {
+      throw new Error("missing fake account response");
     }
     return response as JsonValue;
   }
@@ -102,8 +128,8 @@ class FakeWorker implements ManagedAppServerWorker {
 
 function dependencies(
   worker: ManagedAppServerWorker,
-  ids: readonly string[] = [WORKER_SESSION_ID, FIRST_SNAPSHOT_ID],
-  times: readonly number[] = [1_750_000_000_100],
+  ids: readonly string[] = [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID],
+  times: readonly number[] = [1_750_000_000_100, 1_750_000_000_101],
 ): AppServerWorkerManagerDependencies {
   const remainingIds = [...ids];
   const remainingTimes = [...times];
@@ -141,7 +167,7 @@ describe("AppServerWorkerManager", () => {
     expect(manager.provider).toBe("openai");
     expect(manager.workerSessionId).toBe(WORKER_SESSION_ID);
     expect(manager.catalog).toMatchObject({
-      snapshotId: FIRST_SNAPSHOT_ID,
+      snapshotId: FIRST_CATALOG_ID,
       workerSessionId: WORKER_SESSION_ID,
       provider: "openai",
       complete: true,
@@ -151,6 +177,18 @@ describe("AppServerWorkerManager", () => {
     expect(manager.catalog?.models.map((entry) => entry.model)).toEqual(["fast", "standard"]);
     expect(manager.isCatalogCurrent(manager.catalog)).toBe(true);
     expect(manager.isCatalogCurrent(structuredClone(manager.catalog))).toBe(false);
+    expect(manager.accountStatus).toEqual({
+      schemaVersion: 1,
+      snapshotId: FIRST_ACCOUNT_ID,
+      workerSessionId: WORKER_SESSION_ID,
+      observedAtMs: 1_750_000_000_101,
+      status: "authentication_required",
+      credentialKind: null,
+      planType: null,
+    });
+    expect(manager.isAccountStatusCurrent(manager.accountStatus)).toBe(true);
+    expect(manager.isAccountStatusCurrent(structuredClone(manager.accountStatus))).toBe(false);
+    expect(worker.accountRequests).toHaveLength(1);
 
     await manager.close();
   });
@@ -163,8 +201,8 @@ describe("AppServerWorkerManager", () => {
     ]);
     const manager = await startManager(
       worker,
-      [WORKER_SESSION_ID, FIRST_SNAPSHOT_ID, SECOND_SNAPSHOT_ID],
-      [100, 200],
+      [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID, SECOND_CATALOG_ID],
+      [100, 101, 200],
     );
     const oldCatalog = manager.catalog;
 
@@ -178,7 +216,7 @@ describe("AppServerWorkerManager", () => {
 
     pending.resolve(page([model("second", "high")], null));
     const refreshed = await refresh;
-    expect(refreshed.snapshotId).toBe(SECOND_SNAPSHOT_ID);
+    expect(refreshed.snapshotId).toBe(SECOND_CATALOG_ID);
     expect(refreshed.workerSessionId).toBe(WORKER_SESSION_ID);
     expect(refreshed.observedAtMs).toBe(200);
     expect(manager.catalog).toBe(refreshed);
@@ -186,6 +224,83 @@ describe("AppServerWorkerManager", () => {
     expect(worker.requests).toHaveLength(2);
 
     await manager.close();
+  });
+
+  it("serializes account refresh, preserves the catalog, and invalidates the old snapshot", async () => {
+    const pending = deferred<JsonValue>();
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      SIGNED_OUT_ACCOUNT,
+      Object.freeze({ promise: pending.promise }),
+    ]);
+    const manager = await startManager(
+      worker,
+      [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID, SECOND_ACCOUNT_ID],
+      [100, 101, 300],
+    );
+    const catalog = manager.catalog;
+    const oldAccount = manager.accountStatus;
+
+    const refresh = manager.refreshAccountStatus();
+    expect(manager.state).toBe("refreshing_account");
+    expect(manager.accountStatus).toBeNull();
+    expect(manager.isAccountStatusCurrent(oldAccount)).toBe(false);
+    expect(manager.catalog).toBe(catalog);
+    expect(manager.isCatalogCurrent(catalog)).toBe(true);
+    await expect(manager.refreshAccountStatus()).rejects.toMatchObject({
+      code: "refresh_unavailable",
+    });
+    await expect(manager.refreshCatalog()).rejects.toMatchObject({
+      code: "refresh_unavailable",
+    });
+
+    pending.resolve({
+      account: { type: "chatgpt", planType: "pro" },
+      requiresOpenaiAuth: true,
+    });
+    const refreshed = await refresh;
+    expect(refreshed).toMatchObject({
+      snapshotId: SECOND_ACCOUNT_ID,
+      workerSessionId: WORKER_SESSION_ID,
+      observedAtMs: 300,
+      status: "authenticated",
+      credentialKind: "chatgpt",
+      planType: "pro",
+    });
+    expect(manager.accountStatus).toBe(refreshed);
+    expect(manager.isAccountStatusCurrent(refreshed)).toBe(true);
+    expect(worker.accountRequests).toHaveLength(2);
+
+    await manager.close();
+  });
+
+  it("fails closed without publishing a partial ready state when account observation fails", async () => {
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      new Error("private account error"),
+    ]);
+
+    const error = await startManager(worker).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "account_snapshot_failed" });
+    expect(String(error)).not.toContain("private account error");
+    expect(worker.closeCalls).toBe(1);
+    expect(worker.accountRequests).toHaveLength(1);
+  });
+
+  it("fails closed and withdraws the catalog when account refresh fails", async () => {
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      SIGNED_OUT_ACCOUNT,
+      new Error("private refresh error"),
+    ]);
+    const manager = await startManager(worker);
+    expect(manager.catalog).not.toBeNull();
+
+    const error = await manager.refreshAccountStatus().catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "account_snapshot_failed" });
+    expect(String(error)).not.toContain("private refresh error");
+    await expect(manager.closed).resolves.toMatchObject({ reason: "account_snapshot_failed" });
+    expect(manager.state).toBe("closed");
+    expect(manager.catalog).toBeNull();
+    expect(manager.accountStatus).toBeNull();
+    expect(worker.closeCalls).toBe(1);
   });
 
   it("fails closed on a repeated cursor without exposing it", async () => {
@@ -263,6 +378,7 @@ describe("AppServerWorkerManager", () => {
     });
     expect(manager.state).toBe("closed");
     expect(manager.catalog).toBeNull();
+    expect(manager.accountStatus).toBeNull();
   });
 
   it("closes idempotently and preserves worker containment evidence", async () => {
@@ -281,7 +397,9 @@ describe("AppServerWorkerManager", () => {
     });
     expect(worker.closeCalls).toBe(1);
     expect(manager.catalog).toBeNull();
+    expect(manager.accountStatus).toBeNull();
     await expect(manager.refreshCatalog()).rejects.toMatchObject({ code: "closed" });
+    await expect(manager.refreshAccountStatus()).rejects.toMatchObject({ code: "closed" });
   });
 
   it("does not expose an invalid close result returned by a test worker", async () => {
@@ -350,9 +468,29 @@ describe("AppServerWorkerManager", () => {
 
     const invalidTime = new FakeWorker([page([], null)]);
     await expect(
-      startManager(invalidTime, [WORKER_SESSION_ID, FIRST_SNAPSHOT_ID], [-1]),
+      startManager(invalidTime, [WORKER_SESSION_ID, FIRST_CATALOG_ID], [-1]),
     ).rejects.toMatchObject({ code: "catalog_refresh_failed" });
     expect(invalidTime.closeCalls).toBe(1);
+
+    const invalidAccountSnapshotId = new FakeWorker([page([], null)]);
+    await expect(
+      startManager(
+        invalidAccountSnapshotId,
+        [WORKER_SESSION_ID, FIRST_CATALOG_ID, "invalid-account-snapshot-id"],
+        [1, 2],
+      ),
+    ).rejects.toMatchObject({ code: "account_snapshot_failed" });
+    expect(invalidAccountSnapshotId.closeCalls).toBe(1);
+
+    const invalidAccountTime = new FakeWorker([page([], null)]);
+    await expect(
+      startManager(
+        invalidAccountTime,
+        [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID],
+        [1, -1],
+      ),
+    ).rejects.toMatchObject({ code: "account_snapshot_failed" });
+    expect(invalidAccountTime.closeCalls).toBe(1);
   });
 });
 

@@ -4,6 +4,10 @@ import { constants as osConstants } from "node:os";
 import { validateJsonValue, type JsonValue } from "@codex-harness/protocol";
 
 import {
+  createAccountStatusSnapshot,
+  type AccountStatusSnapshot,
+} from "../domain/account-status.js";
+import {
   createModelCatalogSnapshot,
   type ModelCatalogPageInput,
   type ModelCatalogSnapshot,
@@ -25,9 +29,10 @@ const MAX_CATALOG_RESPONSE_BYTES = 64 * 1024 * 1024;
 const MODEL_LIST_PAGE_SIZE = 1_000;
 
 export type AppServerWorkerManagerState =
-  "starting" | "ready" | "refreshing" | "closing" | "closed";
+  "starting" | "ready" | "refreshing" | "refreshing_account" | "closing" | "closed";
 
 export type AppServerWorkerManagerErrorCode =
+  | "account_snapshot_failed"
   | "catalog_refresh_failed"
   | "closed"
   | "invalid_configuration"
@@ -35,10 +40,11 @@ export type AppServerWorkerManagerErrorCode =
   | "worker_start_failed";
 
 const ERROR_MESSAGES: Readonly<Record<AppServerWorkerManagerErrorCode, string>> = Object.freeze({
+  account_snapshot_failed: "The Codex account status snapshot failed.",
   catalog_refresh_failed: "The Codex model catalog refresh failed.",
   closed: "The Codex App Server worker manager is closed.",
   invalid_configuration: "The Codex App Server worker manager configuration is invalid.",
-  refresh_unavailable: "The Codex model catalog cannot be refreshed in the current state.",
+  refresh_unavailable: "The Codex worker snapshot cannot be refreshed in the current state.",
   worker_start_failed: "The Codex App Server worker failed to start.",
 });
 
@@ -58,7 +64,7 @@ export type AppServerWorkerManagerConfig = Readonly<{
 }>;
 
 export type AppServerWorkerManagerCloseReason =
-  "catalog_refresh_failed" | "requested" | "worker_failure";
+  "account_snapshot_failed" | "catalog_refresh_failed" | "requested" | "worker_failure";
 
 export type AppServerWorkerManagerCloseResult = Readonly<{
   reason: AppServerWorkerManagerCloseReason;
@@ -72,6 +78,7 @@ export type AppServerWorkerManagerCloseResult = Readonly<{
 export type ManagedAppServerWorker = Readonly<{
   state: AppServerWorkerState;
   listModels(params: unknown): Promise<JsonValue>;
+  readAccount(): Promise<JsonValue>;
   close(): Promise<AppServerWorkerCloseResult>;
   closed: Promise<AppServerWorkerCloseResult>;
 }>;
@@ -97,7 +104,9 @@ export class AppServerWorkerManager {
   readonly closed: Promise<AppServerWorkerManagerCloseResult>;
   #resolveClosed!: (result: AppServerWorkerManagerCloseResult) => void;
   #state: AppServerWorkerManagerState = "starting";
+  #startupStage: "account" | "catalog" = "catalog";
   #catalog: ModelCatalogSnapshot | undefined;
+  #accountStatus: AccountStatusSnapshot | undefined;
   #lastWorkerClose: AppServerWorkerCloseResult | undefined;
   #closePromise: Promise<AppServerWorkerManagerCloseResult> | undefined;
 
@@ -121,20 +130,14 @@ export class AppServerWorkerManager {
         if (this.#state === "closing" || this.#state === "closed") {
           return;
         }
-        const reason =
-          this.#state === "starting" || this.#state === "refreshing"
-            ? "catalog_refresh_failed"
-            : "worker_failure";
+        const reason = this.#failureReasonForState();
         void this.#beginClose(reason, normalized);
       },
       () => {
         if (this.#state === "closing" || this.#state === "closed") {
           return;
         }
-        const reason =
-          this.#state === "starting" || this.#state === "refreshing"
-            ? "catalog_refresh_failed"
-            : "worker_failure";
+        const reason = this.#failureReasonForState();
         void this.#beginClose(reason);
       },
     );
@@ -180,13 +183,22 @@ export class AppServerWorkerManager {
       normalizedDependencies,
       workerSessionId,
     );
+    let catalog: ModelCatalogSnapshot;
     try {
-      const snapshot = await manager.#collectCatalog();
-      manager.#installCatalog(snapshot, "starting");
-      return manager;
+      catalog = await manager.#collectCatalog();
     } catch {
       await manager.#beginClose("catalog_refresh_failed");
       throw new AppServerWorkerManagerError("catalog_refresh_failed");
+    }
+    manager.#startupStage = "account";
+    let accountStatus: AccountStatusSnapshot;
+    try {
+      accountStatus = await manager.#collectAccountStatus();
+      manager.#installStartupSnapshots(catalog, accountStatus);
+      return manager;
+    } catch {
+      await manager.#beginClose("account_snapshot_failed");
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
     }
   }
 
@@ -203,14 +215,26 @@ export class AppServerWorkerManager {
   }
 
   get catalog(): ModelCatalogSnapshot | null {
-    return this.#state === "ready" ? (this.#catalog ?? null) : null;
+    return this.#publishesSnapshots() ? (this.#catalog ?? null) : null;
   }
 
   isCatalogCurrent(candidate: unknown): candidate is ModelCatalogSnapshot {
     return (
-      this.#state === "ready" &&
+      this.#publishesSnapshots() &&
       candidate === this.#catalog &&
       this.#catalog?.workerSessionId === this.#workerSessionId
+    );
+  }
+
+  get accountStatus(): AccountStatusSnapshot | null {
+    return this.#publishesSnapshots() ? (this.#accountStatus ?? null) : null;
+  }
+
+  isAccountStatusCurrent(candidate: unknown): candidate is AccountStatusSnapshot {
+    return (
+      this.#publishesSnapshots() &&
+      candidate === this.#accountStatus &&
+      this.#accountStatus?.workerSessionId === this.#workerSessionId
     );
   }
 
@@ -229,6 +253,24 @@ export class AppServerWorkerManager {
     } catch {
       await this.#beginClose("catalog_refresh_failed");
       throw new AppServerWorkerManagerError("catalog_refresh_failed");
+    }
+  }
+
+  async refreshAccountStatus(): Promise<AccountStatusSnapshot> {
+    if (this.#state !== "ready") {
+      throw new AppServerWorkerManagerError(
+        this.#state === "closing" || this.#state === "closed" ? "closed" : "refresh_unavailable",
+      );
+    }
+    this.#state = "refreshing_account";
+    this.#accountStatus = undefined;
+    try {
+      const snapshot = await this.#collectAccountStatus();
+      this.#installAccountStatus(snapshot);
+      return snapshot;
+    } catch {
+      await this.#beginClose("account_snapshot_failed");
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
     }
   }
 
@@ -285,6 +327,19 @@ export class AppServerWorkerManager {
     throw new AppServerWorkerManagerError("catalog_refresh_failed");
   }
 
+  async #collectAccountStatus(): Promise<AccountStatusSnapshot> {
+    this.#requireAccountCollectionState();
+    const response = await this.#worker.readAccount();
+    this.#requireAccountCollectionState();
+    return createAccountStatusSnapshot({
+      schemaVersion: 1,
+      snapshotId: this.#dependencies.newId(),
+      workerSessionId: this.#workerSessionId,
+      observedAtMs: this.#dependencies.now(),
+      response,
+    });
+  }
+
   #requireCatalogCollectionState(): void {
     if (
       (this.#state !== "starting" && this.#state !== "refreshing") ||
@@ -295,7 +350,19 @@ export class AppServerWorkerManager {
     }
   }
 
-  #installCatalog(snapshot: ModelCatalogSnapshot, expectedState: "refreshing" | "starting"): void {
+  #requireAccountCollectionState(): void {
+    if (
+      (this.#state !== "starting" || this.#startupStage !== "account") &&
+      this.#state !== "refreshing_account"
+    ) {
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
+    }
+    if (this.#worker.state !== "ready" || this.#closePromise !== undefined) {
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
+    }
+  }
+
+  #installCatalog(snapshot: ModelCatalogSnapshot, expectedState: "refreshing"): void {
     if (
       this.#state !== expectedState ||
       this.#worker.state !== "ready" ||
@@ -306,6 +373,61 @@ export class AppServerWorkerManager {
     }
     this.#catalog = snapshot;
     this.#state = "ready";
+  }
+
+  #installStartupSnapshots(
+    catalog: ModelCatalogSnapshot,
+    accountStatus: AccountStatusSnapshot,
+  ): void {
+    if (
+      this.#state !== "starting" ||
+      this.#startupStage !== "account" ||
+      this.#worker.state !== "ready" ||
+      this.#closePromise !== undefined ||
+      catalog.workerSessionId !== this.#workerSessionId ||
+      accountStatus.workerSessionId !== this.#workerSessionId
+    ) {
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
+    }
+    this.#catalog = catalog;
+    this.#accountStatus = accountStatus;
+    this.#state = "ready";
+  }
+
+  #installAccountStatus(snapshot: AccountStatusSnapshot): void {
+    if (
+      this.#state !== "refreshing_account" ||
+      this.#worker.state !== "ready" ||
+      this.#closePromise !== undefined ||
+      snapshot.workerSessionId !== this.#workerSessionId
+    ) {
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
+    }
+    this.#accountStatus = snapshot;
+    this.#state = "ready";
+  }
+
+  #publishesSnapshots(): boolean {
+    return (
+      this.#state === "ready" ||
+      this.#state === "refreshing" ||
+      this.#state === "refreshing_account"
+    );
+  }
+
+  #failureReasonForState(): AppServerWorkerManagerCloseReason {
+    if (this.#state === "refreshing_account") {
+      return "account_snapshot_failed";
+    }
+    if (this.#state === "refreshing") {
+      return "catalog_refresh_failed";
+    }
+    if (this.#state === "starting") {
+      return this.#startupStage === "account"
+        ? "account_snapshot_failed"
+        : "catalog_refresh_failed";
+    }
+    return "worker_failure";
   }
 
   #beginClose(
@@ -327,6 +449,7 @@ export class AppServerWorkerManager {
   ): Promise<AppServerWorkerManagerCloseResult> {
     this.#state = "closing";
     this.#catalog = undefined;
+    this.#accountStatus = undefined;
 
     let workerClose = normalizeWorkerCloseResult(observedWorkerClose) ?? this.#lastWorkerClose;
     if (workerClose === undefined) {
@@ -496,6 +619,7 @@ function isManagedWorker(input: unknown): input is ManagedAppServerWorker {
     return (
       typeof input.state === "string" &&
       typeof input.listModels === "function" &&
+      typeof input.readAccount === "function" &&
       typeof input.close === "function" &&
       typeof closed === "object" &&
       closed !== null &&

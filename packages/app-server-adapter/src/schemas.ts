@@ -54,6 +54,59 @@ export const ModelListParamsSchema = z
   })
   .strict();
 
+export const AccountReadParamsSchema = z.object({ refreshToken: z.literal(false) }).strict();
+
+export const AccountPlanTypeSchema = z.enum([
+  "free",
+  "go",
+  "plus",
+  "pro",
+  "prolite",
+  "team",
+  "self_serve_business_usage_based",
+  "business",
+  "ent26",
+  "enterprise_cbp_usage_based",
+  "enterprise",
+  "edu",
+  "unknown",
+]);
+
+const AccountProjectionSchema = z.union([
+  z
+    .object({ type: z.literal("apiKey") })
+    .passthrough()
+    .transform(() => Object.freeze({ type: "apiKey" as const })),
+  z
+    .object({
+      type: z.literal("chatgpt"),
+      email: z.string().max(4096).nullable(),
+      planType: AccountPlanTypeSchema,
+    })
+    .passthrough()
+    .transform((value) => Object.freeze({ type: value.type, planType: value.planType })),
+  z
+    .object({
+      type: z.literal("amazonBedrock"),
+      usesCodexManagedCredentials: z.boolean().optional(),
+    })
+    .passthrough()
+    .transform(() => Object.freeze({ type: "amazonBedrock" as const })),
+]);
+
+export const AccountReadResponseSchema = z
+  .object({
+    account: AccountProjectionSchema.nullable().optional(),
+    requiresOpenaiAuth: z.boolean(),
+  })
+  .passthrough()
+  .transform((value) =>
+    Object.freeze({
+      account: value.account ?? null,
+      requiresOpenaiAuth: value.requiresOpenaiAuth,
+    }),
+  );
+
 export const ThreadStartParamsSchema = z
   .object({
     ...ModelSelectionSchema,
