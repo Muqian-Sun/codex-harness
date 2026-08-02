@@ -93,7 +93,12 @@ async function runScenario({
       throw new Error(`The Electron desktop ${expected} smoke output was invalid.`);
     }
     const result = JSON.parse(smokeLines[0].slice("desktop-smoke:".length));
-    if (result.phase !== expected || (expectedCode !== undefined && result.code !== expectedCode)) {
+    if (
+      result.phase !== expected ||
+      (expectedCode !== undefined && result.code !== expectedCode) ||
+      (expected === "ready" && result.accountObserved !== true) ||
+      (expected !== "ready" && "accountObserved" in result)
+    ) {
       throw new Error(`The Electron desktop ${expected} rendered state was invalid.`);
     }
     const runtimeEntries = await readdir(join(directory, "runtime"));

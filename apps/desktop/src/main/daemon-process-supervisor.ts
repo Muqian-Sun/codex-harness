@@ -11,6 +11,7 @@ import { ProductVersionSchema } from "@codex-harness/protocol";
 import {
   HarnessRpcClient,
   HarnessRpcClientError,
+  type HarnessAccountStatusResult,
   type HarnessRpcClientConfig,
 } from "./harness-rpc-client.js";
 import {
@@ -406,6 +407,10 @@ export class DaemonProcessSupervisor {
       throw new DaemonProcessSupervisorError("rpc_handshake_failed");
     }
     return client;
+  }
+
+  async readAccountStatus(): Promise<HarnessAccountStatusResult> {
+    return await this.client.accountStatus();
   }
 
   async stop(): Promise<DaemonProcessSupervisorCloseResult> {

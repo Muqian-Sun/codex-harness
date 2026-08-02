@@ -6,7 +6,7 @@
 Electron main → Harness daemon → Codex App Server worker → 完整模型目录 + 去敏账户快照
 ```
 
-界面当前只显示这条链路的启动状态。任务创建、TODO/DAG、thread/turn 和智能路由执行尚未开放，不能把“就绪”理解为产品功能已经完整可用。
+界面当前显示这条链路的启动状态，并在就绪时显示去敏的账户启动观察。任务创建、TODO/DAG、thread/turn 和智能路由执行尚未开放，不能把“就绪”理解为产品功能已经完整可用。
 
 ## 前置条件
 
@@ -47,11 +47,13 @@ CODEX_HARNESS_CODEX_EXECUTABLE=/absolute/path/to/codex pnpm desktop:start
 ## 状态含义
 
 - `starting`：正在验证本地资源并启动受控进程链。
-- `ready`：daemon RPC hello、精确 Codex 版本、App Server 初始化、完整模型目录和去敏账户快照均已通过。当前 UI 尚不展示账户快照。
+- `ready`：daemon RPC hello、精确 Codex 版本、App Server 初始化、完整模型目录和去敏账户快照均已通过，main 还已通过只读 `account.status` 获得当前快照。UI 只显示认证状态、凭据类别和已知套餐类别，不显示邮箱、token、快照标识、worker session 或观察时间。
 - `failed`：启动或运行时故障已经保守隔离；界面只显示稳定故障码，不显示路径、stderr 或原始异常。
 - `stopping`：正在排空连接并验证受控进程已经退出。
 
 应用不会在失败后自动重启、自动重放或切换到其他 Codex executable。
+
+账户卡是启动时的一次性观察，不是实时认证监视。当前没有 account notification、登录、退出或 token 刷新入口；会话中账户变化要到后续的通知链路完成后才能安全地实时更新。
 
 ## Electron 首次安装与代理
 

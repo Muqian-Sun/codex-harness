@@ -220,6 +220,69 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
     expect(client.state).toBe("ready");
   });
 
+  it("reads a strictly validated account status snapshot", async () => {
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result: {
+          schemaVersion: 1,
+          snapshotId: "00000000-0000-4000-8000-000000000831",
+          workerSessionId: "00000000-0000-4000-8000-000000000832",
+          observedAtMs: 1_750_000_000_001,
+          status: "authenticated",
+          credentialKind: "chatgpt",
+          planType: "plus",
+        },
+      });
+    });
+    const client = await createClient(endpoint);
+
+    await expect(client.accountStatus()).resolves.toMatchObject({
+      status: "authenticated",
+      credentialKind: "chatgpt",
+      planType: "plus",
+    });
+    expect(client.state).toBe("ready");
+  });
+
+  it("fails closed when an account response contains an unapproved field", async () => {
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result: {
+          schemaVersion: 1,
+          snapshotId: "00000000-0000-4000-8000-000000000831",
+          workerSessionId: "00000000-0000-4000-8000-000000000832",
+          observedAtMs: 1,
+          status: "authenticated",
+          credentialKind: "chatgpt",
+          planType: "plus",
+          email: "private@example.com",
+        },
+      });
+    });
+    const client = await createClient(endpoint);
+
+    const error = await client.accountStatus().catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "protocol_violation" });
+    expect(JSON.stringify(error)).not.toContain("private@example.com");
+    expect(client.state).toBe("closed");
+  });
+
   it("rejects one remote RPC error without invalidating the connection", async () => {
     let requestCount = 0;
     const endpoint = await createScriptedServer((value, socket) => {

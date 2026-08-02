@@ -40,6 +40,7 @@ export type ConnectionSessionConfig = Readonly<{
   serverVersion: string;
   streamIdFactory?: () => string;
   uptimeMs?: () => number;
+  readAccountStatus?: () => unknown;
 }>;
 
 const encoder = new TextEncoder();
@@ -107,6 +108,7 @@ export class ConnectionSession {
   readonly #startupCapability: string;
   readonly #streamIdFactory: () => string;
   readonly #uptimeMs: () => number;
+  readonly #readAccountStatus: () => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
   #streamId: string | undefined;
 
@@ -117,10 +119,14 @@ export class ConnectionSession {
     if (!ProductVersionSchema.safeParse(config.serverVersion).success) {
       throw new Error("Invalid connection session configuration.");
     }
+    if (config.readAccountStatus !== undefined && typeof config.readAccountStatus !== "function") {
+      throw new Error("Invalid connection session configuration.");
+    }
     this.#startupCapability = config.startupCapability;
     this.#serverVersion = config.serverVersion;
     this.#streamIdFactory = config.streamIdFactory ?? generateStreamId;
     this.#uptimeMs = config.uptimeMs ?? (() => process.uptime() * 1_000);
+    this.#readAccountStatus = config.readAccountStatus ?? (() => null);
   }
 
   get state(): ConnectionSessionState {
@@ -255,6 +261,7 @@ export class ConnectionSession {
       streamId,
       uptimeMs: safeUptime(this.#uptimeMs()),
       closing: this.#state === "closing",
+      readAccountStatus: this.#readAccountStatus,
     });
     const actions: ConnectionSessionAction[] = [send(dispatched.envelope)];
     if (dispatched.shutdownRequested && this.#state !== "closing") {

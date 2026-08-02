@@ -10,13 +10,37 @@ export const DESKTOP_BOOTSTRAP_FAILURE_CODES = Object.freeze([
 
 export type DesktopBootstrapFailureCode = (typeof DESKTOP_BOOTSTRAP_FAILURE_CODES)[number];
 
+export const DESKTOP_ACCOUNT_PLAN_TYPES = Object.freeze([
+  "free",
+  "go",
+  "plus",
+  "pro",
+  "prolite",
+  "team",
+  "self_serve_business_usage_based",
+  "business",
+  "ent26",
+  "enterprise_cbp_usage_based",
+  "enterprise",
+  "edu",
+  "unknown",
+] as const);
+
+export type DesktopAccountPlanType = (typeof DESKTOP_ACCOUNT_PLAN_TYPES)[number];
+export type DesktopAccountStatus = Readonly<{
+  status: "authenticated" | "authentication_required" | "not_required";
+  credentialKind: "amazon_bedrock" | "api_key" | "chatgpt" | null;
+  planType: DesktopAccountPlanType | null;
+}>;
+
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
-  | Readonly<{ phase: "ready" }>
+  | Readonly<{ phase: "ready"; account: DesktopAccountStatus }>
   | Readonly<{ phase: "failed"; code: DesktopBootstrapFailureCode }>
   | Readonly<{ phase: "stopping" }>;
 
 const failureCodes = new Set<string>(DESKTOP_BOOTSTRAP_FAILURE_CODES);
+const planTypes = new Set<string>(DESKTOP_ACCOUNT_PLAN_TYPES);
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -24,6 +48,13 @@ export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapSta
   }
   const record = input as Record<string, unknown>;
   const keys = Object.keys(record);
+  if (record.phase === "ready") {
+    if (keys.length !== 2 || !keys.includes("phase") || !keys.includes("account")) {
+      return undefined;
+    }
+    const account = decodeDesktopAccountStatus(record.account, true);
+    return account === undefined ? undefined : Object.freeze({ phase: "ready", account });
+  }
   if (record.phase === "failed") {
     if (
       keys.length !== 2 ||
@@ -39,7 +70,7 @@ export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapSta
   if (
     keys.length !== 1 ||
     keys[0] !== "phase" ||
-    (record.phase !== "starting" && record.phase !== "ready" && record.phase !== "stopping")
+    (record.phase !== "starting" && record.phase !== "stopping")
   ) {
     return undefined;
   }
@@ -55,6 +86,14 @@ export function advanceDesktopBootstrapState(
 
 export function failedBootstrapState(code: DesktopBootstrapFailureCode): DesktopBootstrapState {
   return Object.freeze({ phase: "failed", code });
+}
+
+export function readyBootstrapState(input: unknown): DesktopBootstrapState {
+  const account = decodeDesktopAccountStatus(input, false);
+  if (account === undefined) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({ phase: "ready", account });
 }
 
 export function initialBootstrapState(): DesktopBootstrapState {
@@ -81,11 +120,7 @@ export class BootstrapStateStore {
     if (decoded === undefined || !canTransition(this.#state.phase, decoded.phase)) {
       throw new BootstrapStateTransitionError();
     }
-    if (
-      this.#state.phase === decoded.phase &&
-      (decoded.phase !== "failed" ||
-        (this.#state.phase === "failed" && this.#state.code === decoded.code))
-    ) {
+    if (sameState(this.#state, decoded)) {
       return;
     }
     this.#state = decoded;
@@ -104,6 +139,66 @@ export class BootstrapStateStore {
       this.#listeners.delete(listener);
     };
   }
+}
+
+function decodeDesktopAccountStatus(
+  input: unknown,
+  requireExactKeys: boolean,
+): DesktopAccountStatus | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    requireExactKeys &&
+    (keys.length !== 3 ||
+      !keys.includes("status") ||
+      !keys.includes("credentialKind") ||
+      !keys.includes("planType"))
+  ) {
+    return undefined;
+  }
+  const status = record.status;
+  const credentialKind = record.credentialKind;
+  const planType = record.planType;
+  if (
+    (status !== "authenticated" &&
+      status !== "authentication_required" &&
+      status !== "not_required") ||
+    (credentialKind !== null &&
+      credentialKind !== "amazon_bedrock" &&
+      credentialKind !== "api_key" &&
+      credentialKind !== "chatgpt") ||
+    (planType !== null && (typeof planType !== "string" || !planTypes.has(planType))) ||
+    (status === "authenticated" && credentialKind === null) ||
+    (status !== "authenticated" && credentialKind !== null) ||
+    (credentialKind === "chatgpt" ? planType === null : planType !== null)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    status,
+    credentialKind,
+    planType: planType as DesktopAccountPlanType | null,
+  });
+}
+
+function sameState(current: DesktopBootstrapState, candidate: DesktopBootstrapState): boolean {
+  if (current.phase !== candidate.phase) {
+    return false;
+  }
+  if (current.phase === "failed" && candidate.phase === "failed") {
+    return current.code === candidate.code;
+  }
+  if (current.phase === "ready" && candidate.phase === "ready") {
+    return (
+      current.account.status === candidate.account.status &&
+      current.account.credentialKind === candidate.account.credentialKind &&
+      current.account.planType === candidate.account.planType
+    );
+  }
+  return true;
 }
 
 function canTransition(

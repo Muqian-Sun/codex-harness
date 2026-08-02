@@ -16,6 +16,7 @@ import {
   decodeServerRpcFrame,
   validateJsonValue,
   type JsonValue,
+  type HarnessAccountStatusResult as ProtocolAccountStatusResult,
   type RpcEvent,
   type RpcMethodName,
 } from "@codex-harness/protocol";
@@ -89,6 +90,7 @@ export type HarnessHealthResult = Readonly<{
 }>;
 
 export type HarnessShutdownResult = Readonly<{ accepted: true }>;
+export type HarnessAccountStatusResult = Readonly<ProtocolAccountStatusResult>;
 
 type ConnectAttempt = Readonly<{
   resolve: () => void;
@@ -236,6 +238,10 @@ export class HarnessRpcClient {
 
   async health(): Promise<HarnessHealthResult> {
     return (await this.request("system.health", {})) as HarnessHealthResult;
+  }
+
+  async accountStatus(): Promise<HarnessAccountStatusResult> {
+    return (await this.request("account.status", {})) as HarnessAccountStatusResult;
   }
 
   async requestShutdown(reason?: string): Promise<HarnessShutdownResult> {

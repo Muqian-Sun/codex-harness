@@ -35,6 +35,16 @@ export async function smokeDaemonRuntime() {
     if (health.status !== "ok") {
       throw new Error("The supervised daemon health smoke response was invalid.");
     }
+    const account = await supervisor.readAccountStatus();
+    if (
+      account.status !== "authenticated" ||
+      account.credentialKind !== "chatgpt" ||
+      account.planType !== "plus" ||
+      JSON.stringify(account).includes("private@example.com") ||
+      JSON.stringify(account).includes("must-not-survive")
+    ) {
+      throw new Error("The supervised daemon account status response was invalid.");
+    }
     const stopped = await supervisor.stop();
     if (
       !stopped.expected ||

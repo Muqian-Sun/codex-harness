@@ -2,10 +2,80 @@ import { describe, expect, it } from "vitest";
 
 import { INTERNAL_ERROR_PUBLIC_MESSAGE } from "./constants.js";
 import { createInternalErrorResponse } from "./internal-error.js";
-import { decodeRequestParams, decodeResponseResult } from "./methods.js";
+import { ACCOUNT_PLAN_TYPES, decodeRequestParams, decodeResponseResult } from "./methods.js";
 import { TEST_STREAM_ID } from "./test-fixtures.js";
 
 describe("method contracts", () => {
+  it("strictly validates account status parameters, fields, and semantic invariants", () => {
+    const base = {
+      schemaVersion: 1,
+      snapshotId: "00000000-0000-4000-8000-000000000801",
+      workerSessionId: "00000000-0000-4000-8000-000000000802",
+      observedAtMs: 1_750_000_000_001,
+    } as const;
+
+    expect(decodeRequestParams("account.status", {}).ok).toBe(true);
+    expect(decodeRequestParams("account.status", { refresh: true }).ok).toBe(false);
+    expect(
+      decodeResponseResult("account.status", {
+        ...base,
+        status: "authentication_required",
+        credentialKind: null,
+        planType: null,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeResponseResult("account.status", {
+        ...base,
+        status: "not_required",
+        credentialKind: null,
+        planType: null,
+      }).ok,
+    ).toBe(true);
+    for (const credentialKind of ["api_key", "amazon_bedrock"] as const) {
+      expect(
+        decodeResponseResult("account.status", {
+          ...base,
+          status: "authenticated",
+          credentialKind,
+          planType: null,
+        }).ok,
+      ).toBe(true);
+    }
+    for (const planType of ACCOUNT_PLAN_TYPES) {
+      expect(
+        decodeResponseResult("account.status", {
+          ...base,
+          status: "authenticated",
+          credentialKind: "chatgpt",
+          planType,
+        }).ok,
+      ).toBe(true);
+    }
+
+    for (const invalid of [
+      { ...base, status: "authenticated", credentialKind: null, planType: null },
+      { ...base, status: "not_required", credentialKind: "api_key", planType: null },
+      { ...base, status: "authenticated", credentialKind: "api_key", planType: "plus" },
+      {
+        ...base,
+        status: "authenticated",
+        credentialKind: "chatgpt",
+        planType: "plus",
+        email: "private@example.com",
+      },
+      {
+        ...base,
+        snapshotId: "invalid",
+        status: "authentication_required",
+        credentialKind: null,
+        planType: null,
+      },
+    ]) {
+      expect(decodeResponseResult("account.status", invalid).ok).toBe(false);
+    }
+  });
+
   it("validates health and shutdown parameters and results", () => {
     expect(decodeRequestParams("system.health", {}).ok).toBe(true);
     expect(decodeRequestParams("system.health", { unexpected: true }).ok).toBe(false);

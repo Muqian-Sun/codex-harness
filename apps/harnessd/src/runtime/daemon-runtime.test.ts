@@ -250,6 +250,14 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       result: { status: "ok" },
     });
 
+    const accountPromise = readFrame(socket);
+    sendFrame(socket, rpc("account-1", "account.status", {}));
+    await expect(accountPromise).resolves.toMatchObject({
+      kind: "error",
+      id: "account-1",
+      error: { code: "service.unavailable" },
+    });
+
     const closePromise = once(socket, "close");
     const shutdownResponsePromise = readFrame(socket);
     sendFrame(socket, rpc("shutdown-1", "system.shutdown", { reason: "user.requested" }));
@@ -351,6 +359,29 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       endpointCleanup: "removed",
     });
     expect(runtime.state).toBe("closed");
+  });
+
+  it("serves only the current managed account snapshot", async () => {
+    const worker = new RuntimeFakeWorker();
+    const workerManager = await createWorkerManager(worker);
+    const { endpoint } = await createRuntime({ workerManager });
+    const socket = await connect(endpoint);
+    await authenticate(socket);
+
+    const responsePromise = readFrame(socket);
+    sendFrame(socket, rpc("account-current", "account.status", {}));
+    await expect(responsePromise).resolves.toMatchObject({
+      kind: "response",
+      id: "account-current",
+      result: {
+        schemaVersion: 1,
+        snapshotId: ACCOUNT_SNAPSHOT_ID,
+        workerSessionId: WORKER_SESSION_ID,
+        status: "authentication_required",
+        credentialKind: null,
+        planType: null,
+      },
+    });
   });
 
   it("quiesces with a stable failure when the managed worker exits", async () => {
