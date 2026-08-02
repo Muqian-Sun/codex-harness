@@ -69,7 +69,7 @@ export async function smokeAppServerWorkerManager() {
   }
 }
 
-function fakeCodexSource() {
+export function fakeCodexSource() {
   return `#!${process.execPath}
 import { createInterface } from "node:readline";
 

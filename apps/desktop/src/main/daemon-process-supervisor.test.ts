@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,11 +27,57 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
     await expect(
       DaemonProcessSupervisor.start({
         command: "node",
+        codexExecutable: process.execPath,
         args: [],
         runtimeRoot,
         clientVersion: "0.0.0",
       }),
     ).rejects.toMatchObject({ code: "invalid_configuration" });
+  });
+
+  it("rejects non-absolute and non-executable Codex paths before spawning", async () => {
+    const runtimeRoot = await privateRuntimeRoot();
+    await expect(
+      DaemonProcessSupervisor.start({
+        command: process.execPath,
+        codexExecutable: "codex",
+        args: [],
+        runtimeRoot,
+        clientVersion: "0.0.0",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_configuration" });
+
+    const nonExecutable = join(runtimeRoot, "not-executable");
+    await writeFile(nonExecutable, "not executable", { mode: 0o600 });
+    await expect(
+      DaemonProcessSupervisor.start({
+        command: process.execPath,
+        codexExecutable: nonExecutable,
+        args: [],
+        runtimeRoot,
+        clientVersion: "0.0.0",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_configuration" });
+  });
+
+  it("rejects caller arguments that can override supervisor-owned paths", async () => {
+    const runtimeRoot = await privateRuntimeRoot();
+    for (const reservedArgument of [
+      "--endpoint",
+      "--endpoint=/tmp/other.sock",
+      "--codex-executable",
+      "--codex-executable=/tmp/other-codex",
+    ]) {
+      await expect(
+        DaemonProcessSupervisor.start({
+          command: process.execPath,
+          codexExecutable: process.execPath,
+          args: [reservedArgument],
+          runtimeRoot,
+          clientVersion: "0.0.0",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_configuration" });
+    }
   });
 
   it("rejects runtime roots accessible by other users", async () => {
@@ -40,6 +86,7 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
     await expect(
       DaemonProcessSupervisor.start({
         command: process.execPath,
+        codexExecutable: process.execPath,
         args: [],
         runtimeRoot,
         clientVersion: "0.0.0",

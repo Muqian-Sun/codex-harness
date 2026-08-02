@@ -1,10 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+
+import { fakeCodexSource } from "./smoke-app-server-worker-manager.mjs";
 
 export async function smokeDaemonRuntime() {
   if (process.platform !== "darwin") {
@@ -14,13 +16,17 @@ export async function smokeDaemonRuntime() {
   const directory = await mkdtemp(join(tmpdir(), "ch-smoke-"));
   await chmod(directory, 0o700);
   const endpoint = join(directory, "harnessd.sock");
+  const codexExecutable = join(directory, "fake-codex.mjs");
   const cliPath = fileURLToPath(new URL("../apps/harnessd/dist/cli.js", import.meta.url));
   let supervisor;
 
   try {
+    await writeFile(codexExecutable, fakeCodexSource(), { encoding: "utf8", mode: 0o700 });
+    await chmod(codexExecutable, 0o700);
     const { DaemonProcessSupervisor } = await import("../apps/desktop/dist/main/index.js");
     supervisor = await DaemonProcessSupervisor.start({
       command: process.execPath,
+      codexExecutable,
       args: [cliPath],
       runtimeRoot: directory,
       clientVersion: "0.0.0",
@@ -39,9 +45,10 @@ export async function smokeDaemonRuntime() {
     ) {
       throw new Error("The supervised daemon did not stop cleanly.");
     }
-    await smokeSupervisorRpcLoss(DaemonProcessSupervisor, cliPath, directory);
-    await smokeParentWatchdog(cliPath, endpoint);
-    await smokeInvalidCapability(cliPath, endpoint);
+    await smokeSupervisorRpcLoss(DaemonProcessSupervisor, cliPath, codexExecutable, directory);
+    await smokeParentWatchdog(cliPath, endpoint, codexExecutable);
+    await smokeInvalidCapability(cliPath, endpoint, codexExecutable);
+    await smokeUnsupportedCodex(cliPath, endpoint);
   } finally {
     if (supervisor && supervisor.state !== "closed") {
       await supervisor.stop();
@@ -50,9 +57,15 @@ export async function smokeDaemonRuntime() {
   }
 }
 
-async function smokeSupervisorRpcLoss(DaemonProcessSupervisor, cliPath, runtimeRoot) {
+async function smokeSupervisorRpcLoss(
+  DaemonProcessSupervisor,
+  cliPath,
+  codexExecutable,
+  runtimeRoot,
+) {
   const supervisor = await DaemonProcessSupervisor.start({
     command: process.execPath,
+    codexExecutable,
     args: [cliPath],
     runtimeRoot,
     clientVersion: "0.0.0",
@@ -68,11 +81,15 @@ async function smokeSupervisorRpcLoss(DaemonProcessSupervisor, cliPath, runtimeR
   }
 }
 
-async function smokeInvalidCapability(cliPath, endpoint) {
+async function smokeInvalidCapability(cliPath, endpoint, codexExecutable) {
   const invalidCapability = `${"A".repeat(42)}B`;
-  const child = spawn(process.execPath, [cliPath, "--endpoint", endpoint], {
-    stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
-  });
+  const child = spawn(
+    process.execPath,
+    [cliPath, "--endpoint", endpoint, "--codex-executable", codexExecutable],
+    {
+      stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
+    },
+  );
   let stderr = "";
   try {
     child.stderr?.setEncoding("utf8");
@@ -105,11 +122,15 @@ async function smokeInvalidCapability(cliPath, endpoint) {
   }
 }
 
-async function smokeParentWatchdog(cliPath, endpoint) {
+async function smokeParentWatchdog(cliPath, endpoint, codexExecutable) {
   const capability = randomBytes(32).toString("base64url");
-  const child = spawn(process.execPath, [cliPath, "--endpoint", endpoint], {
-    stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
-  });
+  const child = spawn(
+    process.execPath,
+    [cliPath, "--endpoint", endpoint, "--codex-executable", codexExecutable],
+    {
+      stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
+    },
+  );
   let stderr = "";
   try {
     child.stderr?.setEncoding("utf8");
@@ -143,6 +164,47 @@ async function smokeParentWatchdog(cliPath, endpoint) {
         child.kill("SIGKILL");
         await once(child, "exit");
       }
+    }
+  }
+}
+
+async function smokeUnsupportedCodex(cliPath, endpoint) {
+  const capability = randomBytes(32).toString("base64url");
+  const child = spawn(
+    process.execPath,
+    [cliPath, "--endpoint", endpoint, "--codex-executable", process.execPath],
+    {
+      stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
+    },
+  );
+  let stderr = "";
+  try {
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const capabilityPipe = child.stdio[3];
+    const watchdogPipe = child.stdio[4];
+    if (!capabilityPipe || !watchdogPipe || !("write" in capabilityPipe)) {
+      throw new Error("The daemon inherited pipes were not created.");
+    }
+    capabilityPipe.on("error", () => undefined);
+    watchdogPipe.on("error", () => undefined);
+    capabilityPipe.end(capability);
+    const [exitCode, signal] = await waitForExit(child, 10_000);
+    if (exitCode !== 1 || signal !== null) {
+      throw new Error("The daemon accepted an unsupported Codex executable.");
+    }
+    if (
+      stderr !== "harnessd startup failed (worker_start_failed).\n" ||
+      stderr.includes(process.execPath)
+    ) {
+      throw new Error("The daemon exposed unsafe Codex startup diagnostics.");
+    }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await once(child, "exit");
     }
   }
 }

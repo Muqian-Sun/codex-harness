@@ -19,7 +19,7 @@ import {
   type ProcessGroupEscalation,
 } from "./owned-process-group.js";
 
-const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_GRACEFUL_TIMEOUT_MS = 5_000;
 const DEFAULT_SIGTERM_TIMEOUT_MS = 2_000;
 const DEFAULT_SIGKILL_TIMEOUT_MS = 2_000;
@@ -68,6 +68,7 @@ export class DaemonProcessSupervisorError extends Error {
 
 export type DaemonProcessSupervisorConfig = Readonly<{
   command: string;
+  codexExecutable: string;
   args: readonly string[];
   runtimeRoot: string;
   clientVersion: string;
@@ -99,6 +100,7 @@ type ChildExit = Readonly<{ exitCode: number | null; signal: NodeJS.Signals | nu
 
 type NormalizedConfig = Readonly<{
   command: string;
+  codexExecutable: string;
   args: readonly string[];
   runtimeRoot: string;
   clientVersion: string;
@@ -115,6 +117,7 @@ function validTimeout(value: number): boolean {
 function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfig {
   try {
     const command = config.command;
+    const codexExecutable = config.codexExecutable;
     const args = [...config.args];
     const runtimeRoot = config.runtimeRoot;
     const clientVersion = config.clientVersion;
@@ -126,6 +129,9 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
       typeof command !== "string" ||
       !isAbsolute(command) ||
       command.includes("\0") ||
+      typeof codexExecutable !== "string" ||
+      !isAbsolute(codexExecutable) ||
+      codexExecutable.includes("\0") ||
       typeof runtimeRoot !== "string" ||
       !isAbsolute(runtimeRoot) ||
       runtimeRoot.includes("\0") ||
@@ -137,7 +143,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
           argument.includes("\0") ||
           Buffer.byteLength(argument, "utf8") > MAX_ARGUMENT_BYTES,
       ) ||
-      args.includes("--endpoint")
+      args.some(isReservedDaemonArgument)
     ) {
       throw new DaemonProcessSupervisorError("invalid_configuration");
     }
@@ -153,6 +159,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
 
     return Object.freeze({
       command,
+      codexExecutable,
       args: Object.freeze(args),
       runtimeRoot,
       clientVersion,
@@ -167,6 +174,15 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
     }
     throw new DaemonProcessSupervisorError("invalid_configuration");
   }
+}
+
+function isReservedDaemonArgument(argument: string): boolean {
+  return (
+    argument === "--endpoint" ||
+    argument.startsWith("--endpoint=") ||
+    argument === "--codex-executable" ||
+    argument.startsWith("--codex-executable=")
+  );
 }
 
 export class DaemonProcessSupervisor {
@@ -238,7 +254,10 @@ export class DaemonProcessSupervisor {
     const normalized = normalizeConfig(config);
     await validateRuntimeRoot(normalized.runtimeRoot);
     try {
-      await access(normalized.command, fsConstants.X_OK);
+      await Promise.all([
+        access(normalized.command, fsConstants.X_OK),
+        access(normalized.codexExecutable, fsConstants.X_OK),
+      ]);
     } catch {
       throw new DaemonProcessSupervisorError("invalid_configuration");
     }
@@ -254,11 +273,21 @@ export class DaemonProcessSupervisor {
 
     let child: ChildProcess;
     try {
-      child = spawn(normalized.command, [...normalized.args, "--endpoint", endpoint], {
-        cwd: runtimeDirectory,
-        detached: true,
-        stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
-      });
+      child = spawn(
+        normalized.command,
+        [
+          ...normalized.args,
+          "--endpoint",
+          endpoint,
+          "--codex-executable",
+          normalized.codexExecutable,
+        ],
+        {
+          cwd: runtimeDirectory,
+          detached: true,
+          stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+        },
+      );
     } catch {
       await removeEmptyDirectory(runtimeDirectory);
       throw new DaemonProcessSupervisorError("spawn_failed");
