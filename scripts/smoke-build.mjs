@@ -25,6 +25,9 @@ const { smokeShadowRouteFeatureSnapshot } =
   await import("./smoke-shadow-route-feature-snapshot.mjs");
 await smokeShadowRouteFeatureSnapshot();
 
+const { smokeHarnessRouteEvidence } = await import("./smoke-harness-route-evidence.mjs");
+await smokeHarnessRouteEvidence();
+
 const { smokeModelCatalog } = await import("./smoke-model-catalog.mjs");
 await smokeModelCatalog();
 
