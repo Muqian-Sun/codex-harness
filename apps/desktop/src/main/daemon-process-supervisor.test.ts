@@ -99,5 +99,15 @@ describe.skipIf(process.platform !== "darwin")("macOS daemon supervisor configur
       config: unknown,
     ) => Promise<DaemonProcessSupervisor>;
     await expect(startUnknown(null)).rejects.toMatchObject({ code: "invalid_configuration" });
+    await expect(
+      startUnknown({
+        command: process.execPath,
+        codexExecutable: process.execPath,
+        args: [],
+        runtimeRoot: await privateRuntimeRoot(),
+        clientVersion: "0.0.0",
+        electronRunAsNode: "yes",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_configuration" });
   });
 });

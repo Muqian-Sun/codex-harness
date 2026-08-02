@@ -32,6 +32,8 @@ export default tseslint.config(
   {
     files: [
       "apps/desktop/src/main/**/*.ts",
+      "apps/desktop/src/electron/**/*.ts",
+      "apps/desktop/src/preload/**/*.cts",
       "apps/harnessd/**/*.ts",
       "packages/app-server-adapter/**/*.ts",
       "packages/protocol/**/*.ts",
@@ -55,6 +57,12 @@ export default tseslint.config(
         },
       ],
       "no-restricted-globals": ["error", ...rendererRestrictedGlobals],
+    },
+  },
+  {
+    files: ["apps/desktop/src/preload/**/*.cts"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
     },
   },
 );

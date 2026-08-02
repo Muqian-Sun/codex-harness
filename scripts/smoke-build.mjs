@@ -74,3 +74,6 @@ await smokeAppServerWorkerManager();
 
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();
+
+const { smokeDesktopApplication } = await import("./smoke-desktop-application.mjs");
+await smokeDesktopApplication();

@@ -5,7 +5,12 @@
     "rootDir": "src",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["src/main/**/*.ts"],
+  "include": [
+    "src/main/**/*.ts",
+    "src/electron/**/*.ts",
+    "src/preload/**/*.cts",
+    "src/shared/**/*.ts"
+  ],
   "exclude": ["src/**/*.test.ts", "src/**/*.spec.ts", "src/test-fixtures.ts"],
   "references": [{ "path": "../../packages/protocol" }]
 }

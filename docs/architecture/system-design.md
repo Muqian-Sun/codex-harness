@@ -270,6 +270,12 @@ Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，�
 - 文件选择、shell、剪贴板、通知和外部链接等系统能力由 main 单独审批。
 - Provider 凭据保存在操作系统钥匙串，只在 daemon 需要时通过受控通道使用，不返回 renderer。
 
+macOS 首个 application bootstrap 使用 Electron 43 与 React renderer。应用在 ready 前全局启用 renderer sandbox，通过固定 `app://harness/` 安全 origin 只加载本地构建资源，拒绝 permission request/check、任意导航、新窗口和 webview；响应与 HTML 同时设置严格 CSP。Preload 只暴露无参数的 readiness 快照读取和单向状态订阅，main 还要求 IPC sender 是当前受管窗口的精确 main frame。Renderer 只接收深冻结的 `starting`、`ready`、`failed`、`stopping` 状态及封闭故障码，不接收路径、endpoint、原始错误或关闭能力。
+
+Electron main 在应用生命周期内只创建一个 daemon supervisor。开发态必须通过显式环境变量提供绝对 Codex executable，不自动扫描、下载或猜测安装位置；打包态忽略该变量，只接受 `process.resourcesPath` 下固定的 `harnessd/cli.js` 和 `codex/codex`，正式资源复制、签名和公证完成前不得宣称打包模式可发布。daemon 子进程暂时使用当前 Electron executable 的 `ELECTRON_RUN_AS_NODE=1` 模式运行编译 CLI；该变量只加到受控 daemon 子进程，不进入 renderer。正式打包 PR 必须单独决定 Electron fuse 与 launcher 契约。
+
+桌面启动先显示 `starting`，只有 supervisor 已完成 daemon RPC hello，且 daemon 内部精确 Codex 版本、App Server 初始化和完整模型目录均通过后才显示 `ready`。ready 后 daemon 非预期关闭只显示稳定 `daemon_unavailable`，不自动重启或重放。macOS 关闭全部窗口保留单一应用/daemon，Dock activate 可以重建窗口；`before-quit` 必须等待 supervisor 排空，无法证明进程包含时以失败状态退出。当前界面只证明底座 readiness，thread/turn、任务、TODO/DAG 和路由执行继续关闭。
+
 ## 14. 审批、权限与证据
 
 权限策略按操作风险而不是模型能力决定。只读操作、工作区写入、命令执行、网络、凭据访问和外部系统写入使用不同权限级别。审批记录包含请求摘要、作用域、过期时间、决策者和关联运行。
@@ -287,14 +293,14 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 运行时能力在依赖具备前保持关闭：
 
 1. 工作区、协议契约与 CI：已由 PR #1 完成。
-2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list`、单 worker manager、完整目录分页、session freshness、daemon 排空绑定以及 Electron supervisor → daemon CLI 的真实启动接线已完成；application bootstrap/安装资源定位、认证状态、thread/turn、审批和工具 gate 待后续 PR。
+2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list`、单 worker manager、完整目录分页、session freshness、daemon 排空绑定以及 Electron supervisor → daemon CLI 的真实启动接线已完成；macOS application bootstrap、开发态显式资源定位和只读 readiness UI 已完成，正式安装资源复制/签名、认证状态、thread/turn、审批和工具 gate 待后续 PR。
 3. daemon 生命周期与本地传输。
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
 7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、worker session 目录 freshness、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划、工作区分析与运行目标四个 observer、品牌证据组合 coordinator 和 RouteDecision 审计已完成；其余运行时 manifest/权限计划/工作区分析/目标 inventory 新鲜度强制、evidence-to-feature 适配、执行前目录复核、daemon 路由 coordinator 和影子评估待后续 PR。
 8. 串行调度。
-9. 安全 Electron 桌面壳与任务 UI。
+9. 安全 Electron 桌面壳与任务 UI：sandbox、固定本地 origin、白名单 preload、单例 daemon 生命周期和 readiness 状态屏已完成；任务列表、详情、TODO/DAG、交互写 RPC 和正式打包待后续 PR。
 10. 审批、证据、运行恢复和打包门禁。
 11. 端到端验证、故障注入、安全检查和发布。
 
