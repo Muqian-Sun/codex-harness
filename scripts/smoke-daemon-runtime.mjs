@@ -39,7 +39,7 @@ export async function smokeDaemonRuntime() {
     if (
       account.status !== "authenticated" ||
       account.credentialKind !== "chatgpt" ||
-      account.planType !== "plus" ||
+      account.planType !== "pro" ||
       JSON.stringify(account).includes("private@example.com") ||
       JSON.stringify(account).includes("must-not-survive")
     ) {

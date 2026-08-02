@@ -67,7 +67,7 @@ export class AppServerWorkerError extends Error {
 
 export type AppServerWorkerEvent = Extract<
   AppServerAdapterEvent,
-  { type: "notification" | "recovery_lifecycle" }
+  { type: "account_updated" | "notification" | "recovery_lifecycle" }
 >;
 
 export type AppServerWorkerCloseReason =
@@ -383,7 +383,11 @@ export class AppServerWorker {
       return;
     }
 
-    if (event.type === "notification" || event.type === "recovery_lifecycle") {
+    if (
+      event.type === "account_updated" ||
+      event.type === "notification" ||
+      event.type === "recovery_lifecycle"
+    ) {
       try {
         const handled = this.#config.onEvent?.(event);
         if (handled !== undefined) {

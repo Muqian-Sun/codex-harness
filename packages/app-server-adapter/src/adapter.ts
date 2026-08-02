@@ -1,5 +1,6 @@
 import type { JsonValue } from "@codex-harness/protocol";
 
+import { parseAppServerAccountNotification } from "./account-notification.js";
 import { deepFreezeJsonValue } from "./json.js";
 import {
   parseAppServerLifecycleNotification,
@@ -49,6 +50,7 @@ export type AppServerAdapterEvent =
       error: Readonly<{ code: number; message: string }>;
     }>
   | Readonly<{ type: "notification"; method: string; params: JsonValue | undefined }>
+  | Readonly<{ type: "account_updated" }>
   | Readonly<{ type: "recovery_lifecycle"; signal: AppServerRecoveryLifecycleSignal }>
   | Readonly<{
       type: "server_request";
@@ -164,6 +166,14 @@ export class AppServerProtocolAdapter {
           type: "recovery_lifecycle",
           signal: lifecycle.signal,
         });
+      }
+      const account = parseAppServerAccountNotification(message.method, message.params);
+      if (account.kind === "invalid") {
+        this.#state = "closed";
+        return adapterFailure("invalid_message");
+      }
+      if (account.kind === "signal") {
+        return adapterSuccess(Object.freeze({ type: "account_updated" }));
       }
       return adapterSuccess({
         type: "notification",

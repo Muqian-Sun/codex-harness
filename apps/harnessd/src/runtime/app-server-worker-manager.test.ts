@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type {
   AppServerWorkerCloseResult,
   AppServerWorkerConfig,
+  AppServerWorkerEvent,
   AppServerWorkerState,
 } from "./app-server-worker.js";
 import {
@@ -18,6 +19,7 @@ const FIRST_CATALOG_ID = "00000000-0000-4000-8000-000000000602";
 const FIRST_ACCOUNT_ID = "00000000-0000-4000-8000-000000000603";
 const SECOND_CATALOG_ID = "00000000-0000-4000-8000-000000000604";
 const SECOND_ACCOUNT_ID = "00000000-0000-4000-8000-000000000605";
+const THIRD_ACCOUNT_ID = "00000000-0000-4000-8000-000000000606";
 const DUMMY_WORKER_CONFIG = {} as AppServerWorkerConfig;
 
 const SIGNED_OUT_ACCOUNT: JsonValue = Object.freeze({
@@ -130,11 +132,15 @@ function dependencies(
   worker: ManagedAppServerWorker,
   ids: readonly string[] = [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID],
   times: readonly number[] = [1_750_000_000_100, 1_750_000_000_101],
+  onStart?: (config: AppServerWorkerConfig) => void | Promise<void>,
 ): AppServerWorkerManagerDependencies {
   const remainingIds = [...ids];
   const remainingTimes = [...times];
   return Object.freeze({
-    startWorker: async () => worker,
+    startWorker: async (config) => {
+      await onStart?.(config);
+      return worker;
+    },
     newId: () => remainingIds.shift() ?? "missing-id",
     now: () => remainingTimes.shift() ?? -1,
   });
@@ -231,11 +237,28 @@ describe("AppServerWorkerManager", () => {
     const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
       SIGNED_OUT_ACCOUNT,
       Object.freeze({ promise: pending.promise }),
+      {
+        account: { type: "chatgpt", planType: "pro" },
+        requiresOpenaiAuth: true,
+      },
     ]);
-    const manager = await startManager(
-      worker,
-      [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID, SECOND_ACCOUNT_ID],
-      [100, 101, 300],
+    let onEvent: AppServerWorkerConfig["onEvent"];
+    const manager = await AppServerWorkerManager.start(
+      { provider: "openai", worker: DUMMY_WORKER_CONFIG },
+      dependencies(
+        worker,
+        [
+          WORKER_SESSION_ID,
+          FIRST_CATALOG_ID,
+          FIRST_ACCOUNT_ID,
+          SECOND_ACCOUNT_ID,
+          THIRD_ACCOUNT_ID,
+        ],
+        [100, 101, 300, 301],
+        (config) => {
+          onEvent = config.onEvent;
+        },
+      ),
     );
     const catalog = manager.catalog;
     const oldAccount = manager.accountStatus;
@@ -252,23 +275,223 @@ describe("AppServerWorkerManager", () => {
     await expect(manager.refreshCatalog()).rejects.toMatchObject({
       code: "refresh_unavailable",
     });
+    await onEvent?.({ type: "account_updated" });
+    expect(worker.accountRequests).toHaveLength(2);
 
     pending.resolve({
-      account: { type: "chatgpt", planType: "pro" },
+      account: { type: "chatgpt", planType: "plus" },
       requiresOpenaiAuth: true,
     });
     const refreshed = await refresh;
     expect(refreshed).toMatchObject({
-      snapshotId: SECOND_ACCOUNT_ID,
+      snapshotId: THIRD_ACCOUNT_ID,
       workerSessionId: WORKER_SESSION_ID,
-      observedAtMs: 300,
+      observedAtMs: 301,
       status: "authenticated",
       credentialKind: "chatgpt",
       planType: "pro",
     });
     expect(manager.accountStatus).toBe(refreshed);
     expect(manager.isAccountStatusCurrent(refreshed)).toBe(true);
+    expect(worker.accountRequests).toHaveLength(3);
+
+    await manager.close();
+  });
+
+  it("re-reads the authoritative account snapshot when an update arrives during startup", async () => {
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      SIGNED_OUT_ACCOUNT,
+      {
+        account: { type: "chatgpt", planType: "pro" },
+        requiresOpenaiAuth: true,
+      },
+    ]);
+    const manager = await AppServerWorkerManager.start(
+      { provider: "openai", worker: DUMMY_WORKER_CONFIG },
+      dependencies(
+        worker,
+        [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID, SECOND_ACCOUNT_ID],
+        [100, 101, 102],
+        async (config) => {
+          await config.onEvent?.({ type: "account_updated" });
+        },
+      ),
+    );
+
     expect(worker.accountRequests).toHaveLength(2);
+    expect(manager.accountStatus).toMatchObject({
+      snapshotId: SECOND_ACCOUNT_ID,
+      observedAtMs: 102,
+      status: "authenticated",
+      credentialKind: "chatgpt",
+      planType: "pro",
+    });
+
+    await manager.close();
+  });
+
+  it("invalidates immediately and coalesces repeated updates within one account read", async () => {
+    const pending = deferred<JsonValue>();
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      SIGNED_OUT_ACCOUNT,
+      Object.freeze({ promise: pending.promise }),
+      {
+        account: { type: "chatgpt", planType: "pro" },
+        requiresOpenaiAuth: true,
+      },
+    ]);
+    let onEvent: AppServerWorkerConfig["onEvent"];
+    const manager = await AppServerWorkerManager.start(
+      { provider: "openai", worker: DUMMY_WORKER_CONFIG },
+      dependencies(
+        worker,
+        [
+          WORKER_SESSION_ID,
+          FIRST_CATALOG_ID,
+          FIRST_ACCOUNT_ID,
+          SECOND_ACCOUNT_ID,
+          THIRD_ACCOUNT_ID,
+        ],
+        [100, 101, 102, 103],
+        (config) => {
+          onEvent = config.onEvent;
+        },
+      ),
+    );
+    const oldAccount = manager.accountStatus;
+
+    const firstUpdate = Promise.resolve(onEvent?.({ type: "account_updated" }));
+    expect(manager.state).toBe("refreshing_account");
+    expect(manager.accountStatus).toBeNull();
+    expect(manager.isAccountStatusCurrent(oldAccount)).toBe(false);
+    const repeatedUpdates = [
+      Promise.resolve(onEvent?.({ type: "account_updated" })),
+      Promise.resolve(onEvent?.({ type: "account_updated" })),
+    ];
+    expect(worker.accountRequests).toHaveLength(2);
+
+    pending.resolve({
+      account: { type: "chatgpt", planType: "plus" },
+      requiresOpenaiAuth: true,
+    });
+    await Promise.all([firstUpdate, ...repeatedUpdates]);
+
+    expect(worker.accountRequests).toHaveLength(3);
+    expect(manager.state).toBe("ready");
+    expect(manager.accountStatus).toMatchObject({
+      snapshotId: THIRD_ACCOUNT_ID,
+      observedAtMs: 103,
+      planType: "pro",
+    });
+
+    await manager.close();
+  });
+
+  it("defers an account update until an in-flight catalog refresh is complete", async () => {
+    const pendingCatalog = deferred<JsonValue>();
+    const worker = new FakeWorker(
+      [page([model("first")], null), Object.freeze({ promise: pendingCatalog.promise })],
+      workerClose(),
+      [
+        SIGNED_OUT_ACCOUNT,
+        {
+          account: { type: "chatgpt", planType: "team" },
+          requiresOpenaiAuth: true,
+        },
+      ],
+    );
+    let onEvent: AppServerWorkerConfig["onEvent"];
+    const manager = await AppServerWorkerManager.start(
+      { provider: "openai", worker: DUMMY_WORKER_CONFIG },
+      dependencies(
+        worker,
+        [
+          WORKER_SESSION_ID,
+          FIRST_CATALOG_ID,
+          FIRST_ACCOUNT_ID,
+          SECOND_CATALOG_ID,
+          SECOND_ACCOUNT_ID,
+        ],
+        [100, 101, 102, 103],
+        (config) => {
+          onEvent = config.onEvent;
+        },
+      ),
+    );
+    const oldAccount = manager.accountStatus;
+
+    const catalogRefresh = manager.refreshCatalog();
+    await onEvent?.({ type: "account_updated" });
+    expect(manager.state).toBe("refreshing");
+    expect(manager.accountStatus).toBe(oldAccount);
+    expect(worker.accountRequests).toHaveLength(1);
+
+    pendingCatalog.resolve(page([model("second")], null));
+    await catalogRefresh;
+
+    expect(worker.accountRequests).toHaveLength(2);
+    expect(manager.state).toBe("ready");
+    expect(manager.accountStatus).toMatchObject({
+      snapshotId: SECOND_ACCOUNT_ID,
+      observedAtMs: 103,
+      planType: "team",
+    });
+
+    await manager.close();
+  });
+
+  it("fails closed when a notification-triggered authoritative re-read fails", async () => {
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      SIGNED_OUT_ACCOUNT,
+      new Error("private notification refresh error"),
+    ]);
+    let onEvent: AppServerWorkerConfig["onEvent"];
+    const manager = await AppServerWorkerManager.start(
+      { provider: "openai", worker: DUMMY_WORKER_CONFIG },
+      dependencies(worker, undefined, undefined, (config) => {
+        onEvent = config.onEvent;
+      }),
+    );
+
+    const error = await Promise.resolve(onEvent?.({ type: "account_updated" })).catch(
+      (failure: unknown) => failure,
+    );
+    expect(error).toMatchObject({ code: "account_snapshot_failed" });
+    expect(String(error)).not.toContain("private notification refresh error");
+    await expect(manager.closed).resolves.toMatchObject({ reason: "account_snapshot_failed" });
+    expect(manager.state).toBe("closed");
+    expect(manager.catalog).toBeNull();
+    expect(manager.accountStatus).toBeNull();
+  });
+
+  it("preserves the configured event handler for non-account events", async () => {
+    const forwarded: AppServerWorkerEvent[] = [];
+    let onEvent: AppServerWorkerConfig["onEvent"];
+    const worker = new FakeWorker([page([model("first")], null)]);
+    const manager = await AppServerWorkerManager.start(
+      {
+        provider: "openai",
+        worker: {
+          ...DUMMY_WORKER_CONFIG,
+          onEvent: (event) => {
+            forwarded.push(event);
+          },
+        },
+      },
+      dependencies(worker, undefined, undefined, (config) => {
+        onEvent = config.onEvent;
+      }),
+    );
+    const event: AppServerWorkerEvent = {
+      type: "notification",
+      method: "future/event",
+      params: { future: true },
+    };
+
+    await onEvent?.(event);
+
+    expect(forwarded).toEqual([event]);
+    expect(worker.accountRequests).toHaveLength(1);
 
     await manager.close();
   });
