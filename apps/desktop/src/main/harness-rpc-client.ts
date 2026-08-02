@@ -20,6 +20,10 @@ import {
   type HarnessAccountStatusResult as ProtocolAccountStatusResult,
   type HarnessModelCatalogPageParams as ProtocolModelCatalogPageParams,
   type HarnessModelCatalogPageResult as ProtocolModelCatalogPageResult,
+  type HarnessProjectCatalogPageParams as ProtocolProjectCatalogPageParams,
+  type HarnessProjectCatalogPageResult as ProtocolProjectCatalogPageResult,
+  type HarnessProjectRegisterParams as ProtocolProjectRegisterParams,
+  type HarnessProjectRegisterResult as ProtocolProjectRegisterResult,
   type HarnessRoutingConfigurationResult as ProtocolRoutingConfigurationResult,
   type HarnessRoutingConfigurationSetParams as ProtocolRoutingConfigurationSetParams,
   type RpcEvent,
@@ -98,6 +102,10 @@ export type HarnessShutdownResult = Readonly<{ accepted: true }>;
 export type HarnessAccountStatusResult = Readonly<ProtocolAccountStatusResult>;
 export type HarnessModelCatalogPageParams = Readonly<ProtocolModelCatalogPageParams>;
 export type HarnessModelCatalogPageResult = Readonly<ProtocolModelCatalogPageResult>;
+export type HarnessProjectCatalogPageParams = Readonly<ProtocolProjectCatalogPageParams>;
+export type HarnessProjectCatalogPageResult = Readonly<ProtocolProjectCatalogPageResult>;
+export type HarnessProjectRegisterParams = Readonly<ProtocolProjectRegisterParams>;
+export type HarnessProjectRegisterResult = Readonly<ProtocolProjectRegisterResult>;
 export type HarnessRoutingConfigurationResult = Readonly<ProtocolRoutingConfigurationResult>;
 export type HarnessRoutingConfigurationSetParams = Readonly<ProtocolRoutingConfigurationSetParams>;
 export type HarnessAccountStatusObservation = Readonly<{
@@ -295,6 +303,24 @@ export class HarnessRpcClient {
       "routing.configuration.get",
       {},
     )) as HarnessRoutingConfigurationResult;
+  }
+
+  async projectCatalogPage(
+    params: HarnessProjectCatalogPageParams,
+  ): Promise<HarnessProjectCatalogPageResult> {
+    return (await this.request(
+      "project.catalog_page",
+      params as JsonValue,
+    )) as unknown as HarnessProjectCatalogPageResult;
+  }
+
+  async registerProject(
+    params: HarnessProjectRegisterParams,
+  ): Promise<HarnessProjectRegisterResult> {
+    return (await this.request(
+      "project.register",
+      params as JsonValue,
+    )) as unknown as HarnessProjectRegisterResult;
   }
 
   async setRoutingConfiguration(

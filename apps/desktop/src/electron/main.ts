@@ -1,9 +1,10 @@
-import { isAbsolute, normalize } from "node:path";
+import { basename, isAbsolute, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   net,
   protocol,
@@ -21,6 +22,8 @@ import {
   DESKTOP_ACCOUNT_PLAN_TYPES,
   decodeDesktopRoutingConfigurationMutationResult,
   decodeDesktopRoutingConfigurationUpdate,
+  decodeDesktopProjectSelectionResult,
+  decodeDesktopProjectWorkspaceRegistration,
   failedBootstrapState,
   type DesktopBootstrapState,
 } from "../shared/bootstrap-state.js";
@@ -40,10 +43,13 @@ import {
 const GET_BOOTSTRAP_STATE_CHANNEL = "desktop.bootstrap.get";
 const BOOTSTRAP_STATE_CHANGED_CHANNEL = "desktop.bootstrap.changed";
 const SET_ROUTING_CONFIGURATION_CHANNEL = "desktop.routing.set";
+const CHOOSE_PROJECT_WORKSPACE_CHANNEL = "desktop.project.choose";
 const DEVELOPMENT_CODEX_ENVIRONMENT = "CODEX_HARNESS_CODEX_EXECUTABLE";
 const DEVELOPMENT_SMOKE_EXPECTED_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_EXPECTED";
 const DEVELOPMENT_SMOKE_USER_DATA_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_USER_DATA";
 const DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_ROUTING";
+const DEVELOPMENT_SMOKE_PROJECT_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_PROJECT";
+const DEVELOPMENT_SMOKE_PROJECT_PATH_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_PROJECT_PATH";
 const preloadPath = fileURLToPath(new URL("../preload/index.cjs", import.meta.url));
 const rendererRoot = fileURLToPath(new URL("../renderer", import.meta.url));
 const developmentDaemonEntry = fileURLToPath(
@@ -141,6 +147,7 @@ async function runDesktopApplication(): Promise<void> {
     }
   };
   stateStore.subscribe(broadcastState);
+  let projectWorkspaceSelectionActive = false;
 
   ipcMain.handle(
     GET_BOOTSTRAP_STATE_CHANNEL,
@@ -149,6 +156,44 @@ async function runDesktopApplication(): Promise<void> {
         throw new Error("The desktop IPC sender is not authorized.");
       }
       return stateStore.current;
+    },
+  );
+
+  ipcMain.handle(
+    CHOOSE_PROJECT_WORKSPACE_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      const owner = args.length === 0 ? managedRendererWindow(event, windows) : undefined;
+      if (owner === undefined) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      if (stateStore.current.phase !== "ready" || projectWorkspaceSelectionActive) {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      projectWorkspaceSelectionActive = true;
+      try {
+        const selection = await chooseProjectDirectory(owner);
+        if (selection.status !== "selected") {
+          return selection;
+        }
+        const registration = decodeDesktopProjectWorkspaceRegistration({
+          displayName: basename(selection.absolutePath) || selection.absolutePath,
+          workspace: {
+            platform: currentDesktopProjectPlatform(),
+            absolutePath: selection.absolutePath,
+          },
+        });
+        if (registration === undefined) {
+          return Object.freeze({ status: "unavailable" as const });
+        }
+        const result = decodeDesktopProjectSelectionResult(
+          await controller.registerProjectWorkspace(registration),
+        );
+        return result ?? Object.freeze({ status: "unavailable" as const });
+      } catch {
+        return Object.freeze({ status: "unavailable" as const });
+      } finally {
+        projectWorkspaceSelectionActive = false;
+      }
     },
   );
 
@@ -225,6 +270,7 @@ async function runDesktopApplication(): Promise<void> {
     const expected = process.env[DEVELOPMENT_SMOKE_EXPECTED_ENVIRONMENT];
     if (expected === "ready" || expected === "failed") {
       const routingMode = process.env[DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT];
+      const projectMode = process.env[DEVELOPMENT_SMOKE_PROJECT_ENVIRONMENT];
       installSmokeObservation(
         mainWindow,
         stateStore,
@@ -233,6 +279,7 @@ async function runDesktopApplication(): Promise<void> {
           smokeExitOverride = 1;
         },
         routingMode === "configure" || routingMode === "recover" ? routingMode : undefined,
+        projectMode === "register" || projectMode === "recover" ? projectMode : undefined,
       );
     }
   }
@@ -244,16 +291,74 @@ function isManagedRenderer(
   event: IpcMainInvokeEvent,
   windows: ReadonlySet<BrowserWindow>,
 ): boolean {
+  return managedRendererWindow(event, windows) !== undefined;
+}
+
+function managedRendererWindow(
+  event: IpcMainInvokeEvent,
+  windows: ReadonlySet<BrowserWindow>,
+): BrowserWindow | undefined {
   for (const window of windows) {
     if (
       !window.isDestroyed() &&
       event.sender === window.webContents &&
       isTrustedRendererSender(event.senderFrame, window.webContents)
     ) {
-      return true;
+      return window;
     }
   }
-  return false;
+  return undefined;
+}
+
+async function chooseProjectDirectory(
+  owner: BrowserWindow,
+): Promise<
+  Readonly<{ status: "cancelled" | "unavailable" } | { status: "selected"; absolutePath: string }>
+> {
+  const smokePath = developmentSmokeProjectPath();
+  if (smokePath !== undefined) {
+    return Object.freeze({ status: "selected", absolutePath: smokePath });
+  }
+  const result = await dialog.showOpenDialog(owner, {
+    title: "选择 Harness 工作区",
+    buttonLabel: "注册工作区",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled) {
+    return Object.freeze({ status: "cancelled" });
+  }
+  return result.filePaths.length === 1
+    ? Object.freeze({ status: "selected", absolutePath: result.filePaths[0]! })
+    : Object.freeze({ status: "unavailable" });
+}
+
+function developmentSmokeProjectPath(): string | undefined {
+  if (app.isPackaged || process.env[DEVELOPMENT_SMOKE_PROJECT_ENVIRONMENT] !== "register") {
+    return undefined;
+  }
+  const userData = app.getPath("userData");
+  const projectPath = process.env[DEVELOPMENT_SMOKE_PROJECT_PATH_ENVIRONMENT];
+  if (
+    projectPath === undefined ||
+    !isAbsolute(projectPath) ||
+    projectPath.includes("\0") ||
+    normalize(projectPath) !== projectPath ||
+    !projectPath.startsWith(`${userData}/`) ||
+    basename(projectPath).length === 0
+  ) {
+    throw new Error("The desktop smoke Project path is invalid.");
+  }
+  return projectPath;
+}
+
+function currentDesktopProjectPlatform(): "macos" | "windows" | "linux" {
+  if (process.platform === "darwin") {
+    return "macos";
+  }
+  if (process.platform === "win32") {
+    return "windows";
+  }
+  return "linux";
 }
 
 function denyRendererPermissions(): void {
@@ -362,6 +467,7 @@ function desktopSmokeBootstrapProgress(state: DesktopBootstrapState): unknown {
       modelCount: state.catalog.totalVisibleModels,
       routingConfigured: state.routing.configured,
       routingProfileVersion: state.routing.profileVersion,
+      projectCount: state.projects.projects.length,
     });
   }
   return Object.freeze({ phase: state.phase });
@@ -373,6 +479,7 @@ function installSmokeObservation(
   expected: "ready" | "failed",
   markFailure: () => void,
   routingMode: "configure" | "recover" | undefined,
+  projectMode: "register" | "recover" | undefined,
 ): void {
   let finished = false;
   let inspecting = false;
@@ -418,6 +525,7 @@ function installSmokeObservation(
           const rendered = (await window.webContents.executeJavaScript(
             `(() => {
             const routingMode = ${JSON.stringify(routingMode)};
+            const projectMode = ${JSON.stringify(projectMode)};
             const matrix = document.querySelector("[data-routing-configured]");
             if (routingMode === "configure" && matrix?.dataset.routingConfigured === "false" && !window.__codexHarnessRoutingSmokeSubmitted) {
               const values = ${JSON.stringify(ROUTING_SMOKE_DRAFT)};
@@ -434,6 +542,14 @@ function installSmokeObservation(
               if (draftReady && save instanceof HTMLButtonElement && !save.disabled) {
                 window.__codexHarnessRoutingSmokeSubmitted = true;
                 save.click();
+              }
+            }
+            const projectRegistry = document.querySelector("[data-project-count]");
+            if (projectMode === "register" && projectRegistry?.dataset.projectCount === "0" && !window.__codexHarnessProjectSmokeSubmitted) {
+              const choose = document.querySelector("[data-project-choose]");
+              if (choose instanceof HTMLButtonElement && !choose.disabled) {
+                window.__codexHarnessProjectSmokeSubmitted = true;
+                choose.click();
               }
             }
             const text = document.body?.textContent ?? "";
@@ -457,6 +573,12 @@ function installSmokeObservation(
               routingFeedback: document.querySelector("[data-routing-feedback]")?.textContent,
               routingSaveDisabled: document.querySelector("[data-routing-save]")?.disabled,
               routingSubmitted: window.__codexHarnessRoutingSmokeSubmitted === true,
+              projectCount: projectRegistry?.dataset.projectCount,
+              projectIdentity: Array.from(document.querySelectorAll("[data-project-identity]"), (element) => element.dataset.projectIdentity),
+              projectPathShape: Array.from(document.querySelectorAll("[data-project-path]"), (element) => typeof element.dataset.projectPath === "string" && element.dataset.projectPath.startsWith("/tmp/ch-el-") && element.dataset.projectPath.endsWith("/workspace")),
+              projectFeedback: document.querySelector("[data-project-feedback]")?.textContent,
+              projectSubmitted: window.__codexHarnessProjectSmokeSubmitted === true,
+              projectSelected: document.querySelector("[data-project-selected]") !== null,
               containsSensitiveText: ["private@example.com", "must-not-survive", "snapshotId", "workerSessionId", "nextCursor", "id-smoke"].some((value) => text.includes(value))
             };
           })()`,
@@ -481,6 +603,12 @@ function installSmokeObservation(
             routingFeedback?: unknown;
             routingSaveDisabled?: unknown;
             routingSubmitted?: unknown;
+            projectCount?: unknown;
+            projectIdentity?: unknown;
+            projectPathShape?: unknown;
+            projectFeedback?: unknown;
+            projectSubmitted?: unknown;
+            projectSelected?: unknown;
             containsSensitiveText?: unknown;
           };
           lastRendererProgress = Object.freeze({
@@ -496,6 +624,12 @@ function installSmokeObservation(
             routingFeedback: rendered.routingFeedback,
             routingSaveDisabled: rendered.routingSaveDisabled,
             routingSubmitted: rendered.routingSubmitted,
+            projectCount: rendered.projectCount,
+            projectIdentity: rendered.projectIdentity,
+            projectPathShape: rendered.projectPathShape,
+            projectFeedback: rendered.projectFeedback,
+            projectSubmitted: rendered.projectSubmitted,
+            projectSelected: rendered.projectSelected,
           });
           if (
             routingMode === "configure" &&
@@ -529,16 +663,31 @@ function installSmokeObservation(
                 rendered.routingAvailability.every((status) => status === "observed_available") &&
                 (routingMode !== "configure" ||
                   rendered.routingFeedback === "配置已持久化；实际执行仍未开放。")));
+          const projectObserved =
+            expected === "ready" &&
+            (projectMode === undefined ||
+              (rendered.projectCount === "1" &&
+                Array.isArray(rendered.projectIdentity) &&
+                rendered.projectIdentity.length === 1 &&
+                rendered.projectIdentity[0] === "unverified" &&
+                Array.isArray(rendered.projectPathShape) &&
+                rendered.projectPathShape.length === 1 &&
+                rendered.projectPathShape[0] === true &&
+                (projectMode !== "register" ||
+                  (rendered.projectSubmitted === true &&
+                    rendered.projectSelected === true &&
+                    rendered.projectFeedback === "工作区已持久化；Task 与执行仍未开放。"))));
           if (
             rendered.phase === expected &&
             (expected !== "failed" ||
               (typeof rendered.code === "string" && rendered.code.length > 0)) &&
-            (expected !== "ready" || (accountObserved && modelCatalogObserved && routingObserved))
+            (expected !== "ready" ||
+              (accountObserved && modelCatalogObserved && routingObserved && projectObserved))
           ) {
             finished = true;
             clearTimeout(timeout);
             process.stdout.write(
-              `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true, routingObserved: true } : {}) })}\n`,
+              `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true, routingObserved: true, projectObserved: true } : {}) })}\n`,
             );
             app.quit();
             return;

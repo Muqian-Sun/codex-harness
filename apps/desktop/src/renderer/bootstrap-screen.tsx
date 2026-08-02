@@ -5,6 +5,9 @@ import type {
   DesktopAccountStatus,
   DesktopBootstrapState,
   DesktopModelCatalogSummary,
+  DesktopProjectCatalog,
+  DesktopProjectSelectionResult,
+  DesktopProjectSummary,
   DesktopRoutingAvailabilityStatus,
   DesktopRoutingConfiguration,
   DesktopRoutingConfigurationMutationResult,
@@ -136,6 +139,8 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
           <BoundaryCard />
         )}
 
+        {state.phase === "ready" ? <ProjectRegistryPanel projects={state.projects} /> : null}
+
         {state.phase === "ready" ? (
           <RoutingConfigurationPanel routing={state.routing} catalog={state.catalog} />
         ) : null}
@@ -144,12 +149,125 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
       </section>
 
       <footer className="footer-note">
-        <span>路由配置可持久化；任务、TODO / DAG、实际模型选择与执行仍由后续安全门禁控制。</span>
+        <span>
+          工作区与路由配置可持久化；任务、TODO / DAG、实际模型选择与执行仍由后续安全门禁控制。
+        </span>
         <span className="footer-rule" aria-hidden="true" />
         <span>LOCAL ONLY</span>
       </footer>
     </main>
   );
+}
+
+function ProjectRegistryPanel({ projects }: Readonly<{ projects: DesktopProjectCatalog }>) {
+  const [selectionState, setSelectionState] = useState<
+    "idle" | "choosing" | "registered" | "existing" | "unavailable"
+  >("idle");
+  const [selectedProject, setSelectedProject] = useState<DesktopProjectSummary | undefined>();
+
+  const choose = async (): Promise<void> => {
+    if (selectionState === "choosing") {
+      return;
+    }
+    setSelectionState("choosing");
+    setSelectedProject(undefined);
+    try {
+      const result = await desktopProjectApi().chooseProjectWorkspace();
+      if (result.status === "cancelled") {
+        setSelectionState("idle");
+        return;
+      }
+      if (result.status === "selected") {
+        setSelectedProject(result.project);
+      }
+      setSelectionState(result.status === "selected" ? result.registrationStatus : "unavailable");
+    } catch {
+      setSelectionState("unavailable");
+    }
+  };
+
+  return (
+    <section
+      className="project-registry"
+      aria-label="已注册工作区"
+      data-project-count={String(projects.projects.length)}
+    >
+      <header className="project-header">
+        <div>
+          <p className="card-index">03 / PROJECT REGISTRY</p>
+          <h2>工作区注册表</h2>
+          <p>目录由原生选择器明确授予；当前只保存路径身份，不读取文件，也不授予执行权限。</p>
+        </div>
+        <button
+          type="button"
+          data-project-choose
+          disabled={selectionState === "choosing"}
+          onClick={choose}
+        >
+          {selectionState === "choosing" ? "正在打开目录选择器" : "添加工作区"}
+        </button>
+      </header>
+
+      {projects.projects.length === 0 ? (
+        <div className="project-empty">
+          <strong>尚未注册 Project</strong>
+          <span>选择一个本地目录，为后续 Task 归属建立稳定身份。</span>
+        </div>
+      ) : (
+        <ol className="project-list">
+          {projects.projects.map((project, index) => (
+            <li key={project.projectId} data-project-id={project.projectId}>
+              <span className="project-sequence">{String(index + 1).padStart(2, "0")}</span>
+              <div className="project-identity">
+                <strong>{project.displayName}</strong>
+                <code data-project-path={project.workspace.absolutePath}>
+                  {project.workspace.absolutePath}
+                </code>
+              </div>
+              <div className="project-badges">
+                <span data-project-platform={project.workspace.platform}>
+                  {project.workspace.platform.toUpperCase()}
+                </span>
+                <span data-project-identity={project.workspace.identityStatus}>
+                  UNVERIFIED IDENTITY
+                </span>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {selectedProject === undefined ? null : (
+        <div className="project-selection" data-project-selected={selectedProject.projectId}>
+          <span>本次选择</span>
+          <strong>{selectedProject.displayName}</strong>
+          <code>{selectedProject.workspace.absolutePath}</code>
+        </div>
+      )}
+
+      <footer className="project-note" aria-live="polite">
+        <span data-project-feedback>{projectSelectionFeedback(selectionState)}</span>
+        <span>{projects.hasMore ? "另有 Project 未在首屏展开" : "EXECUTION LOCKED"}</span>
+      </footer>
+    </section>
+  );
+}
+
+function projectSelectionFeedback(
+  state: "idle" | "choosing" | "registered" | "existing" | "unavailable",
+): string {
+  switch (state) {
+    case "idle":
+      return "注册不代表目录已验证，也不会启动 Codex。";
+    case "choosing":
+      return "等待原生目录选择结果。";
+    case "registered":
+      return "工作区已持久化；Task 与执行仍未开放。";
+    case "existing":
+      return "该工作区已存在，已加载权威记录。";
+    case "unavailable":
+      return "当前无法确认注册结果，请重新选择或重启后核对。";
+  }
 }
 
 type RoutingDraft = Readonly<
@@ -200,7 +318,7 @@ function RoutingConfigurationPanel({
     >
       <header className="routing-header">
         <div>
-          <p className="card-index">03 / ROUTING MATRIX</p>
+          <p className="card-index">04 / ROUTING MATRIX</p>
           <h2>三级模型控制台</h2>
           <p>模型与推理强度由用户明确配置；Harness 只保存精确映射，不根据名称猜测能力。</p>
         </div>
@@ -382,6 +500,18 @@ function desktopRoutingApi(): Readonly<{
   ).codexHarness;
 }
 
+function desktopProjectApi(): Readonly<{
+  chooseProjectWorkspace(): Promise<DesktopProjectSelectionResult>;
+}> {
+  return (
+    globalThis as unknown as {
+      codexHarness: Readonly<{
+        chooseProjectWorkspace(): Promise<DesktopProjectSelectionResult>;
+      }>;
+    }
+  ).codexHarness;
+}
+
 function readInputValue(input: unknown): string {
   return (input as { value: string }).value;
 }
@@ -397,7 +527,7 @@ function ModelCatalogSummary({ catalog }: Readonly<{ catalog: DesktopModelCatalo
     >
       <header className="catalog-header">
         <div>
-          <p className="card-index">04 / MODEL ROSTER</p>
+          <p className="card-index">05 / MODEL ROSTER</p>
           <h2>可见模型目录</h2>
         </div>
         <div className="catalog-summary">

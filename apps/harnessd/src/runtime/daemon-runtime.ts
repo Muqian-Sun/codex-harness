@@ -24,6 +24,7 @@ import {
 } from "./local-endpoint.js";
 import type { DaemonStateStore } from "./daemon-state-store.js";
 import type { ModelRoutingConfigurationService } from "./model-routing-configuration-service.js";
+import type { ProjectRegistryService } from "./project-registry-service.js";
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -88,6 +89,7 @@ export class DaemonRuntime {
   readonly #workerManager: AppServerWorkerManager | undefined;
   readonly #stateStore: DaemonStateStore | undefined;
   readonly #routingConfigurationService: ModelRoutingConfigurationService | undefined;
+  readonly #projectRegistryService: ProjectRegistryService | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
@@ -116,6 +118,7 @@ export class DaemonRuntime {
     > &
       Readonly<{
         routingConfigurationService?: ModelRoutingConfigurationService;
+        projectRegistryService?: ProjectRegistryService;
         stateStore?: DaemonStateStore;
         workerManager?: AppServerWorkerManager;
       }>,
@@ -128,6 +131,7 @@ export class DaemonRuntime {
     this.#workerManager = config.workerManager;
     this.#stateStore = config.stateStore;
     this.#routingConfigurationService = config.routingConfigurationService;
+    this.#projectRegistryService = config.projectRegistryService;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
@@ -181,6 +185,12 @@ export class DaemonRuntime {
           : new (
               await import("./model-routing-configuration-service.js")
             ).ModelRoutingConfigurationService(config.stateStore, config.workerManager);
+      const projectRegistryService =
+        config.stateStore === undefined
+          ? undefined
+          : new (await import("./project-registry-service.js")).ProjectRegistryService(
+              config.stateStore,
+            );
       runtime = new DaemonRuntime(endpoint, {
         startupCapability: config.startupCapability,
         serverVersion: config.serverVersion,
@@ -189,6 +199,7 @@ export class DaemonRuntime {
         ...(config.workerManager === undefined ? {} : { workerManager: config.workerManager }),
         ...(config.stateStore === undefined ? {} : { stateStore: config.stateStore }),
         ...(routingConfigurationService === undefined ? {} : { routingConfigurationService }),
+        ...(projectRegistryService === undefined ? {} : { projectRegistryService }),
       });
     } catch {
       await Promise.all([
@@ -295,6 +306,8 @@ export class DaemonRuntime {
       serverVersion: this.#serverVersion,
       readAccountStatus: () => this.#readCurrentAccountStatus(),
       readModelCatalogPage: (params) => this.#readCurrentModelCatalogPage(params),
+      readProjectCatalogPage: (params) => this.#readProjectCatalogPage(params),
+      registerProject: (params) => this.#registerProject(params),
       readRoutingConfiguration: () => this.#readRoutingConfiguration(),
       setRoutingConfiguration: (params) => this.#setRoutingConfiguration(params),
     });
@@ -404,6 +417,30 @@ export class DaemonRuntime {
       return service.read();
     } catch {
       throw new RpcProviderError("unavailable");
+    }
+  }
+
+  #readProjectCatalogPage(params: unknown): unknown {
+    const service = this.#projectRegistryService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.list(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(isProjectRegistryConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
+  #registerProject(params: unknown): unknown {
+    const service = this.#projectRegistryService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.register(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(isProjectRegistryConflict(error) ? "conflict" : "unavailable");
     }
   }
 
@@ -558,6 +595,15 @@ function isRoutingConfigurationConflict(error: unknown): boolean {
   return (
     error instanceof Error &&
     error.name === "ModelRoutingConfigurationServiceError" &&
+    "code" in error &&
+    error.code === "conflict"
+  );
+}
+
+function isProjectRegistryConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "ProjectRegistryServiceError" &&
     "code" in error &&
     error.code === "conflict"
   );

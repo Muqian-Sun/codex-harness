@@ -6,6 +6,7 @@ import {
   ACCOUNT_PLAN_TYPES,
   MAX_MODEL_CATALOG_PAGE_SIZE,
   MAX_MODEL_REASONING_EFFORTS,
+  MAX_PROJECT_CATALOG_PAGE_SIZE,
   decodeEventParams,
   decodeRequestParams,
   decodeResponseResult,
@@ -286,6 +287,112 @@ describe("method contracts", () => {
       },
     ]) {
       expect(decodeResponseResult("routing.configuration.get", invalid).ok).toBe(false);
+    }
+  });
+
+  it("strictly validates bounded Project catalog and registration contracts", () => {
+    const projectId = "00000000-0000-4000-8000-000000000861";
+    const commandId = "00000000-0000-4000-8000-000000000862";
+    const workspace = {
+      platform: "macos",
+      absolutePath: "/Users/example/workspace",
+    } as const;
+    const project = {
+      projectId,
+      projectVersion: 1,
+      displayName: "workspace",
+      workspace: { ...workspace, identityStatus: "unverified" },
+    } as const;
+
+    expect(decodeRequestParams("project.catalog_page", { cursor: null, limit: 12 }).ok).toBe(true);
+    expect(decodeRequestParams("project.catalog_page", { cursor: projectId, limit: 1 }).ok).toBe(
+      true,
+    );
+    expect(
+      decodeResponseResult("project.catalog_page", {
+        schemaVersion: 1,
+        projects: [project],
+        nextCursor: projectId,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeRequestParams("project.register", {
+        commandId,
+        projectId,
+        displayName: "workspace",
+        workspace,
+      }).ok,
+    ).toBe(true);
+    for (const status of ["registered", "existing"] as const) {
+      expect(
+        decodeResponseResult("project.register", { schemaVersion: 1, status, project }).ok,
+      ).toBe(true);
+    }
+
+    for (const invalid of [
+      { cursor: null, limit: 0 },
+      { cursor: null, limit: MAX_PROJECT_CATALOG_PAGE_SIZE + 1 },
+      { cursor: "invalid", limit: 1 },
+      { cursor: null, limit: 1, extra: true },
+    ]) {
+      expect(decodeRequestParams("project.catalog_page", invalid).ok).toBe(false);
+    }
+
+    for (const invalidPath of [
+      "relative/path",
+      "/Users/example/../workspace",
+      "/Users/example//workspace",
+      "/Users/example/workspace/",
+      "c:\\workspace",
+      "C:/workspace",
+      "C:\\workspace\\..\\other",
+      "\\\\?\\C:\\workspace",
+    ]) {
+      expect(
+        decodeRequestParams("project.register", {
+          commandId,
+          projectId,
+          displayName: "workspace",
+          workspace: {
+            platform: invalidPath.startsWith("/") ? "macos" : "windows",
+            absolutePath: invalidPath,
+          },
+        }).ok,
+      ).toBe(false);
+    }
+
+    for (const validWorkspace of [
+      { platform: "macos", absolutePath: "/" },
+      { platform: "linux", absolutePath: "/srv/workspace" },
+      { platform: "windows", absolutePath: "C:\\" },
+      { platform: "windows", absolutePath: "C:\\workspace" },
+      { platform: "windows", absolutePath: "\\\\server\\share\\" },
+      { platform: "windows", absolutePath: "\\\\server\\share\\workspace" },
+    ] as const) {
+      expect(
+        decodeRequestParams("project.register", {
+          commandId,
+          projectId,
+          displayName: "workspace",
+          workspace: validWorkspace,
+        }).ok,
+      ).toBe(true);
+    }
+
+    for (const invalid of [
+      { schemaVersion: 1, projects: [], nextCursor: projectId },
+      { schemaVersion: 1, projects: [project], nextCursor: commandId },
+      { schemaVersion: 1, projects: [project, project], nextCursor: null },
+      {
+        schemaVersion: 1,
+        projects: [project, { ...project, projectId: commandId }],
+        nextCursor: null,
+      },
+      { schemaVersion: 1, status: "future", project },
+      { schemaVersion: 1, status: "registered", project: { ...project, createdAtMs: 1 } },
+    ]) {
+      const method = "status" in invalid ? "project.register" : "project.catalog_page";
+      expect(decodeResponseResult(method, invalid).ok).toBe(false);
     }
   });
 

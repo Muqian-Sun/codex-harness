@@ -11,12 +11,16 @@ import {
 import {
   failedBootstrapState,
   decodeDesktopRoutingConfigurationUpdate,
+  decodeDesktopProjectWorkspaceRegistration,
   projectDesktopModelCatalogSummary,
+  projectDesktopProjectCatalog,
+  projectDesktopProjectRegistration,
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
   type BootstrapStateStore,
   type DesktopBootstrapFailureCode,
   type DesktopRoutingConfigurationMutationResult,
+  type DesktopProjectSelectionResult,
 } from "../shared/bootstrap-state.js";
 import { DesktopRuntimeResourceError, DesktopRuntimeRootError } from "./runtime-resources.js";
 
@@ -25,6 +29,8 @@ export type DesktopSupervisorHandle = Pick<
   | "closed"
   | "readAccountStatusObservation"
   | "readModelCatalogPage"
+  | "readProjectCatalogPage"
+  | "registerProject"
   | "readRoutingConfiguration"
   | "setRoutingConfiguration"
   | "stop"
@@ -77,7 +83,9 @@ export class DesktopApplicationController {
       if (current.phase !== "ready") {
         return Object.freeze({ status: "unavailable" });
       }
-      this.#stateStore.transition(readyBootstrapState(current.account, current.catalog, routing));
+      this.#stateStore.transition(
+        readyBootstrapState(current.account, current.catalog, routing, current.projects),
+      );
       return Object.freeze({ status: "saved", routing });
     } catch (error: unknown) {
       if (!(error instanceof HarnessRpcClientError) || error.remoteCode !== "rpc.conflict") {
@@ -91,11 +99,49 @@ export class DesktopApplicationController {
         if (current.phase !== "ready") {
           return Object.freeze({ status: "unavailable" });
         }
-        this.#stateStore.transition(readyBootstrapState(current.account, current.catalog, routing));
+        this.#stateStore.transition(
+          readyBootstrapState(current.account, current.catalog, routing, current.projects),
+        );
         return Object.freeze({ status: "conflict", routing });
       } catch {
         return Object.freeze({ status: "unavailable" });
       }
+    }
+  }
+
+  async registerProjectWorkspace(input: unknown): Promise<DesktopProjectSelectionResult> {
+    const registration = decodeDesktopProjectWorkspaceRegistration(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (registration === undefined || state.phase !== "ready" || supervisor === undefined) {
+      return Object.freeze({ status: "unavailable" });
+    }
+    try {
+      const selected = projectDesktopProjectRegistration(
+        await supervisor.registerProject({
+          commandId: randomUUID(),
+          projectId: randomUUID(),
+          ...registration,
+        }),
+      );
+      const projects = projectDesktopProjectCatalog(
+        await supervisor.readProjectCatalogPage({ cursor: null, limit: 12 }),
+      );
+      const current = this.#stateStore.current;
+      if (current.phase !== "ready") {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.#stateStore.transition(
+        readyBootstrapState(current.account, current.catalog, current.routing, projects),
+      );
+      return Object.freeze({
+        status: "selected",
+        registrationStatus: selected.registrationStatus,
+        project: selected.project,
+        projects,
+      });
+    } catch {
+      return Object.freeze({ status: "unavailable" });
     }
   }
 
@@ -113,11 +159,13 @@ export class DesktopApplicationController {
       if (this.#isStopping()) {
         return;
       }
-      const [observation, catalogPage, routingConfiguration] = await Promise.all([
-        supervisor.readAccountStatusObservation(),
-        supervisor.readModelCatalogPage({ cursor: null, limit: 12 }),
-        supervisor.readRoutingConfiguration(),
-      ]);
+      const [observation, catalogPage, routingConfiguration, projectCatalogPage] =
+        await Promise.all([
+          supervisor.readAccountStatusObservation(),
+          supervisor.readModelCatalogPage({ cursor: null, limit: 12 }),
+          supervisor.readRoutingConfiguration(),
+          supervisor.readProjectCatalogPage({ cursor: null, limit: 12 }),
+        ]);
       if (this.#isStopping()) {
         return;
       }
@@ -132,6 +180,7 @@ export class DesktopApplicationController {
           accountStatus,
           projectDesktopModelCatalogSummary(catalogPage),
           projectDesktopRoutingConfiguration(routingConfiguration),
+          projectDesktopProjectCatalog(projectCatalogPage),
         ),
       );
     } catch (error: unknown) {
@@ -177,7 +226,9 @@ export class DesktopApplicationController {
       return;
     }
     if (state.phase === "ready") {
-      this.#stateStore.transition(readyBootstrapState(event.account, state.catalog, state.routing));
+      this.#stateStore.transition(
+        readyBootstrapState(event.account, state.catalog, state.routing, state.projects),
+      );
     }
   }
 }

@@ -11,9 +11,12 @@ const MAX_PROVIDER_CHARACTERS = 256;
 const MAX_MODEL_CHARACTERS = 4_096;
 const MAX_REASONING_EFFORT_CHARACTERS = 128;
 const MAX_MODEL_CATALOG_CURSOR_CHARACTERS = 2_048;
+const MAX_PROJECT_DISPLAY_NAME_BYTES = 256;
+const MAX_PROJECT_PATH_BYTES = 4_096;
 
 export const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
 export const MAX_MODEL_REASONING_EFFORTS = 64;
+export const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
 
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
@@ -191,6 +194,136 @@ export type HarnessModelCatalogPageResult = Readonly<{
   nextCursor: string | null;
 }>;
 
+export const PROJECT_PLATFORMS = Object.freeze(["macos", "windows", "linux"] as const);
+export type HarnessProjectPlatform = (typeof PROJECT_PLATFORMS)[number];
+
+const ProjectWorkspaceSchema = z
+  .object({
+    platform: z.enum(PROJECT_PLATFORMS),
+    absolutePath: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      utf8ByteLength(value.absolutePath) > MAX_PROJECT_PATH_BYTES ||
+      !isNormalizedProjectPath(value.platform, value.absolutePath)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["absolutePath"],
+        message: "Project workspace path is invalid",
+      });
+    }
+  });
+
+const ProjectSummarySchema = z
+  .object({
+    projectId: z.string().regex(UUID_PATTERN),
+    projectVersion: z.literal(1),
+    displayName: z
+      .string()
+      .min(1)
+      .refine(
+        (value) =>
+          value.trim() === value &&
+          utf8ByteLength(value) <= MAX_PROJECT_DISPLAY_NAME_BYTES &&
+          !containsControlCharacter(value),
+        "Project display name is invalid",
+      ),
+    workspace: ProjectWorkspaceSchema.extend({ identityStatus: z.literal("unverified") }).strict(),
+  })
+  .strict();
+
+export const ProjectCatalogPageParamsSchema = z
+  .object({
+    cursor: z.string().regex(UUID_PATTERN).nullable(),
+    limit: z.number().int().min(1).max(MAX_PROJECT_CATALOG_PAGE_SIZE),
+  })
+  .strict();
+
+export const ProjectCatalogPageResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    projects: z.array(ProjectSummarySchema).max(MAX_PROJECT_CATALOG_PAGE_SIZE),
+    nextCursor: z.string().regex(UUID_PATTERN).nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const projectIds = value.projects.map((project) => project.projectId);
+    const workspaces = value.projects.map(
+      (project) => `${project.workspace.platform}\0${project.workspace.absolutePath}`,
+    );
+    if (new Set(projectIds).size !== projectIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["projects"],
+        message: "Project identifiers must be unique",
+      });
+    }
+    if (new Set(workspaces).size !== workspaces.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["projects"],
+        message: "Project workspaces must be unique",
+      });
+    }
+    if (value.nextCursor !== null && value.nextCursor !== value.projects.at(-1)?.projectId) {
+      context.addIssue({
+        code: "custom",
+        path: ["nextCursor"],
+        message: "Project page cursor must identify the final Project",
+      });
+    }
+  });
+
+export const ProjectRegisterParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    displayName: ProjectSummarySchema.shape.displayName,
+    workspace: ProjectWorkspaceSchema,
+  })
+  .strict();
+
+export const ProjectRegisterResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["registered", "existing"]),
+    project: ProjectSummarySchema,
+  })
+  .strict();
+
+export type HarnessProjectWorkspace = Readonly<{
+  platform: HarnessProjectPlatform;
+  absolutePath: string;
+}>;
+export type HarnessProjectSummary = Readonly<{
+  projectId: string;
+  projectVersion: 1;
+  displayName: string;
+  workspace: HarnessProjectWorkspace & Readonly<{ identityStatus: "unverified" }>;
+}>;
+export type HarnessProjectCatalogPageParams = Readonly<{
+  cursor: string | null;
+  limit: number;
+}>;
+export type HarnessProjectCatalogPageResult = Readonly<{
+  schemaVersion: 1;
+  projects: readonly HarnessProjectSummary[];
+  nextCursor: string | null;
+}>;
+export type HarnessProjectRegisterParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  displayName: string;
+  workspace: HarnessProjectWorkspace;
+}>;
+export type HarnessProjectRegisterResult = Readonly<{
+  schemaVersion: 1;
+  status: "registered" | "existing";
+  project: HarnessProjectSummary;
+}>;
+
 export const ROUTING_AVAILABILITY_STATUSES = Object.freeze([
   "model_unavailable",
   "observed_available",
@@ -322,6 +455,14 @@ export const METHOD_CONTRACTS = Object.freeze({
     params: ModelCatalogPageParamsSchema,
     result: ModelCatalogPageResultSchema,
   }),
+  "project.catalog_page": Object.freeze({
+    params: ProjectCatalogPageParamsSchema,
+    result: ProjectCatalogPageResultSchema,
+  }),
+  "project.register": Object.freeze({
+    params: ProjectRegisterParamsSchema,
+    result: ProjectRegisterResultSchema,
+  }),
   "routing.configuration.get": Object.freeze({
     params: RoutingConfigurationGetParamsSchema,
     result: RoutingConfigurationResultSchema,
@@ -361,6 +502,63 @@ function containsControlCharacter(input: string): boolean {
     }
   }
   return false;
+}
+
+function utf8ByteLength(input: string): number {
+  return new TextEncoder().encode(input).byteLength;
+}
+
+function isNormalizedProjectPath(platform: HarnessProjectPlatform, input: string): boolean {
+  if (input.includes("\0")) {
+    return false;
+  }
+  if (platform !== "windows") {
+    if (input === "/") {
+      return true;
+    }
+    return (
+      input.startsWith("/") &&
+      !input.endsWith("/") &&
+      input
+        .slice(1)
+        .split("/")
+        .every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    );
+  }
+  if (input.includes("/") || input.startsWith("\\\\?\\") || input.startsWith("\\\\.\\")) {
+    return false;
+  }
+  if (/^[A-Z]:\\/.test(input)) {
+    if (input.length === 3) {
+      return true;
+    }
+    return (
+      !input.endsWith("\\") &&
+      input
+        .slice(3)
+        .split("\\")
+        .every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    );
+  }
+  if (!input.startsWith("\\\\")) {
+    return false;
+  }
+  const segments = input.slice(2).split("\\");
+  if (
+    segments.length < 2 ||
+    segments[0]?.length === 0 ||
+    segments[1]?.length === 0 ||
+    segments[0] === "." ||
+    segments[0] === ".." ||
+    segments[1] === "." ||
+    segments[1] === ".."
+  ) {
+    return false;
+  }
+  if (segments.length === 3 && segments[2] === "") {
+    return true;
+  }
+  return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
 function hasMethod(method: string): method is RpcMethodName {

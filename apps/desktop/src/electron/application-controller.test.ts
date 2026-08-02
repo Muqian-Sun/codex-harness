@@ -95,6 +95,25 @@ const CONFIGURED_ROUTING = Object.freeze({
   }),
 });
 
+const PROJECT = Object.freeze({
+  projectId: "00000000-0000-4000-8000-000000000881",
+  projectVersion: 1 as const,
+  displayName: "workspace",
+  workspace: Object.freeze({
+    platform: "macos" as const,
+    absolutePath: "/Users/example/workspace",
+    identityStatus: "unverified" as const,
+  }),
+});
+
+const EMPTY_PROJECT_CATALOG_PAGE = Object.freeze({
+  schemaVersion: 1 as const,
+  projects: Object.freeze([]),
+  nextCursor: null,
+});
+
+const EMPTY_PROJECTS = Object.freeze({ projects: Object.freeze([]), hasMore: false });
+
 function routingMethods(): Pick<
   DesktopSupervisorHandle,
   "readRoutingConfiguration" | "setRoutingConfiguration"
@@ -102,6 +121,20 @@ function routingMethods(): Pick<
   return {
     readRoutingConfiguration: vi.fn(async () => ROUTING_CONFIGURATION),
     setRoutingConfiguration: vi.fn(async () => ROUTING_CONFIGURATION),
+  };
+}
+
+function projectMethods(): Pick<
+  DesktopSupervisorHandle,
+  "readProjectCatalogPage" | "registerProject"
+> {
+  return {
+    readProjectCatalogPage: vi.fn(async () => EMPTY_PROJECT_CATALOG_PAGE),
+    registerProject: vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      status: "registered" as const,
+      project: PROJECT,
+    })),
   };
 }
 
@@ -144,6 +177,7 @@ describe("desktop application controller", () => {
       closed: closed.promise,
       readAccountStatusObservation: vi.fn(async () => accountObservation()),
       readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+      ...projectMethods(),
       ...routingMethods(),
       stop: vi.fn(async () => closeResult("graceful")),
     };
@@ -157,11 +191,16 @@ describe("desktop application controller", () => {
       limit: 12,
     });
     expect(supervisor.readRoutingConfiguration).toHaveBeenCalledTimes(1);
+    expect(supervisor.readProjectCatalogPage).toHaveBeenCalledExactlyOnceWith({
+      cursor: null,
+      limit: 12,
+    });
     expect(stateStore.current).toEqual({
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
+      projects: EMPTY_PROJECTS,
     });
 
     closed.resolve(closeResult("graceful"));
@@ -179,6 +218,7 @@ describe("desktop application controller", () => {
         closed: new Promise(() => undefined),
         readAccountStatusObservation: vi.fn(async () => accountObservation()),
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
         readRoutingConfiguration: vi.fn(async () => ROUTING_CONFIGURATION),
         setRoutingConfiguration,
         stop: vi.fn(async () => closeResult("graceful")),
@@ -217,6 +257,7 @@ describe("desktop application controller", () => {
         closed: new Promise(() => undefined),
         readAccountStatusObservation: vi.fn(async () => accountObservation()),
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
         readRoutingConfiguration,
         setRoutingConfiguration: vi.fn(async () => {
           throw new HarnessRpcClientError("rpc_error", "rpc.conflict");
@@ -239,6 +280,67 @@ describe("desktop application controller", () => {
     });
   });
 
+  it("registers a chooser-owned workspace with main-owned identifiers and refreshes Projects", async () => {
+    const stateStore = new BootstrapStateStore();
+    const projectPage = {
+      schemaVersion: 1 as const,
+      projects: Object.freeze([PROJECT]),
+      nextCursor: null,
+    };
+    const readProjectCatalogPage = vi
+      .fn()
+      .mockResolvedValueOnce(EMPTY_PROJECT_CATALOG_PAGE)
+      .mockResolvedValueOnce(projectPage);
+    const registerProject = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      status: "registered" as const,
+      project: PROJECT,
+    }));
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage,
+        registerProject,
+        ...routingMethods(),
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    const result = await controller.registerProjectWorkspace({
+      displayName: "workspace",
+      workspace: { platform: "macos", absolutePath: "/Users/example/workspace" },
+    });
+    expect(result).toEqual({
+      status: "selected",
+      registrationStatus: "registered",
+      project: PROJECT,
+      projects: { projects: [PROJECT], hasMore: false },
+    });
+    expect(registerProject).toHaveBeenCalledWith({
+      commandId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      projectId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      displayName: "workspace",
+      workspace: { platform: "macos", absolutePath: "/Users/example/workspace" },
+    });
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      account: { planType: "plus" },
+      routing: ROUTING_SUMMARY,
+      projects: { projects: [PROJECT] },
+    });
+    await expect(
+      controller.registerProjectWorkspace({
+        displayName: "workspace",
+        workspace: { platform: "macos", absolutePath: "/Users/example/../secret" },
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    expect(registerProject).toHaveBeenCalledTimes(1);
+  });
+
   it("waits for an in-flight start before stopping and never publishes transient readiness", async () => {
     const stateStore = new BootstrapStateStore();
     const supervisorReady = deferred<DesktopSupervisorHandle>();
@@ -255,6 +357,7 @@ describe("desktop application controller", () => {
       closed: new Promise(() => undefined),
       readAccountStatusObservation: vi.fn(async () => accountObservation()),
       readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+      ...projectMethods(),
       ...routingMethods(),
       stop,
     });
@@ -275,6 +378,7 @@ describe("desktop application controller", () => {
         closed: new Promise(() => undefined),
         readAccountStatusObservation: async () => await accountStatus.promise,
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
         ...routingMethods(),
         stop,
       }),
@@ -300,6 +404,7 @@ describe("desktop application controller", () => {
         closed: new Promise(() => undefined),
         readAccountStatusObservation: vi.fn(async () => accountObservation()),
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
         ...routingMethods(),
         stop: async () => closeResult("containment_unknown"),
       }),
@@ -320,6 +425,7 @@ describe("desktop application controller", () => {
           throw new HarnessRpcClientError("rpc_error", "service.unavailable");
         }),
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
         ...routingMethods(),
         stop,
       }),
@@ -341,6 +447,7 @@ describe("desktop application controller", () => {
         readModelCatalogPage: vi.fn(async () => {
           throw new HarnessRpcClientError("rpc_error", "service.unavailable");
         }),
+        ...projectMethods(),
         ...routingMethods(),
         stop,
       }),
@@ -361,6 +468,7 @@ describe("desktop application controller", () => {
           closed: new Promise(() => undefined),
           readAccountStatusObservation: async () => accountObservation(ACCOUNT_STATUS, 1),
           readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+          ...projectMethods(),
           ...routingMethods(),
           stop: async () => closeResult("graceful"),
         };
@@ -374,6 +482,7 @@ describe("desktop application controller", () => {
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
+      projects: EMPTY_PROJECTS,
     });
   });
 
@@ -388,6 +497,7 @@ describe("desktop application controller", () => {
           return accountObservation(ACCOUNT_STATUS, 1);
         },
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
         ...routingMethods(),
         stop: async () => closeResult("graceful"),
       }),
@@ -400,6 +510,7 @@ describe("desktop application controller", () => {
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
+      projects: EMPTY_PROJECTS,
     });
   });
 
@@ -415,6 +526,7 @@ describe("desktop application controller", () => {
           closed: new Promise(() => undefined),
           readAccountStatusObservation: async () => accountObservation(),
           readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+          ...projectMethods(),
           ...routingMethods(),
           stop: async () => closeResult("graceful"),
         };
@@ -428,6 +540,7 @@ describe("desktop application controller", () => {
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
+      projects: EMPTY_PROJECTS,
     });
 
     await controller.stop();
