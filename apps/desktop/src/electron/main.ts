@@ -267,7 +267,10 @@ function installSmokeObservation(
               accountStatus: document.querySelector("[data-account-status]")?.dataset.accountStatus,
               accountCredential: document.querySelector("[data-account-credential]")?.dataset.accountCredential,
               accountPlan: document.querySelector("[data-account-plan]")?.dataset.accountPlan,
-              containsSensitiveText: ["private@example.com", "must-not-survive", "snapshotId", "workerSessionId"].some((value) => text.includes(value))
+              modelProvider: document.querySelector("[data-model-catalog-provider]")?.dataset.modelCatalogProvider,
+              modelCount: document.querySelector("[data-model-catalog-count]")?.dataset.modelCatalogCount,
+              modelNames: Array.from(document.querySelectorAll("[data-model-name]"), (element) => element.dataset.modelName),
+              containsSensitiveText: ["private@example.com", "must-not-survive", "snapshotId", "workerSessionId", "nextCursor", "id-smoke"].some((value) => text.includes(value))
             };
           })()`,
           true,
@@ -277,6 +280,9 @@ function installSmokeObservation(
           accountStatus?: unknown;
           accountCredential?: unknown;
           accountPlan?: unknown;
+          modelProvider?: unknown;
+          modelCount?: unknown;
+          modelNames?: unknown;
           containsSensitiveText?: unknown;
         };
         const accountObserved =
@@ -287,16 +293,23 @@ function installSmokeObservation(
             rendered.accountPlan,
           ) &&
           rendered.containsSensitiveText === false;
+        const modelCatalogObserved =
+          expected === "ready" &&
+          validRenderedModelCatalog(
+            rendered.modelProvider,
+            rendered.modelCount,
+            rendered.modelNames,
+          );
         if (
           rendered.phase === expected &&
           (expected !== "failed" ||
             (typeof rendered.code === "string" && rendered.code.length > 0)) &&
-          (expected !== "ready" || accountObserved)
+          (expected !== "ready" || (accountObserved && modelCatalogObserved))
         ) {
           finished = true;
           clearTimeout(timeout);
           process.stdout.write(
-            `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true } : {}) })}\n`,
+            `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true } : {}) })}\n`,
           );
           app.quit();
           return;
@@ -313,6 +326,21 @@ function installSmokeObservation(
   window.webContents.once("did-finish-load", () => {
     void inspect(stateStore.current);
   });
+}
+
+function validRenderedModelCatalog(
+  provider: unknown,
+  count: unknown,
+  modelNames: unknown,
+): boolean {
+  return (
+    provider === "openai" &&
+    count === "2" &&
+    Array.isArray(modelNames) &&
+    modelNames.length === 2 &&
+    modelNames[0] === "smoke-a" &&
+    modelNames[1] === "smoke-b"
+  );
 }
 
 function validRenderedAccountObservation(

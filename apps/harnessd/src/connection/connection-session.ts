@@ -42,6 +42,7 @@ export type ConnectionSessionConfig = Readonly<{
   streamIdFactory?: () => string;
   uptimeMs?: () => number;
   readAccountStatus?: () => unknown;
+  readModelCatalogPage?: (params: JsonValue) => unknown;
 }>;
 
 const encoder = new TextEncoder();
@@ -110,6 +111,7 @@ export class ConnectionSession {
   readonly #streamIdFactory: () => string;
   readonly #uptimeMs: () => number;
   readonly #readAccountStatus: () => unknown;
+  readonly #readModelCatalogPage: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
   #streamId: string | undefined;
   #nextEventSequence: number | undefined;
@@ -124,11 +126,18 @@ export class ConnectionSession {
     if (config.readAccountStatus !== undefined && typeof config.readAccountStatus !== "function") {
       throw new Error("Invalid connection session configuration.");
     }
+    if (
+      config.readModelCatalogPage !== undefined &&
+      typeof config.readModelCatalogPage !== "function"
+    ) {
+      throw new Error("Invalid connection session configuration.");
+    }
     this.#startupCapability = config.startupCapability;
     this.#serverVersion = config.serverVersion;
     this.#streamIdFactory = config.streamIdFactory ?? generateStreamId;
     this.#uptimeMs = config.uptimeMs ?? (() => process.uptime() * 1_000);
     this.#readAccountStatus = config.readAccountStatus ?? (() => null);
+    this.#readModelCatalogPage = config.readModelCatalogPage ?? (() => null);
   }
 
   get state(): ConnectionSessionState {
@@ -297,6 +306,7 @@ export class ConnectionSession {
       uptimeMs: safeUptime(this.#uptimeMs()),
       closing: this.#state === "closing",
       readAccountStatus: this.#readAccountStatus,
+      readModelCatalogPage: this.#readModelCatalogPage,
     });
     const actions: ConnectionSessionAction[] = [send(dispatched.envelope)];
     if (dispatched.shutdownRequested && this.#state !== "closing") {

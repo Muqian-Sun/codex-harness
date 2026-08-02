@@ -14,6 +14,7 @@ export type RpcDispatchContext = Readonly<{
   uptimeMs: number;
   closing: boolean;
   readAccountStatus: () => unknown;
+  readModelCatalogPage: (params: JsonValue) => unknown;
 }>;
 
 export type RpcDispatchResult = Readonly<{
@@ -102,6 +103,23 @@ export function dispatchRpcRequest(
             shutdownReason: undefined,
           }
         : unavailable(request.id, "The account status is unavailable.");
+    }
+
+    if (request.method === "model.catalog_page") {
+      let candidate: unknown;
+      try {
+        candidate = context.readModelCatalogPage(decodedParams.value);
+      } catch {
+        return unavailable(request.id, "The model catalog is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("model.catalog_page", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The model catalog is unavailable.");
     }
 
     if (request.method === "system.health") {

@@ -4,6 +4,8 @@ import { INTERNAL_ERROR_PUBLIC_MESSAGE } from "./constants.js";
 import { createInternalErrorResponse } from "./internal-error.js";
 import {
   ACCOUNT_PLAN_TYPES,
+  MAX_MODEL_CATALOG_PAGE_SIZE,
+  MAX_MODEL_REASONING_EFFORTS,
   decodeEventParams,
   decodeRequestParams,
   decodeResponseResult,
@@ -78,6 +80,76 @@ describe("method contracts", () => {
       },
     ]) {
       expect(decodeResponseResult("account.status", invalid).ok).toBe(false);
+    }
+  });
+
+  it("strictly validates bounded model catalog page parameters and results", () => {
+    const cursor = `00000000-0000-4000-8000-000000000821.${Buffer.from("model-1").toString("base64url")}`;
+    const entry = {
+      model: "gpt-model",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+      inputModalities: ["image", "text"],
+    } as const;
+    const result = {
+      schemaVersion: 1,
+      provider: "openai",
+      totalVisibleModels: 2,
+      models: [entry],
+      nextCursor: cursor,
+    } as const;
+
+    expect(decodeRequestParams("model.catalog_page", { cursor: null, limit: 12 }).ok).toBe(true);
+    expect(decodeRequestParams("model.catalog_page", { cursor, limit: 1 }).ok).toBe(true);
+    expect(decodeResponseResult("model.catalog_page", result).ok).toBe(true);
+    expect(
+      decodeResponseResult("model.catalog_page", {
+        ...result,
+        models: [],
+        nextCursor: null,
+        totalVisibleModels: 0,
+      }).ok,
+    ).toBe(true);
+
+    for (const invalid of [
+      { cursor: null, limit: 0 },
+      { cursor: null, limit: MAX_MODEL_CATALOG_PAGE_SIZE + 1 },
+      { cursor: "not-a-cursor", limit: 1 },
+      { cursor: null, limit: 1, unexpected: true },
+    ]) {
+      expect(decodeRequestParams("model.catalog_page", invalid).ok).toBe(false);
+    }
+
+    for (const invalid of [
+      { ...result, unexpected: true },
+      { ...result, models: [], nextCursor: cursor },
+      { ...result, totalVisibleModels: 0 },
+      { ...result, models: [entry, entry], totalVisibleModels: 2, nextCursor: null },
+      {
+        ...result,
+        models: [{ ...entry, defaultReasoningEffort: "xhigh" }],
+        nextCursor: null,
+      },
+      {
+        ...result,
+        models: [{ ...entry, inputModalities: ["text", "text"] }],
+        nextCursor: null,
+      },
+      {
+        ...result,
+        models: [
+          {
+            ...entry,
+            supportedReasoningEfforts: Array.from(
+              { length: MAX_MODEL_REASONING_EFFORTS + 1 },
+              (_, index) => `effort-${String(index)}`,
+            ),
+          },
+        ],
+        nextCursor: null,
+      },
+    ]) {
+      expect(decodeResponseResult("model.catalog_page", invalid).ok).toBe(false);
     }
   });
 

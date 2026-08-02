@@ -1,4 +1,4 @@
-import { validateJsonValue } from "@codex-harness/protocol";
+import { MAX_MODEL_REASONING_EFFORTS, validateJsonValue } from "@codex-harness/protocol";
 
 import {
   ModelRoutingConfigurationError,
@@ -335,7 +335,11 @@ function normalizeInputModalities(input: unknown): readonly ModelInputModality[]
 }
 
 function uniqueSortedStrings(input: readonly string[]): readonly string[] {
-  if (input.length < 1 || new Set(input).size !== input.length) {
+  if (
+    input.length < 1 ||
+    input.length > MAX_MODEL_REASONING_EFFORTS ||
+    new Set(input).size !== input.length
+  ) {
     throw new ModelCatalogError("invalid_catalog");
   }
   return Object.freeze([...input].sort());

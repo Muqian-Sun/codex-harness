@@ -97,7 +97,8 @@ async function runScenario({
       result.phase !== expected ||
       (expectedCode !== undefined && result.code !== expectedCode) ||
       (expected === "ready" && result.accountObserved !== true) ||
-      (expected !== "ready" && "accountObserved" in result)
+      (expected === "ready" && result.modelCatalogObserved !== true) ||
+      (expected !== "ready" && ("accountObserved" in result || "modelCatalogObserved" in result))
     ) {
       throw new Error(`The Electron desktop ${expected} rendered state was invalid.`);
     }

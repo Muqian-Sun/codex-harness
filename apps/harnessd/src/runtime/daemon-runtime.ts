@@ -252,6 +252,7 @@ export class DaemonRuntime {
       startupCapability: this.#startupCapability,
       serverVersion: this.#serverVersion,
       readAccountStatus: () => this.#readCurrentAccountStatus(),
+      readModelCatalogPage: (params) => this.#readCurrentModelCatalogPage(params),
     });
     this.#activeSocket = socket;
     this.#activeSession = session;
@@ -340,6 +341,14 @@ export class DaemonRuntime {
     return accountStatus !== null && manager.isAccountStatusCurrent(accountStatus)
       ? accountStatus
       : null;
+  }
+
+  #readCurrentModelCatalogPage(params: unknown): unknown {
+    const manager = this.#workerManager;
+    if (manager === undefined || manager.state !== "ready") {
+      return null;
+    }
+    return manager.readCatalogPage(params);
   }
 
   #publishAccountStatusChanged(snapshot: unknown): void {

@@ -33,14 +33,38 @@ export type DesktopAccountStatus = Readonly<{
   planType: DesktopAccountPlanType | null;
 }>;
 
+export type DesktopModelInputModality = "audio" | "image" | "text";
+export type DesktopModelCatalogEntry = Readonly<{
+  model: string;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: readonly string[];
+  inputModalities: readonly DesktopModelInputModality[];
+}>;
+export type DesktopModelCatalogSummary = Readonly<{
+  provider: string;
+  totalVisibleModels: number;
+  models: readonly DesktopModelCatalogEntry[];
+  hasMore: boolean;
+}>;
+
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
-  | Readonly<{ phase: "ready"; account: DesktopAccountStatus }>
+  | Readonly<{
+      phase: "ready";
+      account: DesktopAccountStatus;
+      catalog: DesktopModelCatalogSummary;
+    }>
   | Readonly<{ phase: "failed"; code: DesktopBootstrapFailureCode }>
   | Readonly<{ phase: "stopping" }>;
 
 const failureCodes = new Set<string>(DESKTOP_BOOTSTRAP_FAILURE_CODES);
 const planTypes = new Set<string>(DESKTOP_ACCOUNT_PLAN_TYPES);
+const modelInputModalities = new Set<string>(["audio", "image", "text"]);
+const MAX_PROVIDER_CHARACTERS = 256;
+const MAX_MODEL_CHARACTERS = 4_096;
+const MAX_REASONING_EFFORT_CHARACTERS = 128;
+const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
+const MAX_MODEL_REASONING_EFFORTS = 64;
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -49,11 +73,19 @@ export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapSta
   const record = input as Record<string, unknown>;
   const keys = Object.keys(record);
   if (record.phase === "ready") {
-    if (keys.length !== 2 || !keys.includes("phase") || !keys.includes("account")) {
+    if (
+      keys.length !== 3 ||
+      !keys.includes("phase") ||
+      !keys.includes("account") ||
+      !keys.includes("catalog")
+    ) {
       return undefined;
     }
     const account = decodeDesktopAccountStatus(record.account, true);
-    return account === undefined ? undefined : Object.freeze({ phase: "ready", account });
+    const catalog = decodeDesktopModelCatalogSummary(record.catalog);
+    return account === undefined || catalog === undefined
+      ? undefined
+      : Object.freeze({ phase: "ready", account, catalog });
   }
   if (record.phase === "failed") {
     if (
@@ -88,12 +120,24 @@ export function failedBootstrapState(code: DesktopBootstrapFailureCode): Desktop
   return Object.freeze({ phase: "failed", code });
 }
 
-export function readyBootstrapState(input: unknown): DesktopBootstrapState {
-  const account = decodeDesktopAccountStatus(input, false);
-  if (account === undefined) {
+export function projectDesktopModelCatalogSummary(input: unknown): DesktopModelCatalogSummary {
+  const summary = projectModelCatalogPage(input);
+  if (summary === undefined) {
     throw new BootstrapStateTransitionError();
   }
-  return Object.freeze({ phase: "ready", account });
+  return summary;
+}
+
+export function readyBootstrapState(
+  accountInput: unknown,
+  catalogInput: unknown,
+): DesktopBootstrapState {
+  const account = decodeDesktopAccountStatus(accountInput, false);
+  const catalog = decodeDesktopModelCatalogSummary(catalogInput);
+  if (account === undefined || catalog === undefined) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({ phase: "ready", account, catalog });
 }
 
 export function initialBootstrapState(): DesktopBootstrapState {
@@ -195,10 +239,178 @@ function sameState(current: DesktopBootstrapState, candidate: DesktopBootstrapSt
     return (
       current.account.status === candidate.account.status &&
       current.account.credentialKind === candidate.account.credentialKind &&
-      current.account.planType === candidate.account.planType
+      current.account.planType === candidate.account.planType &&
+      modelCatalogSummariesEqual(current.catalog, candidate.catalog)
     );
   }
   return true;
+}
+
+function projectModelCatalogPage(input: unknown): DesktopModelCatalogSummary | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== 5 ||
+    !keys.includes("schemaVersion") ||
+    !keys.includes("provider") ||
+    !keys.includes("totalVisibleModels") ||
+    !keys.includes("models") ||
+    !keys.includes("nextCursor") ||
+    record.schemaVersion !== 1 ||
+    (typeof record.nextCursor !== "string" && record.nextCursor !== null)
+  ) {
+    return undefined;
+  }
+  const decoded = decodeModelCatalogFields(record, record.nextCursor !== null);
+  if (decoded === undefined) {
+    return undefined;
+  }
+  return decoded;
+}
+
+function decodeDesktopModelCatalogSummary(input: unknown): DesktopModelCatalogSummary | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== 4 ||
+    !keys.includes("provider") ||
+    !keys.includes("totalVisibleModels") ||
+    !keys.includes("models") ||
+    !keys.includes("hasMore") ||
+    typeof record.hasMore !== "boolean"
+  ) {
+    return undefined;
+  }
+  return decodeModelCatalogFields(record, record.hasMore);
+}
+
+function decodeModelCatalogFields(
+  record: Record<string, unknown>,
+  hasMore: boolean,
+): DesktopModelCatalogSummary | undefined {
+  if (
+    !validBoundedText(record.provider, MAX_PROVIDER_CHARACTERS) ||
+    !Number.isSafeInteger(record.totalVisibleModels) ||
+    (record.totalVisibleModels as number) < 0 ||
+    (record.totalVisibleModels as number) > 10_000 ||
+    !Array.isArray(record.models) ||
+    record.models.length > MAX_MODEL_CATALOG_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  const models = record.models.map(decodeDesktopModelCatalogEntry);
+  if (models.some((model) => model === undefined)) {
+    return undefined;
+  }
+  const decodedModels = models as DesktopModelCatalogEntry[];
+  const totalVisibleModels = record.totalVisibleModels as number;
+  if (
+    decodedModels.length > totalVisibleModels ||
+    (hasMore
+      ? totalVisibleModels <= decodedModels.length
+      : totalVisibleModels !== decodedModels.length) ||
+    new Set(decodedModels.map((model) => model.model)).size !== decodedModels.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    provider: record.provider,
+    totalVisibleModels,
+    models: Object.freeze(decodedModels),
+    hasMore,
+  });
+}
+
+function decodeDesktopModelCatalogEntry(input: unknown): DesktopModelCatalogEntry | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== 4 ||
+    !keys.includes("model") ||
+    !keys.includes("defaultReasoningEffort") ||
+    !keys.includes("supportedReasoningEfforts") ||
+    !keys.includes("inputModalities") ||
+    !validBoundedText(record.model, MAX_MODEL_CHARACTERS) ||
+    !validBoundedText(record.defaultReasoningEffort, MAX_REASONING_EFFORT_CHARACTERS) ||
+    !Array.isArray(record.supportedReasoningEfforts) ||
+    record.supportedReasoningEfforts.length < 1 ||
+    record.supportedReasoningEfforts.length > MAX_MODEL_REASONING_EFFORTS ||
+    !record.supportedReasoningEfforts.every((effort) =>
+      validBoundedText(effort, MAX_REASONING_EFFORT_CHARACTERS),
+    ) ||
+    new Set(record.supportedReasoningEfforts).size !== record.supportedReasoningEfforts.length ||
+    !record.supportedReasoningEfforts.includes(record.defaultReasoningEffort) ||
+    !Array.isArray(record.inputModalities) ||
+    record.inputModalities.length < 1 ||
+    record.inputModalities.length > 3 ||
+    !record.inputModalities.every(
+      (modality) => typeof modality === "string" && modelInputModalities.has(modality),
+    ) ||
+    new Set(record.inputModalities).size !== record.inputModalities.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    model: record.model,
+    defaultReasoningEffort: record.defaultReasoningEffort,
+    supportedReasoningEfforts: Object.freeze([...record.supportedReasoningEfforts]),
+    inputModalities: Object.freeze([...record.inputModalities] as DesktopModelInputModality[]),
+  });
+}
+
+function validBoundedText(input: unknown, maxCharacters: number): input is string {
+  if (
+    typeof input !== "string" ||
+    input.length === 0 ||
+    input.length > maxCharacters ||
+    input.trim() !== input
+  ) {
+    return false;
+  }
+  for (let index = 0; index < input.length; index += 1) {
+    const codeUnit = input.charCodeAt(index);
+    if (codeUnit <= 0x1f || codeUnit === 0x7f) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function modelCatalogSummariesEqual(
+  left: DesktopModelCatalogSummary,
+  right: DesktopModelCatalogSummary,
+): boolean {
+  if (
+    left.provider !== right.provider ||
+    left.totalVisibleModels !== right.totalVisibleModels ||
+    left.hasMore !== right.hasMore ||
+    left.models.length !== right.models.length
+  ) {
+    return false;
+  }
+  return left.models.every((model, index) => {
+    const other = right.models[index];
+    return (
+      other !== undefined &&
+      model.model === other.model &&
+      model.defaultReasoningEffort === other.defaultReasoningEffort &&
+      stringArraysEqual(model.supportedReasoningEfforts, other.supportedReasoningEfforts) &&
+      stringArraysEqual(model.inputModalities, other.inputModalities)
+    );
+  });
+}
+
+function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function canTransition(

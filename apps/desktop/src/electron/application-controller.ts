@@ -8,6 +8,7 @@ import {
 } from "../main/harness-rpc-client.js";
 import {
   failedBootstrapState,
+  projectDesktopModelCatalogSummary,
   readyBootstrapState,
   type BootstrapStateStore,
   type DesktopBootstrapFailureCode,
@@ -16,7 +17,7 @@ import { DesktopRuntimeResourceError, DesktopRuntimeRootError } from "./runtime-
 
 export type DesktopSupervisorHandle = Pick<
   DaemonProcessSupervisor,
-  "closed" | "readAccountStatusObservation" | "stop"
+  "closed" | "readAccountStatusObservation" | "readModelCatalogPage" | "stop"
 >;
 
 export type DesktopApplicationControllerConfig = Readonly<{
@@ -63,7 +64,10 @@ export class DesktopApplicationController {
       if (this.#isStopping()) {
         return;
       }
-      const observation = await supervisor.readAccountStatusObservation();
+      const [observation, catalogPage] = await Promise.all([
+        supervisor.readAccountStatusObservation(),
+        supervisor.readModelCatalogPage({ cursor: null, limit: 12 }),
+      ]);
       if (this.#isStopping()) {
         return;
       }
@@ -73,7 +77,9 @@ export class DesktopApplicationController {
         pending !== undefined && pending.sequence > observation.observedThroughSequence
           ? pending.account
           : observation.account;
-      this.#stateStore.transition(readyBootstrapState(accountStatus));
+      this.#stateStore.transition(
+        readyBootstrapState(accountStatus, projectDesktopModelCatalogSummary(catalogPage)),
+      );
     } catch (error: unknown) {
       if (this.#stateStore.current.phase !== "stopping") {
         try {
@@ -108,16 +114,16 @@ export class DesktopApplicationController {
   }
 
   #observeAccountStatusChanged(event: HarnessAccountStatusChangedEvent): void {
-    const phase = this.#stateStore.current.phase;
-    if (phase === "starting") {
+    const state = this.#stateStore.current;
+    if (state.phase === "starting") {
       const pending = this.#pendingAccountStatusEvent;
       if (pending === undefined || event.sequence > pending.sequence) {
         this.#pendingAccountStatusEvent = event;
       }
       return;
     }
-    if (phase === "ready") {
-      this.#stateStore.transition(readyBootstrapState(event.account));
+    if (state.phase === "ready") {
+      this.#stateStore.transition(readyBootstrapState(event.account, state.catalog));
     }
   }
 }

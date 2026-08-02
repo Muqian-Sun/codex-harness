@@ -26,6 +26,12 @@ const ACCOUNT_PLAN_TYPES = new Set([
   "edu",
   "unknown",
 ]);
+const MODEL_INPUT_MODALITIES = new Set(["audio", "image", "text"]);
+const MAX_PROVIDER_CHARACTERS = 256;
+const MAX_MODEL_CHARACTERS = 4_096;
+const MAX_REASONING_EFFORT_CHARACTERS = 128;
+const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
+const MAX_MODEL_REASONING_EFFORTS = 64;
 
 type PreloadAccountStatus = Readonly<{
   status: "authenticated" | "authentication_required" | "not_required";
@@ -33,9 +39,27 @@ type PreloadAccountStatus = Readonly<{
   planType: string | null;
 }>;
 
+type PreloadModelCatalogEntry = Readonly<{
+  model: string;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: readonly string[];
+  inputModalities: readonly ("audio" | "image" | "text")[];
+}>;
+
+type PreloadModelCatalogSummary = Readonly<{
+  provider: string;
+  totalVisibleModels: number;
+  models: readonly PreloadModelCatalogEntry[];
+  hasMore: boolean;
+}>;
+
 type PreloadBootstrapState =
   | Readonly<{ phase: "starting" | "stopping" }>
-  | Readonly<{ phase: "ready"; account: PreloadAccountStatus }>
+  | Readonly<{
+      phase: "ready";
+      account: PreloadAccountStatus;
+      catalog: PreloadModelCatalogSummary;
+    }>
   | Readonly<{ phase: "failed"; code: string }>;
 
 function decodeBootstrapState(input: unknown): PreloadBootstrapState {
@@ -46,13 +70,15 @@ function decodeBootstrapState(input: unknown): PreloadBootstrapState {
   const keys = Object.keys(record);
   if (
     record.phase === "ready" &&
-    keys.length === 2 &&
+    keys.length === 3 &&
     keys.includes("phase") &&
-    keys.includes("account")
+    keys.includes("account") &&
+    keys.includes("catalog")
   ) {
     const account = decodeAccountStatus(record.account);
-    if (account !== undefined) {
-      return Object.freeze({ phase: "ready", account });
+    const catalog = decodeModelCatalogSummary(record.catalog);
+    if (account !== undefined && catalog !== undefined) {
+      return Object.freeze({ phase: "ready", account, catalog });
     }
   }
   if (
@@ -104,6 +130,109 @@ function decodeAccountStatus(input: unknown): PreloadAccountStatus | undefined {
     return undefined;
   }
   return Object.freeze({ status, credentialKind, planType });
+}
+
+function decodeModelCatalogSummary(input: unknown): PreloadModelCatalogSummary | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== 4 ||
+    !keys.includes("provider") ||
+    !keys.includes("totalVisibleModels") ||
+    !keys.includes("models") ||
+    !keys.includes("hasMore") ||
+    !validBoundedText(record.provider, MAX_PROVIDER_CHARACTERS) ||
+    !Number.isSafeInteger(record.totalVisibleModels) ||
+    (record.totalVisibleModels as number) < 0 ||
+    (record.totalVisibleModels as number) > 10_000 ||
+    !Array.isArray(record.models) ||
+    record.models.length > MAX_MODEL_CATALOG_PAGE_SIZE ||
+    typeof record.hasMore !== "boolean"
+  ) {
+    return undefined;
+  }
+  const models = record.models.map(decodeModelCatalogEntry);
+  if (models.some((model) => model === undefined)) {
+    return undefined;
+  }
+  const decodedModels = models as PreloadModelCatalogEntry[];
+  const totalVisibleModels = record.totalVisibleModels as number;
+  if (
+    decodedModels.length > totalVisibleModels ||
+    (record.hasMore
+      ? totalVisibleModels <= decodedModels.length
+      : totalVisibleModels !== decodedModels.length) ||
+    new Set(decodedModels.map((model) => model.model)).size !== decodedModels.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    provider: record.provider,
+    totalVisibleModels,
+    models: Object.freeze(decodedModels),
+    hasMore: record.hasMore,
+  });
+}
+
+function decodeModelCatalogEntry(input: unknown): PreloadModelCatalogEntry | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== 4 ||
+    !keys.includes("model") ||
+    !keys.includes("defaultReasoningEffort") ||
+    !keys.includes("supportedReasoningEfforts") ||
+    !keys.includes("inputModalities") ||
+    !validBoundedText(record.model, MAX_MODEL_CHARACTERS) ||
+    !validBoundedText(record.defaultReasoningEffort, MAX_REASONING_EFFORT_CHARACTERS) ||
+    !Array.isArray(record.supportedReasoningEfforts) ||
+    record.supportedReasoningEfforts.length < 1 ||
+    record.supportedReasoningEfforts.length > MAX_MODEL_REASONING_EFFORTS ||
+    !record.supportedReasoningEfforts.every((effort) =>
+      validBoundedText(effort, MAX_REASONING_EFFORT_CHARACTERS),
+    ) ||
+    new Set(record.supportedReasoningEfforts).size !== record.supportedReasoningEfforts.length ||
+    !record.supportedReasoningEfforts.includes(record.defaultReasoningEffort) ||
+    !Array.isArray(record.inputModalities) ||
+    record.inputModalities.length < 1 ||
+    record.inputModalities.length > 3 ||
+    !record.inputModalities.every(
+      (modality) => typeof modality === "string" && MODEL_INPUT_MODALITIES.has(modality),
+    ) ||
+    new Set(record.inputModalities).size !== record.inputModalities.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    model: record.model,
+    defaultReasoningEffort: record.defaultReasoningEffort,
+    supportedReasoningEfforts: Object.freeze([...record.supportedReasoningEfforts]),
+    inputModalities: Object.freeze([...record.inputModalities] as ("audio" | "image" | "text")[]),
+  });
+}
+
+function validBoundedText(input: unknown, maxCharacters: number): input is string {
+  if (
+    typeof input !== "string" ||
+    input.length === 0 ||
+    input.length > maxCharacters ||
+    input.trim() !== input
+  ) {
+    return false;
+  }
+  for (let index = 0; index < input.length; index += 1) {
+    const codeUnit = input.charCodeAt(index);
+    if (codeUnit <= 0x1f || codeUnit === 0x7f) {
+      return false;
+    }
+  }
+  return true;
 }
 
 const desktopApi = Object.freeze({

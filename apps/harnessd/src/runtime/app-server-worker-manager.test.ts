@@ -199,6 +199,86 @@ describe("AppServerWorkerManager", () => {
     await manager.close();
   });
 
+  it("reads a frozen visible-only public catalog page with a snapshot-bound cursor", async () => {
+    const hidden = { ...(model("hidden") as Record<string, JsonValue>), hidden: true };
+    const worker = new FakeWorker([page([model("standard"), hidden, model("fast", "low")], null)]);
+    const manager = await startManager(worker);
+
+    const first = manager.readCatalogPage({ cursor: null, limit: 1 });
+    expect(first).toMatchObject({
+      schemaVersion: 1,
+      provider: "openai",
+      totalVisibleModels: 2,
+      models: [
+        {
+          model: "fast",
+          defaultReasoningEffort: "low",
+          supportedReasoningEfforts: ["low"],
+          inputModalities: ["text"],
+        },
+      ],
+    });
+    expect(first.nextCursor).toMatch(/^00000000-0000-4000-8000-000000000602\.[A-Za-z0-9_-]+$/);
+    expect(JSON.stringify(first)).not.toContain("id-fast");
+    expect(JSON.stringify(first)).not.toContain("hidden");
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first.models)).toBe(true);
+    expect(Object.isFrozen(first.models[0])).toBe(true);
+
+    const second = manager.readCatalogPage({ cursor: first.nextCursor, limit: 1 });
+    expect(second.models.map((entry) => entry.model)).toEqual(["standard"]);
+    expect(second.nextCursor).toBeNull();
+
+    await manager.close();
+  });
+
+  it("returns an empty page for a valid catalog containing only hidden models", async () => {
+    const hidden = { ...(model("hidden") as Record<string, JsonValue>), hidden: true };
+    const manager = await startManager(new FakeWorker([page([hidden], null)]));
+
+    expect(manager.readCatalogPage({ cursor: null, limit: 16 })).toEqual({
+      schemaVersion: 1,
+      provider: "openai",
+      totalVisibleModels: 0,
+      models: [],
+      nextCursor: null,
+    });
+
+    await manager.close();
+  });
+
+  it("rejects malformed and stale public catalog cursors without leaking them", async () => {
+    const worker = new FakeWorker([
+      page([model("first"), model("second")], null),
+      page([model("refreshed")], null),
+    ]);
+    const manager = await startManager(
+      worker,
+      [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID, SECOND_CATALOG_ID],
+      [100, 101, 200],
+    );
+    const first = manager.readCatalogPage({ cursor: null, limit: 1 });
+    const cursor = first.nextCursor;
+    expect(cursor).not.toBeNull();
+
+    for (const invalid of [
+      { cursor: "private-invalid-cursor", limit: 1 },
+      { cursor: null, limit: 17 },
+      { cursor: null, limit: 1, unexpected: true },
+    ]) {
+      const error = capture(() => manager.readCatalogPage(invalid));
+      expect(error).toMatchObject({ code: "catalog_page_unavailable" });
+      expect(String(error)).not.toContain("private-invalid-cursor");
+    }
+
+    await manager.refreshCatalog();
+    expect(() => manager.readCatalogPage({ cursor, limit: 1 })).toThrowError(
+      expect.objectContaining({ code: "catalog_page_unavailable" }),
+    );
+
+    await manager.close();
+  });
+
   it("invalidates immediately while serializing refresh and installs a new snapshot", async () => {
     const pending = deferred<JsonValue>();
     const worker = new FakeWorker([
@@ -797,4 +877,13 @@ function deferred<T>(): Readonly<{
     resolve = promiseResolve;
   });
   return Object.freeze({ promise, resolve });
+}
+
+function capture(callback: () => unknown): unknown {
+  try {
+    callback();
+  } catch (error: unknown) {
+    return error;
+  }
+  throw new Error("Expected the callback to throw.");
 }

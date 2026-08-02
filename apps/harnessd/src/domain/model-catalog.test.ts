@@ -220,6 +220,12 @@ describe("model catalog snapshot", () => {
       [model("duplicate-effort", ["low", "low"])],
       [model("duplicate-modality", ["low"], ["text", "text"])],
       [{ ...model("bad-default", ["low"]), defaultReasoningEffort: "high" }],
+      [
+        model(
+          "too-many-efforts",
+          Array.from({ length: 65 }, (_, index) => `effort-${String(index)}`),
+        ),
+      ],
     ];
     for (const data of invalidModels) {
       expect(() =>

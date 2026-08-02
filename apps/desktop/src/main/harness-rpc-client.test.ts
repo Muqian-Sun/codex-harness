@@ -156,6 +156,23 @@ function accountEvent(
   };
 }
 
+function modelCatalogPage(): JsonValue {
+  return {
+    schemaVersion: 1,
+    provider: "openai",
+    totalVisibleModels: 1,
+    models: [
+      {
+        model: "gpt-model",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: ["medium"],
+        inputModalities: ["text"],
+      },
+    ],
+    nextCursor: null,
+  };
+}
+
 async function closeServer(server: Server): Promise<void> {
   if (!server.listening) {
     return;
@@ -277,6 +294,56 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       planType: "plus",
     });
     expect(client.state).toBe("ready");
+  });
+
+  it("reads a strictly validated bounded model catalog page", async () => {
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      expect(value).toMatchObject({
+        kind: "request",
+        method: "model.catalog_page",
+        params: { cursor: null, limit: 12 },
+      });
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result: modelCatalogPage(),
+      });
+    });
+    const client = await createClient(endpoint);
+
+    await expect(client.modelCatalogPage({ cursor: null, limit: 12 })).resolves.toEqual(
+      modelCatalogPage(),
+    );
+  });
+
+  it("fails closed when a model catalog result contains private fields", async () => {
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result: { ...record(modelCatalogPage()), snapshotId: "private-snapshot" },
+      });
+    });
+    const client = await createClient(endpoint);
+
+    const error = await client
+      .modelCatalogPage({ cursor: null, limit: 12 })
+      .catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "protocol_violation" });
+    expect(JSON.stringify(error)).not.toContain("private-snapshot");
+    expect(client.state).toBe("closed");
   });
 
   it("captures the event sequence barrier at the exact account response position", async () => {

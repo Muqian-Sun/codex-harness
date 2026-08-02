@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { constants as osConstants } from "node:os";
+import { TextDecoder } from "node:util";
 
-import { validateJsonValue, type JsonValue } from "@codex-harness/protocol";
+import {
+  decodeRequestParams,
+  decodeResponseResult,
+  validateJsonValue,
+  type HarnessModelCatalogPageParams,
+  type HarnessModelCatalogPageResult,
+  type JsonValue,
+} from "@codex-harness/protocol";
 
 import {
   createAccountStatusSnapshot,
@@ -23,17 +31,21 @@ import {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_PROVIDER_CHARACTERS = 256;
+const MAX_MODEL_ID_CHARACTERS = 256;
 const MAX_CURSOR_CHARACTERS = 4_096;
+const MAX_PUBLIC_CURSOR_CHARACTERS = 2_048;
 const MAX_CATALOG_PAGES = 128;
 const MAX_CATALOG_MODELS = 10_000;
 const MAX_CATALOG_RESPONSE_BYTES = 64 * 1024 * 1024;
 const MODEL_LIST_PAGE_SIZE = 1_000;
+const publicCursorDecoder = new TextDecoder("utf-8", { fatal: true });
 
 export type AppServerWorkerManagerState =
   "starting" | "ready" | "refreshing" | "refreshing_account" | "closing" | "closed";
 
 export type AppServerWorkerManagerErrorCode =
   | "account_snapshot_failed"
+  | "catalog_page_unavailable"
   | "catalog_refresh_failed"
   | "closed"
   | "invalid_configuration"
@@ -42,6 +54,7 @@ export type AppServerWorkerManagerErrorCode =
 
 const ERROR_MESSAGES: Readonly<Record<AppServerWorkerManagerErrorCode, string>> = Object.freeze({
   account_snapshot_failed: "The Codex account status snapshot failed.",
+  catalog_page_unavailable: "The current Codex model catalog page is unavailable.",
   catalog_refresh_failed: "The Codex model catalog refresh failed.",
   closed: "The Codex App Server worker manager is closed.",
   invalid_configuration: "The Codex App Server worker manager configuration is invalid.",
@@ -255,6 +268,62 @@ export class AppServerWorkerManager {
       candidate === this.#catalog &&
       this.#catalog?.workerSessionId === this.#workerSessionId
     );
+  }
+
+  readCatalogPage(input: unknown): HarnessModelCatalogPageResult {
+    if (this.#state !== "ready") {
+      throw new AppServerWorkerManagerError(
+        this.#state === "closing" || this.#state === "closed"
+          ? "closed"
+          : "catalog_page_unavailable",
+      );
+    }
+    const catalog = this.#catalog;
+    if (catalog === undefined || !this.isCatalogCurrent(catalog)) {
+      throw new AppServerWorkerManagerError("catalog_page_unavailable");
+    }
+    const decodedParams = decodeRequestParams("model.catalog_page", input);
+    if (!decodedParams.ok) {
+      throw new AppServerWorkerManagerError("catalog_page_unavailable");
+    }
+
+    try {
+      const params = decodedParams.value as HarnessModelCatalogPageParams;
+      const visible = catalog.models.filter((model) => !model.hidden);
+      const startIndex = resolveCatalogPageStart(catalog, visible, params.cursor);
+      const endIndex = Math.min(startIndex + params.limit, visible.length);
+      const models = Object.freeze(
+        visible.slice(startIndex, endIndex).map((model) =>
+          Object.freeze({
+            model: model.model,
+            defaultReasoningEffort: model.defaultReasoningEffort,
+            supportedReasoningEfforts: model.supportedReasoningEfforts,
+            inputModalities: model.inputModalities,
+          }),
+        ),
+      );
+      const nextCursor =
+        endIndex < visible.length && endIndex > startIndex
+          ? encodeCatalogCursor(catalog.snapshotId, visible[endIndex - 1]!.id)
+          : null;
+      const result = Object.freeze({
+        schemaVersion: 1 as const,
+        provider: catalog.provider,
+        totalVisibleModels: visible.length,
+        models,
+        nextCursor,
+      });
+      const decodedResult = decodeResponseResult("model.catalog_page", result);
+      if (!decodedResult.ok) {
+        throw new AppServerWorkerManagerError("catalog_page_unavailable");
+      }
+      return result;
+    } catch (error: unknown) {
+      if (error instanceof AppServerWorkerManagerError) {
+        throw error;
+      }
+      throw new AppServerWorkerManagerError("catalog_page_unavailable");
+    }
   }
 
   get accountStatus(): AccountStatusSnapshot | null {
@@ -594,6 +663,77 @@ export class AppServerWorkerManager {
     this.#resolveClosed(result);
     return result;
   }
+}
+
+function resolveCatalogPageStart(
+  catalog: ModelCatalogSnapshot,
+  visible: readonly ModelCatalogSnapshot["models"][number][],
+  cursor: string | null,
+): number {
+  if (cursor === null) {
+    return 0;
+  }
+  const decoded = decodeCatalogCursor(cursor);
+  if (decoded.snapshotId !== catalog.snapshotId) {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  const index = visible.findIndex((model) => model.id === decoded.modelId);
+  if (index < 0) {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  return index + 1;
+}
+
+function encodeCatalogCursor(snapshotId: string, modelId: string): string {
+  const cursor = `${requireUuid(snapshotId)}.${Buffer.from(
+    requirePublicModelId(modelId),
+    "utf8",
+  ).toString("base64url")}`;
+  if (cursor.length > MAX_PUBLIC_CURSOR_CHARACTERS) {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  return cursor;
+}
+
+function decodeCatalogCursor(cursor: string): Readonly<{ snapshotId: string; modelId: string }> {
+  if (
+    cursor.length < 1 ||
+    cursor.length > MAX_PUBLIC_CURSOR_CHARACTERS ||
+    cursor.trim() !== cursor
+  ) {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  const parts = cursor.split(".");
+  if (parts.length !== 2 || parts[1] === "" || !/^[A-Za-z0-9_-]+$/.test(parts[1]!)) {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  const bytes = Buffer.from(parts[1]!, "base64url");
+  if (bytes.toString("base64url") !== parts[1]) {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  let modelId: string;
+  try {
+    modelId = publicCursorDecoder.decode(bytes);
+  } catch {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  return Object.freeze({
+    snapshotId: requireUuid(parts[0]),
+    modelId: requirePublicModelId(modelId),
+  });
+}
+
+function requirePublicModelId(input: unknown): string {
+  if (
+    typeof input !== "string" ||
+    input.length < 1 ||
+    input.length > MAX_MODEL_ID_CHARACTERS ||
+    input.trim() !== input ||
+    containsControlCharacter(input)
+  ) {
+    throw new AppServerWorkerManagerError("catalog_page_unavailable");
+  }
+  return input;
 }
 
 function normalizeProvider(input: unknown): string {
