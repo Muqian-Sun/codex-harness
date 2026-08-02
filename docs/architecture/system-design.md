@@ -158,7 +158,7 @@ Task 到 Project 的权威归属使用独立单调 ownership version。首次归
 
 权威 route feature snapshot 从经过领域校验的 Task 当前投影和恢复 freshness fence 确定性构造，并支持绑定当前 DAG 中的可选节点。snapshot 保存 Task 阶段、需求项数、当前权威与候选计划步骤数、图节点/依赖数和节点依赖闭包，不复制完整需求文本；Task、Requirement、Plan、Graph、Reconciliation 任一修订或内容摘要变化都会使旧 snapshot 失效。Task 结构提供 complexity、scope、ambiguity 和 estimated steps 基线；在任务类型与工具计划没有权威来源时，策略分别至少使用 `analysis` 和 `multiple`，避免未经证明地进入 `fast`。用户或模型 candidate 统一标记为 advisory，只能按字段强度保持或提高基线，不能降低；source 标签仅用于审计，不赋予权限。
 
-安全信号严格区分“candidate 报告存在风险”和“尚未证明不存在风险”。candidate `true` 可以保守设置风险下限，candidate `false` 仍记录为 unresolved。当前尚无权限计划、静态分析、运行目标和外部副作用证据来提供权威负面观察，因此 V1 feature snapshot 固定 `deep` routing floor、`shadow` 和不可执行。snapshot decoder 会重建有效特征、provenance、未解决列表和 SHA-256 摘要；实际使用方仍必须在安全串行边界针对最新 Task 重新构造并比较。该能力不修改现有 RouteDecision 事件，解除 deep floor 必须由后续安全证据 PR 逐项完成。
+安全信号严格区分“candidate 报告存在风险”和“尚未证明不存在风险”。candidate `true` 可以保守设置风险下限，candidate `false` 仍记录为 unresolved。虽然四类独立 observer 已可产生 shadow 报告，但 feature snapshot 尚未接入经过运行时 gate 和安全边界 coordinator 复核的权限计划、工作区分析、运行目标和外部副作用证据，因此仍固定 `deep` routing floor、`shadow` 和不可执行。snapshot decoder 会重建有效特征、provenance、未解决列表和 SHA-256 摘要；实际使用方仍必须在安全串行边界针对最新 Task 重新构造并比较。该能力不修改现有 RouteDecision 事件，解除 deep floor 必须由后续安全证据组合 PR 逐项完成。
 
 Harness route evidence 使用 daemon authority session 内的进程品牌约束任务类型、完整工具计划和安全观察覆盖。authority 创建时固定 task classifier、tool planner 和安全 observer 的完整 policy version 集合，签发时每份观察必须精确匹配，避免同一 session 内用陈旧或任意策略标签冒充当前证据。证据同时绑定当前 Task recovery fence、可选活动 DAG 节点和不早于 Task 更新时间的观察时间；序列化、克隆、其他 authority session/policy set 或进程重启后的对象只能严格解码用于审计，不能恢复权威身份。工具广度只从去重的完整工具类别集合派生；工具计划缺失时保持 unresolved。安全负面证明使用固定双来源覆盖矩阵，任一来源报告风险即为 present，只有每个信号规定的全部 Harness observer 都明确报告 absent 时才为 absent，缺少任一来源均为 unresolved。`completeForRouting` 只表示本证据契约要求的观察覆盖完整，snapshot 仍固定 `shadow`、不可执行，也不会解除现有 feature snapshot 的 `deep` 下限；具体 observer、coordinator 与运行时复核必须后续独立交付。
 
@@ -167,6 +167,8 @@ Harness route evidence 使用 daemon authority session 内的进程品牌约束�
 权限计划路由 observer 接受显式标记 `complete: true`、有界且可为空的固定 capability 请求列表，不允许调用方直接填写安全布尔值。它在创建时固定 `permission_plan` policy version，并从凭据访问、特权命令、权限边界和生产访问确定 security-sensitive，从两类显式不可逆 capability 确定不可逆操作，同时把权限边界 capability 独立报告为边界变更；普通工作区、命令、网络或外部写请求仍由权限系统单独决定批准级别，不自动等同于安全敏感。观察结果同样绑定 Task recovery fence、可选活动 DAG 节点、观察时间和进程内 observer session，clone 或严格解码不能恢复 WeakSet 品牌。`complete: true` 目前只是调用契约，尚未由操作 manifest、App Server approval 或实际工具 gate 强制，因此该 observer 不授予权限、不接入 route evidence authority 或执行路径，单一 `permission_plan` 的 `absent` 不能替代双来源负面证明，也不能解除 `deep` 下限。
 
 工作区分析路由 observer 接受显式标记 `complete: true`、绑定不透明 workspace snapshot ID 与小写 SHA-256 digest、最多 512 项的固定 finding 集合，不允许调用方直接提交安全布尔值，也不保存路径或代码内容。它从共享可变状态和并发资源访问 finding 确定并发敏感，从数据库 schema 和持久数据重写 finding 确定迁移，从导出 API 和协议契约 finding 确定公共 API 变化，并从认证授权、凭据处理、密码学和安全边界 finding 确定安全敏感；快照绑定 Task recovery fence、可选活动 DAG 节点、观察时间、策略和进程内 observer session，严格解码可重算完整投影但不能恢复 WeakSet 品牌。本模块不读取文件系统、不重算 digest，也不证明上游分析确实穷尽或该 workspace snapshot 仍是 Project 当前工作区，因此 `complete: true` 和 `isCurrent` 都不能单独解决 workspace TOCTOU；在真实分析器、工作区快照注册表和安全边界 coordinator 落地前，它只提供 shadow 证据，不接入 route evidence authority 或执行路径，单一来源的 `absent` 不能解除 `deep` 下限。
+
+运行目标路由 observer 接受显式标记 `complete: true`、绑定不透明 runtime inventory snapshot ID 与小写 SHA-256 digest、最多 128 项的固定目标集合，不允许调用方直接提交生产影响布尔值，也不保存目标名、主机、账号、URL、区域或部署 payload。目标环境使用固定类别：本地、临时、开发、测试和预发布报告非生产，生产数据面、生产控制面和客户生产环境报告 `productionImpact: present`；类别表达真实影响边界而不是显示名称，未来注册表必须把共享生产控制面的目标保守分类为生产控制面。快照绑定 Task recovery fence、可选活动 DAG 节点、观察时间、策略和进程内 observer session，严格解码可重算报告与摘要但不能恢复 WeakSet 品牌。本模块不发现目标、不重算 inventory digest，也不证明目标计划确实穷尽或 inventory 仍是 Project 当前状态；在目标注册表、运行时目标 gate 和安全边界 coordinator 落地前，它只提供 shadow 证据，不接入 route evidence authority 或执行路径，单一 `runtime_target` 的 `absent` 不能替代与 `operation_plan` 的双来源负面证明，也不能解除 `deep` 下限。
 
 影子 RouteDecision 由 Harness 从命令特征和当前 profile 配置重新计算，调用方不能提交最终档位、理由或模型目标。记录绑定 decision、Task/version、可选节点、profile、配置 revision fence 和发生时间，以 `taskId/decisionId` 作为只增审计投影键；决策 decoder 会重新运行固定策略并核对全部派生字段。写入前先按 decision ID 查询：已存在时只接受所有业务字段、特征、配置 fence 和 metadata 均相同的历史重试，即使 profile 后来更新也返回原决策；不存在时必须证明期望配置仍是 profile 当前 revision，且 decision 时间不早于该 revision 的生效时间，过期 fence 或不可能的时间线不得创建新决策。记录始终保持 `shadow` 与不可执行，不成为权限或调度授权。
 
@@ -282,7 +284,7 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
-7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划与工作区分析三个 observer 和 RouteDecision 审计已完成；其余 runtime target observer、运行时 manifest/权限计划/工作区分析新鲜度强制、证据到 feature 的组合、目录 freshness、组合 coordinator 和影子评估待后续 PR。
+7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划、工作区分析与运行目标四个 observer 和 RouteDecision 审计已完成；其余运行时 manifest/权限计划/工作区分析/目标 inventory 新鲜度强制、证据到 feature 的组合、目录 freshness、组合 coordinator 和影子评估待后续 PR。
 8. 串行调度。
 9. 安全 Electron 桌面壳与任务 UI。
 10. 审批、证据、运行恢复和打包门禁。
