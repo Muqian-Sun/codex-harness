@@ -9,11 +9,12 @@
     "pnpm": ">=10.14.0 <11"
   },
   "scripts": {
-    "build": "tsc -b --force --pretty false",
-    "clean": "tsc -b --clean",
+    "build": "tsc -b --force --pretty false && pnpm --filter @codex-harness/desktop build:renderer",
+    "clean": "tsc -b --clean && node scripts/clean-desktop-renderer.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings 0",
+    "desktop:start": "pnpm build && pnpm --filter @codex-harness/desktop start",
     "schema:app-server": "node scripts/update-app-server-schema.mjs",
     "smoke:build": "node scripts/smoke-build.mjs",
     "test": "vitest run",

@@ -72,6 +72,7 @@ export type DaemonProcessSupervisorConfig = Readonly<{
   args: readonly string[];
   runtimeRoot: string;
   clientVersion: string;
+  electronRunAsNode?: boolean;
   startupTimeoutMs?: number;
   gracefulTimeoutMs?: number;
   sigtermTimeoutMs?: number;
@@ -104,6 +105,7 @@ type NormalizedConfig = Readonly<{
   args: readonly string[];
   runtimeRoot: string;
   clientVersion: string;
+  electronRunAsNode: boolean;
   startupTimeoutMs: number;
   gracefulTimeoutMs: number;
   sigtermTimeoutMs: number;
@@ -121,6 +123,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
     const args = [...config.args];
     const runtimeRoot = config.runtimeRoot;
     const clientVersion = config.clientVersion;
+    const electronRunAsNode = config.electronRunAsNode ?? false;
     const startupTimeoutMs = config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const gracefulTimeoutMs = config.gracefulTimeoutMs ?? DEFAULT_GRACEFUL_TIMEOUT_MS;
     const sigtermTimeoutMs = config.sigtermTimeoutMs ?? DEFAULT_SIGTERM_TIMEOUT_MS;
@@ -136,6 +139,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
       !isAbsolute(runtimeRoot) ||
       runtimeRoot.includes("\0") ||
       !ProductVersionSchema.safeParse(clientVersion).success ||
+      (config.electronRunAsNode !== undefined && typeof config.electronRunAsNode !== "boolean") ||
       args.length > MAX_ARGUMENT_COUNT ||
       args.some(
         (argument) =>
@@ -163,6 +167,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
       args: Object.freeze(args),
       runtimeRoot,
       clientVersion,
+      electronRunAsNode,
       startupTimeoutMs,
       gracefulTimeoutMs,
       sigtermTimeoutMs,
@@ -285,6 +290,9 @@ export class DaemonProcessSupervisor {
         {
           cwd: runtimeDirectory,
           detached: true,
+          env: normalized.electronRunAsNode
+            ? { ...process.env, ELECTRON_RUN_AS_NODE: "1" }
+            : process.env,
           stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
         },
       );

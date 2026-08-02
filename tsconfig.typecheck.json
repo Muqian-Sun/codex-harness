@@ -4,6 +4,7 @@
     "composite": false,
     "declaration": false,
     "declarationMap": false,
+    "jsx": "react-jsx",
     "noEmit": true,
     "paths": {
       "@codex-harness/app-server-adapter": ["./packages/app-server-adapter/src/index.ts"],

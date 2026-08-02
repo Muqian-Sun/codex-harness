@@ -2,6 +2,7 @@ import { APPLICATION_PROTOCOL_VERSION } from "@codex-harness/protocol";
 
 export const desktopBootstrapMetadata = Object.freeze({
   name: "codex-harness-desktop",
+  version: "0.0.0",
   protocolVersion: APPLICATION_PROTOCOL_VERSION,
 });
 

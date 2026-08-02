@@ -7,6 +7,7 @@ Codex Harness 是一个基于 Codex App Server 的本地优先桌面任务控制
 ## 设计入口
 
 - [总体设计](docs/architecture/system-design.md)
+- [macOS 桌面开发启动](docs/development/macos-desktop.md)
 - [总体设计与交付路线 Issue #2](https://github.com/Muqian-Sun/codex-harness/issues/2)
 
 ## 开发环境
