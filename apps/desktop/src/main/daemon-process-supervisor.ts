@@ -19,7 +19,7 @@ import {
   type ProcessGroupEscalation,
 } from "./owned-process-group.js";
 
-const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 45_000;
 const DEFAULT_GRACEFUL_TIMEOUT_MS = 5_000;
 const DEFAULT_SIGTERM_TIMEOUT_MS = 2_000;
 const DEFAULT_SIGKILL_TIMEOUT_MS = 2_000;

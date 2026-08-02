@@ -6,11 +6,13 @@ import {
   EXPLICITLY_SENSITIVE_APP_SERVER_METHODS,
   classifyServerRequest,
   validateMethodParams,
+  validateMethodResult,
 } from "./methods.js";
 
 describe("App Server method policy", () => {
   it("exposes only the stable Harness subset", () => {
     expect(ALLOWED_APP_SERVER_METHODS).toEqual([
+      "account/read",
       "model/list",
       "thread/start",
       "thread/resume",
@@ -31,6 +33,50 @@ describe("App Server method policy", () => {
       ok: false,
       error: { code: "invalid_params" },
     });
+  });
+
+  it("allows only a non-refreshing account observation and strips sensitive response fields", () => {
+    expect(validateMethodParams("account/read", { refreshToken: false })).toMatchObject({
+      ok: true,
+      value: { refreshToken: false },
+    });
+    for (const params of [{}, { refreshToken: true }, { refreshToken: false, extra: true }]) {
+      expect(validateMethodParams("account/read", params)).toMatchObject({
+        ok: false,
+        error: { code: "invalid_params" },
+      });
+    }
+
+    expect(
+      validateMethodResult("account/read", {
+        account: {
+          type: "chatgpt",
+          email: "private@example.com",
+          planType: "plus",
+          accessToken: "must-not-survive",
+        },
+        requiresOpenaiAuth: true,
+        futureSecret: "must-not-survive",
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        account: { type: "chatgpt", planType: "plus" },
+        requiresOpenaiAuth: true,
+      },
+    });
+    expect(
+      validateMethodResult("account/read", {
+        account: { type: "futureAccount" },
+        requiresOpenaiAuth: true,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    expect(
+      validateMethodResult("account/read", {
+        account: { type: "chatgpt", email: null, planType: "future-plan" },
+        requiresOpenaiAuth: true,
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid_response" } });
   });
 
   it("rejects unsafe sandbox and raw configuration overrides", () => {

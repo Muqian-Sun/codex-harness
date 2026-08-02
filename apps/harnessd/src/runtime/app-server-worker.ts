@@ -207,10 +207,18 @@ export class AppServerWorker {
   }
 
   async listModels(params: unknown): Promise<JsonValue> {
+    return await this.#request("model/list", params);
+  }
+
+  async readAccount(): Promise<JsonValue> {
+    return await this.#request("account/read", { refreshToken: false });
+  }
+
+  async #request(method: "account/read" | "model/list", params: unknown): Promise<JsonValue> {
     if (this.#state !== "ready") {
       throw new AppServerWorkerError("closed");
     }
-    const request = this.#adapter.createRequest("model/list", params);
+    const request = this.#adapter.createRequest(method, params);
     if (!request.ok) {
       throw new AppServerWorkerError("request_failed");
     }

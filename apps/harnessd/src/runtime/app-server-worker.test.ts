@@ -190,13 +190,36 @@ if (args.length === 1 && args[0] === "--version") {
       }
       return;
     }
-    if (message.method !== "model/list" || !initialized) {
+    if (!initialized) {
       process.exit(65);
     }
     if (behavior.appMode === "request_timeout") return;
     if (behavior.appMode === "request_error") {
       send({ id: message.id, error: { code: 401, message: "TOP-SECRET-SERVER-MESSAGE" } });
       return;
+    }
+    if (message.method === "account/read") {
+      if (behavior.appMode === "invalid_result") {
+        send({ id: message.id, result: { account: { type: "future" }, requiresOpenaiAuth: true } });
+        return;
+      }
+      send({
+        id: message.id,
+        result: {
+          account: {
+            type: "chatgpt",
+            email: "private@example.com",
+            planType: "plus",
+            accessToken: "must-not-survive"
+          },
+          requiresOpenaiAuth: true,
+          futureSecret: "must-not-survive"
+        }
+      });
+      return;
+    }
+    if (message.method !== "model/list") {
+      process.exit(65);
     }
     if (behavior.appMode === "invalid_result") {
       send({ id: message.id, result: { data: "invalid", nextCursor: null } });
@@ -235,6 +258,7 @@ describe("Codex App Server worker", () => {
   it("verifies the pinned CLI, performs the handshake, lists models, and closes on EOF", async () => {
     const { fake, worker } = await startFakeWorker({ lineEnding: "crlf" });
     const result = await worker.listModels({ includeHidden: true });
+    const account = await worker.readAccount();
 
     expect(worker.state).toBe("ready");
     expect(worker.supportedCodexCliVersion).toBe("0.146.0-alpha.9.2");
@@ -243,6 +267,13 @@ describe("Codex App Server worker", () => {
       nextCursor: null,
     });
     expect(Object.isFrozen(result)).toBe(true);
+    expect(account).toEqual({
+      account: { type: "chatgpt", planType: "plus" },
+      requiresOpenaiAuth: true,
+    });
+    expect(JSON.stringify(account)).not.toContain("private@example.com");
+    expect(JSON.stringify(account)).not.toContain("must-not-survive");
+    expect(Object.isFrozen(account)).toBe(true);
     const log = await readWireLog(fake);
     expect(log).toEqual(
       expect.arrayContaining([
@@ -258,7 +289,7 @@ describe("Codex App Server worker", () => {
         Boolean(entry && typeof entry === "object" && "message" in entry),
       )
       .map((entry) => entry.message.method);
-    expect(inputs.slice(0, 3)).toEqual(["initialize", "initialized", "model/list"]);
+    expect(inputs.slice(0, 4)).toEqual(["initialize", "initialized", "model/list", "account/read"]);
 
     const closed = await worker.close();
     expect(closed).toMatchObject({
@@ -374,6 +405,14 @@ describe("Codex App Server worker", () => {
     const invalid = await startFakeWorker({ appMode: "invalid_result" });
     await expect(invalid.worker.listModels({})).rejects.toMatchObject({ code: "protocol_failure" });
     await expect(invalid.worker.closed).resolves.toMatchObject({ reason: "protocol_failure" });
+
+    const invalidAccount = await startFakeWorker({ appMode: "invalid_result" });
+    await expect(invalidAccount.worker.readAccount()).rejects.toMatchObject({
+      code: "protocol_failure",
+    });
+    await expect(invalidAccount.worker.closed).resolves.toMatchObject({
+      reason: "protocol_failure",
+    });
 
     const duplicate = await startFakeWorker({ appMode: "duplicate_response" });
     await expect(duplicate.worker.listModels({})).resolves.toMatchObject({
