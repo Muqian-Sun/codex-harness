@@ -31,6 +31,7 @@ const STARTUP_CAPABILITY = "A".repeat(43);
 const WORKER_SESSION_ID = "00000000-0000-4000-8000-000000000611";
 const SNAPSHOT_ID = "00000000-0000-4000-8000-000000000612";
 const ACCOUNT_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000613";
+const SECOND_ACCOUNT_SNAPSHOT_ID = "00000000-0000-4000-8000-000000000614";
 const temporaryDirectories: string[] = [];
 const runtimes: DaemonRuntime[] = [];
 const sockets: Socket[] = [];
@@ -62,15 +63,20 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
   readonly closed: Promise<AppServerWorkerCloseResult>;
   readonly #closeResult: AppServerWorkerCloseResult;
   readonly #closeGate: Promise<void> | undefined;
+  readonly #accountResponses: JsonValue[];
   #resolveClosed!: (result: AppServerWorkerCloseResult) => void;
   closeCalls = 0;
 
   constructor(
     closeResult: AppServerWorkerCloseResult = runtimeWorkerClose(),
     closeGate?: Promise<void>,
+    accountResponses: readonly JsonValue[] = [
+      Object.freeze({ account: null, requiresOpenaiAuth: true }),
+    ],
   ) {
     this.#closeResult = closeResult;
     this.#closeGate = closeGate;
+    this.#accountResponses = [...accountResponses];
     this.closed = new Promise((resolve) => {
       this.#resolveClosed = resolve;
     });
@@ -93,7 +99,11 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
   }
 
   async readAccount(): Promise<JsonValue> {
-    return { account: null, requiresOpenaiAuth: true };
+    const response = this.#accountResponses.shift();
+    if (response === undefined) {
+      throw new Error("missing fake account response");
+    }
+    return response;
   }
 
   async close(): Promise<AppServerWorkerCloseResult> {
@@ -131,7 +141,7 @@ function runtimeWorkerClose(
 }
 
 async function createWorkerManager(worker: RuntimeFakeWorker): Promise<AppServerWorkerManager> {
-  const ids = [WORKER_SESSION_ID, SNAPSHOT_ID, ACCOUNT_SNAPSHOT_ID];
+  const ids = [WORKER_SESSION_ID, SNAPSHOT_ID, ACCOUNT_SNAPSHOT_ID, SECOND_ACCOUNT_SNAPSHOT_ID];
   const dependencies: AppServerWorkerManagerDependencies = Object.freeze({
     startWorker: async () => worker,
     newId: () => ids.shift() ?? "missing-id",
@@ -380,6 +390,68 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
         status: "authentication_required",
         credentialKind: null,
         planType: null,
+      },
+    });
+  });
+
+  it("publishes a strictly sequenced account event after the manager installs a new snapshot", async () => {
+    const worker = new RuntimeFakeWorker(runtimeWorkerClose(), undefined, [
+      Object.freeze({ account: null, requiresOpenaiAuth: true }),
+      Object.freeze({
+        account: { type: "chatgpt", planType: "pro" },
+        requiresOpenaiAuth: true,
+      }),
+    ]);
+    const workerManager = await createWorkerManager(worker);
+    const { endpoint } = await createRuntime({ workerManager });
+    const socket = await connect(endpoint);
+    await authenticate(socket);
+    const eventPromise = readFrame(socket);
+
+    const refreshed = await workerManager.refreshAccountStatus();
+    const event = await eventPromise;
+
+    expect(refreshed.snapshotId).toBe(SECOND_ACCOUNT_SNAPSHOT_ID);
+    expect(parseServerRpcEnvelope(event).ok).toBe(true);
+    expect(event).toMatchObject({
+      kind: "event",
+      streamId: expect.any(String),
+      sequence: 1,
+      method: "account.status_changed",
+      params: {
+        snapshotId: SECOND_ACCOUNT_SNAPSHOT_ID,
+        workerSessionId: WORKER_SESSION_ID,
+        status: "authenticated",
+        credentialKind: "chatgpt",
+        planType: "pro",
+      },
+    });
+  });
+
+  it("drops updates without an authenticated connection and serves the latest snapshot on pull", async () => {
+    const worker = new RuntimeFakeWorker(runtimeWorkerClose(), undefined, [
+      Object.freeze({ account: null, requiresOpenaiAuth: true }),
+      Object.freeze({
+        account: { type: "chatgpt", planType: "team" },
+        requiresOpenaiAuth: true,
+      }),
+    ]);
+    const workerManager = await createWorkerManager(worker);
+    const { endpoint } = await createRuntime({ workerManager });
+    const socket = await connect(endpoint);
+    await workerManager.refreshAccountStatus();
+    await authenticate(socket);
+    const responsePromise = readFrame(socket);
+
+    sendFrame(socket, rpc("account-latest", "account.status", {}));
+
+    await expect(responsePromise).resolves.toMatchObject({
+      kind: "response",
+      id: "account-latest",
+      result: {
+        snapshotId: SECOND_ACCOUNT_SNAPSHOT_ID,
+        status: "authenticated",
+        planType: "team",
       },
     });
   });

@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { INTERNAL_ERROR_PUBLIC_MESSAGE } from "./constants.js";
 import { createInternalErrorResponse } from "./internal-error.js";
-import { ACCOUNT_PLAN_TYPES, decodeRequestParams, decodeResponseResult } from "./methods.js";
+import {
+  ACCOUNT_PLAN_TYPES,
+  decodeEventParams,
+  decodeRequestParams,
+  decodeResponseResult,
+} from "./methods.js";
 import { TEST_STREAM_ID } from "./test-fixtures.js";
 
 describe("method contracts", () => {
@@ -96,6 +101,36 @@ describe("method contracts", () => {
   it("rejects unknown methods and method-specific mismatches", () => {
     expect(decodeRequestParams("unknown.method", {}).ok).toBe(false);
     expect(decodeResponseResult("system.health", { status: "bad" }).ok).toBe(false);
+  });
+
+  it("strictly validates the account status changed event contract", () => {
+    const valid = {
+      schemaVersion: 1,
+      snapshotId: "00000000-0000-4000-8000-000000000811",
+      workerSessionId: "00000000-0000-4000-8000-000000000812",
+      observedAtMs: 1_750_000_000_002,
+      status: "authenticated",
+      credentialKind: "chatgpt",
+      planType: "pro",
+    } as const;
+
+    for (const planType of ACCOUNT_PLAN_TYPES) {
+      expect(decodeEventParams("account.status_changed", { ...valid, planType }).ok).toBe(true);
+    }
+    expect(
+      decodeEventParams("account.status_changed", { ...valid, email: "private@example.com" }).ok,
+    ).toBe(false);
+    expect(
+      decodeEventParams("account.status_changed", {
+        ...valid,
+        credentialKind: "api_key",
+        planType: "pro",
+      }).ok,
+    ).toBe(false);
+    expect(decodeEventParams("future.event", valid)).toMatchObject({
+      ok: false,
+      error: { code: "unknown_event" },
+    });
   });
 });
 

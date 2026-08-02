@@ -82,6 +82,8 @@ export class DaemonRuntime {
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
   #activeSocket: Socket | undefined;
+  #activeSession: ConnectionSession | undefined;
+  #unsubscribeAccountStatus: (() => void) | undefined;
   #handshakeTimer: NodeJS.Timeout | undefined;
   #socketCloseTimer: NodeJS.Timeout | undefined;
   #endpointIdentity: UnixEndpointIdentity | undefined;
@@ -174,6 +176,7 @@ export class DaemonRuntime {
 
     this.#state = "quiescing";
     this.#quiesceReason = reason;
+    this.#stopAccountStatusSubscription();
     this.#beginWorkerClose();
     void this.#closeListenerSafely();
 
@@ -186,6 +189,18 @@ export class DaemonRuntime {
 
   async #listen(): Promise<void> {
     try {
+      const workerManager = this.#workerManager;
+      if (workerManager !== undefined) {
+        try {
+          this.#unsubscribeAccountStatus = workerManager.subscribeAccountStatusChanges((snapshot) =>
+            this.#publishAccountStatusChanged(snapshot),
+          );
+        } catch {
+          this.#workerFailed = true;
+          this.#quiesceReason = "worker_failure";
+          throw new DaemonRuntimeStartError("worker_unavailable");
+        }
+      }
       await new Promise<void>((resolve, reject) => {
         const onError = (): void => {
           this.#server.off("listening", onListening);
@@ -210,6 +225,7 @@ export class DaemonRuntime {
         throw new DaemonRuntimeStartError("listen_failed");
       }
     } catch (error: unknown) {
+      this.#stopAccountStatusSubscription();
       if (this.#listenerCreated && !this.#finalized) {
         this.#quiesceReason ??= "server_error";
         this.#beginWorkerClose();
@@ -238,6 +254,7 @@ export class DaemonRuntime {
       readAccountStatus: () => this.#readCurrentAccountStatus(),
     });
     this.#activeSocket = socket;
+    this.#activeSession = session;
     socket.setNoDelay(true);
     this.#handshakeTimer = setTimeout(() => {
       if (session.state === "awaiting_hello") {
@@ -304,6 +321,7 @@ export class DaemonRuntime {
       this.#socketCloseTimer = undefined;
     }
     this.#activeSocket = undefined;
+    this.#activeSession = undefined;
   }
 
   #clearHandshakeTimer(): void {
@@ -322,6 +340,24 @@ export class DaemonRuntime {
     return accountStatus !== null && manager.isAccountStatusCurrent(accountStatus)
       ? accountStatus
       : null;
+  }
+
+  #publishAccountStatusChanged(snapshot: unknown): void {
+    if (this.#state !== "listening") {
+      return;
+    }
+    const socket = this.#activeSocket;
+    const session = this.#activeSession;
+    if (socket === undefined || session === undefined || session.state !== "authenticated") {
+      return;
+    }
+    this.#applyActions(socket, session.publishEvent("account.status_changed", snapshot));
+  }
+
+  #stopAccountStatusSubscription(): void {
+    const unsubscribe = this.#unsubscribeAccountStatus;
+    this.#unsubscribeAccountStatus = undefined;
+    unsubscribe?.();
   }
 
   #handleServerFailure(): void {
@@ -385,6 +421,7 @@ export class DaemonRuntime {
       return;
     }
     this.#finalized = true;
+    this.#stopAccountStatusSubscription();
     this.#clearHandshakeTimer();
     if (this.#socketCloseTimer !== undefined) {
       clearTimeout(this.#socketCloseTimer);

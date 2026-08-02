@@ -10,6 +10,7 @@ import {
   MAX_FRAME_BYTES,
   ProductVersionSchema,
   StartupCapabilitySchema,
+  decodeEventParams,
   decodeRequestParams,
   decodeResponseResult,
   decodeServerBootstrapFrame,
@@ -91,6 +92,19 @@ export type HarnessHealthResult = Readonly<{
 
 export type HarnessShutdownResult = Readonly<{ accepted: true }>;
 export type HarnessAccountStatusResult = Readonly<ProtocolAccountStatusResult>;
+export type HarnessAccountStatusObservation = Readonly<{
+  account: HarnessAccountStatusResult;
+  observedThroughSequence: number;
+}>;
+export type HarnessAccountStatusChangedEvent = Readonly<{
+  sequence: number;
+  account: HarnessAccountStatusResult;
+}>;
+
+type RpcResponseObservation = Readonly<{
+  value: JsonValue;
+  observedThroughSequence: number;
+}>;
 
 type ConnectAttempt = Readonly<{
   resolve: () => void;
@@ -107,7 +121,7 @@ type HandshakeAttempt = Readonly<{
 
 type PendingRequest = Readonly<{
   method: RpcMethodName;
-  resolve: (value: JsonValue) => void;
+  resolve: (value: RpcResponseObservation) => void;
   reject: (error: HarnessRpcClientError) => void;
   timer: NodeJS.Timeout;
 }>;
@@ -202,6 +216,13 @@ export class HarnessRpcClient {
   }
 
   async request(method: RpcMethodName, params: JsonValue): Promise<JsonValue> {
+    return (await this.#requestObservation(method, params)).value;
+  }
+
+  async #requestObservation(
+    method: RpcMethodName,
+    params: JsonValue,
+  ): Promise<RpcResponseObservation> {
     if (this.#state !== "ready") {
       throw new HarnessRpcClientError("client_closed");
     }
@@ -226,7 +247,7 @@ export class HarnessRpcClient {
       params,
     });
 
-    return await new Promise<JsonValue>((resolve, reject) => {
+    return await new Promise<RpcResponseObservation>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#fail(new HarnessRpcClientError("request_timeout"));
       }, this.#requestTimeoutMs);
@@ -242,6 +263,14 @@ export class HarnessRpcClient {
 
   async accountStatus(): Promise<HarnessAccountStatusResult> {
     return (await this.request("account.status", {})) as HarnessAccountStatusResult;
+  }
+
+  async accountStatusObservation(): Promise<HarnessAccountStatusObservation> {
+    const observation = await this.#requestObservation("account.status", {});
+    return Object.freeze({
+      account: observation.value as HarnessAccountStatusResult,
+      observedThroughSequence: observation.observedThroughSequence,
+    });
   }
 
   async requestShutdown(reason?: string): Promise<HarnessShutdownResult> {
@@ -393,7 +422,12 @@ export class HarnessRpcClient {
     }
     const envelope = parsed.value;
     if (envelope.kind === "event") {
-      this.#handleEvent(envelope);
+      const params = decodeEventParams(envelope.method, envelope.params);
+      if (!params.ok) {
+        this.#fail(new HarnessRpcClientError("protocol_violation"));
+        return;
+      }
+      this.#handleEvent(Object.freeze({ ...envelope, params: params.value }));
       return;
     }
     if (envelope.id === null) {
@@ -419,9 +453,19 @@ export class HarnessRpcClient {
       this.#fail(new HarnessRpcClientError("protocol_violation"));
       return;
     }
+    const nextSequence = this.#nextSequence;
+    if (nextSequence === undefined) {
+      this.#fail(new HarnessRpcClientError("protocol_violation"));
+      return;
+    }
     this.#pending.delete(envelope.id);
     clearTimeout(pending.timer);
-    pending.resolve(result.value);
+    pending.resolve(
+      Object.freeze({
+        value: result.value,
+        observedThroughSequence: nextSequence - 1,
+      }),
+    );
   }
 
   #handleEvent(event: RpcEvent): void {

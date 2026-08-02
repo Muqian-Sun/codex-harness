@@ -96,7 +96,7 @@ async function runDesktopApplication(): Promise<void> {
 
   const controller = new DesktopApplicationController({
     stateStore,
-    createSupervisor: async () => {
+    createSupervisor: async (onAccountStatusChanged) => {
       if (process.platform !== "darwin") {
         throw new DaemonProcessSupervisorError("unsupported_platform");
       }
@@ -118,6 +118,7 @@ async function runDesktopApplication(): Promise<void> {
         runtimeRoot,
         clientVersion: desktopBootstrapMetadata.version,
         electronRunAsNode: true,
+        onAccountStatusChanged,
       });
     },
   });

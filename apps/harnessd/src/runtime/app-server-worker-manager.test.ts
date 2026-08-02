@@ -298,6 +298,72 @@ describe("AppServerWorkerManager", () => {
     await manager.close();
   });
 
+  it("publishes every newly installed account snapshot and supports idempotent unsubscribe", async () => {
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      SIGNED_OUT_ACCOUNT,
+      {
+        account: { type: "chatgpt", planType: "pro" },
+        requiresOpenaiAuth: true,
+      },
+      {
+        account: { type: "chatgpt", planType: "pro" },
+        requiresOpenaiAuth: true,
+      },
+    ]);
+    const manager = await startManager(
+      worker,
+      [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID, SECOND_ACCOUNT_ID, THIRD_ACCOUNT_ID],
+      [100, 101, 102, 103],
+    );
+    const published: unknown[] = [];
+    const listener = (snapshot: unknown): void => {
+      published.push(snapshot);
+    };
+    const unsubscribeFirst = manager.subscribeAccountStatusChanges(listener);
+    const unsubscribeSecond = manager.subscribeAccountStatusChanges(listener);
+    unsubscribeFirst();
+    unsubscribeFirst();
+
+    const first = await manager.refreshAccountStatus();
+    expect(published).toEqual([first]);
+    expect(first.planType).toBe("pro");
+
+    unsubscribeSecond();
+    unsubscribeSecond();
+    const second = await manager.refreshAccountStatus();
+    expect(second.snapshotId).toBe(THIRD_ACCOUNT_ID);
+    expect(second.planType).toBe("pro");
+    expect(published).toEqual([first]);
+
+    await manager.close();
+  });
+
+  it("fails closed and withdraws snapshots when an account snapshot listener throws", async () => {
+    const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
+      SIGNED_OUT_ACCOUNT,
+      {
+        account: { type: "chatgpt", planType: "pro" },
+        requiresOpenaiAuth: true,
+      },
+    ]);
+    const manager = await startManager(
+      worker,
+      [WORKER_SESSION_ID, FIRST_CATALOG_ID, FIRST_ACCOUNT_ID, SECOND_ACCOUNT_ID],
+      [100, 101, 102],
+    );
+    manager.subscribeAccountStatusChanges(() => {
+      throw new Error("private desktop listener error");
+    });
+
+    const error = await manager.refreshAccountStatus().catch((failure: unknown) => failure);
+
+    expect(error).toMatchObject({ code: "account_snapshot_failed" });
+    expect(String(error)).not.toContain("private desktop listener error");
+    await expect(manager.closed).resolves.toMatchObject({ reason: "account_snapshot_failed" });
+    expect(manager.catalog).toBeNull();
+    expect(manager.accountStatus).toBeNull();
+  });
+
   it("re-reads the authoritative account snapshot when an update arrives during startup", async () => {
     const worker = new FakeWorker([page([model("first")], null)], workerClose(), [
       SIGNED_OUT_ACCOUNT,
@@ -359,6 +425,10 @@ describe("AppServerWorkerManager", () => {
       ),
     );
     const oldAccount = manager.accountStatus;
+    const publishedAccountIds: string[] = [];
+    manager.subscribeAccountStatusChanges((snapshot) => {
+      publishedAccountIds.push(snapshot.snapshotId);
+    });
 
     const firstUpdate = Promise.resolve(onEvent?.({ type: "account_updated" }));
     expect(manager.state).toBe("refreshing_account");
@@ -383,6 +453,7 @@ describe("AppServerWorkerManager", () => {
       observedAtMs: 103,
       planType: "pro",
     });
+    expect(publishedAccountIds).toEqual([SECOND_ACCOUNT_ID, THIRD_ACCOUNT_ID]);
 
     await manager.close();
   });

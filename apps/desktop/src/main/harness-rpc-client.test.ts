@@ -129,6 +129,33 @@ function healthResponse(id: string, uptimeMs: number): JsonValue {
   };
 }
 
+function accountStatus(planType: "plus" | "pro" = "plus", snapshot = "831"): JsonValue {
+  return {
+    schemaVersion: 1,
+    snapshotId: `00000000-0000-4000-8000-000000000${snapshot}`,
+    workerSessionId: "00000000-0000-4000-8000-000000000832",
+    observedAtMs: 1_750_000_000_001,
+    status: "authenticated",
+    credentialKind: "chatgpt",
+    planType,
+  };
+}
+
+function accountEvent(
+  sequence: number,
+  params: JsonValue = accountStatus("pro", "833"),
+): JsonValue {
+  return {
+    kind: "event",
+    wireVersion: BOOTSTRAP_WIRE_VERSION,
+    protocolVersion: APPLICATION_PROTOCOL_VERSION,
+    streamId: STREAM_ID,
+    sequence,
+    method: "account.status_changed",
+    params,
+  };
+}
+
 async function closeServer(server: Server): Promise<void> {
   if (!server.listening) {
     return;
@@ -250,6 +277,46 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       planType: "plus",
     });
     expect(client.state).toBe("ready");
+  });
+
+  it("captures the event sequence barrier at the exact account response position", async () => {
+    const receivedSequences: number[] = [];
+    let order: "event-first" | "response-first" = "event-first";
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      const response: JsonValue = {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result: accountStatus("plus", order === "event-first" ? "834" : "835"),
+      };
+      if (order === "event-first") {
+        writeFrame(socket, accountEvent(1));
+        writeFrame(socket, response);
+      } else {
+        writeFrame(socket, response);
+        writeFrame(socket, accountEvent(2));
+      }
+    });
+    const client = await createClient(endpoint, {
+      onEvent: (event) => receivedSequences.push(event.sequence),
+    });
+
+    await expect(client.accountStatusObservation()).resolves.toMatchObject({
+      observedThroughSequence: 1,
+      account: { snapshotId: "00000000-0000-4000-8000-000000000834" },
+    });
+    order = "response-first";
+    await expect(client.accountStatusObservation()).resolves.toMatchObject({
+      observedThroughSequence: 1,
+      account: { snapshotId: "00000000-0000-4000-8000-000000000835" },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(receivedSequences).toEqual([1, 2]);
   });
 
   it("fails closed when an account response contains an unapproved field", async () => {
@@ -375,15 +442,7 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       acceptHello(socket, value);
       setImmediate(() => {
         for (const sequence of [1, 1, 3]) {
-          writeFrame(socket, {
-            kind: "event",
-            wireVersion: BOOTSTRAP_WIRE_VERSION,
-            protocolVersion: APPLICATION_PROTOCOL_VERSION,
-            streamId: STREAM_ID,
-            sequence,
-            method: "system.ready",
-            params: {},
-          });
+          writeFrame(socket, accountEvent(sequence));
         }
       });
     });
@@ -393,6 +452,63 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
 
     await expect(client.closed).resolves.toMatchObject({ code: "resync_required" });
     expect(receivedSequences).toEqual([1]);
+  });
+
+  it("fails closed before dispatching an unknown or malformed account event", async () => {
+    for (const event of [
+      { ...record(accountEvent(1)), method: "future.event" },
+      {
+        ...record(accountEvent(1)),
+        params: { ...record(accountStatus("pro", "836")), email: "private@example.com" },
+      },
+    ] satisfies JsonValue[]) {
+      let handled = false;
+      const endpoint = await createScriptedServer((value, socket) => {
+        if (record(value).kind !== "bootstrap-request") {
+          return;
+        }
+        acceptHello(socket, value);
+        setImmediate(() => writeFrame(socket, event));
+      });
+      const client = await createClient(endpoint, {
+        onEvent: () => {
+          handled = true;
+        },
+      });
+
+      await expect(client.closed).resolves.toMatchObject({ code: "protocol_violation" });
+      expect(handled).toBe(false);
+    }
+  });
+
+  it("fails closed when the account event stream changes or its handler throws", async () => {
+    const wrongStreamEndpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind !== "bootstrap-request") {
+        return;
+      }
+      acceptHello(socket, value);
+      setImmediate(() =>
+        writeFrame(socket, { ...record(accountEvent(1)), streamId: `${"B".repeat(21)}A` }),
+      );
+    });
+    const wrongStreamClient = await createClient(wrongStreamEndpoint);
+    await expect(wrongStreamClient.closed).resolves.toMatchObject({ code: "resync_required" });
+
+    const throwingEndpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind !== "bootstrap-request") {
+        return;
+      }
+      acceptHello(socket, value);
+      setImmediate(() => writeFrame(socket, accountEvent(1)));
+    });
+    const throwingClient = await createClient(throwingEndpoint, {
+      onEvent: () => {
+        throw new Error("private desktop callback failure");
+      },
+    });
+    const error = await throwingClient.closed;
+    expect(error).toMatchObject({ code: "event_handler_failed" });
+    expect(String(error)).not.toContain("private desktop callback failure");
   });
 
   it("rejects authentication failure without exposing the startup capability", async () => {

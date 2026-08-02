@@ -57,6 +57,10 @@ export async function smokeAppServerWorkerManager() {
     ) {
       throw new Error("The compiled worker manager freshness result was invalid.");
     }
+    const publishedAccounts = [];
+    const unsubscribeAccountStatus = manager.subscribeAccountStatusChanges((snapshot) => {
+      publishedAccounts.push(snapshot);
+    });
     const refreshedAccount = await manager.refreshAccountStatus();
     if (
       manager.state !== "ready" ||
@@ -70,6 +74,10 @@ export async function smokeAppServerWorkerManager() {
     ) {
       throw new Error("The compiled worker manager account freshness result was invalid.");
     }
+    if (publishedAccounts.length !== 1 || publishedAccounts[0] !== refreshedAccount) {
+      throw new Error("The compiled worker manager account event was invalid.");
+    }
+    unsubscribeAccountStatus();
 
     const closed = await manager.close();
     if (
@@ -114,10 +122,12 @@ if (args.length === 1 && args[0] === "--version") {
     supportedReasoningEfforts: [{ reasoningEffort: effort }],
     inputModalities: ["text"]
   });
+  let clientName = "";
   let accountReadCount = 0;
   input.on("line", (line) => {
     const message = JSON.parse(line);
     if (message.method === "initialize") {
+      clientName = message.params.clientInfo.name;
       send({
         id: message.id,
         result: {
@@ -164,6 +174,14 @@ if (args.length === 1 && args[0] === "--version") {
           futureSecret: "must-not-survive"
         }
       });
+      if (accountReadCount === 2 && clientName === "codex_harness_daemon") {
+        setInterval(() => {
+          send({
+            method: "account/updated",
+            params: { authMode: "chatgpt", planType: "pro" }
+          });
+        }, 1000).unref();
+      }
     } else {
       process.exit(65);
     }

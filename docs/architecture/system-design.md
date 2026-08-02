@@ -176,7 +176,7 @@ Harness route evidence 使用 daemon authority session 内的进程品牌约束�
 
 模型目录事实来自同一 Codex App Server worker 认证会话的完整 `model/list(includeHidden=true)` 分页结果，不能来自 Harness 内置的静态模型名单。目录快照绑定 daemon 分配的 snapshot ID、worker session ID、provider 和观察时间，不保存账号或凭据；第一页、游标链、末页闭合、模型与 effort 唯一性都必须验证，旧目录缺失 `inputModalities` 时按 App Server 兼容规则视为 `text` 与 `image`。只有当前 daemon 进程内经过完整分页工厂创建的冻结实例具有验证资格，序列化、克隆或进程重启不继承该资格。用户三档目标只按精确 provider、model 和 reasoning effort 检查，结果区分已观测可用、provider 未观测、model 不可用和 effort 不支持，不猜测名称、不自动回退。快照只证明该认证边界在该时间点的目录事实，固定不可授权执行。
 
-同一 worker manager 在进入 ready 前还必须执行一次固定 `account/read { refreshToken: false }`，并把响应立即投影为去敏 account snapshot。adapter 在结果离开协议边界前剥离 email 和所有未知字段；manager 只保存认证是否已满足、是否需要 OpenAI 认证、固定凭据类别、已知 ChatGPT plan type、snapshot ID、worker session ID 和观察时间。account 为 null 时区分 `authentication_required` 与 `not_required`，存在固定 account 时报告 `authenticated`；未知 account/plan、主动 refresh 参数、读取失败或 freshness 非法都失败关闭。`account/updated` 的参数不足以成为权威账户事实，因此 adapter 只把合法通知降为无 payload 的失效信号，worker manager 随后串行重读固定 `account/read`；启动或刷新期间的信号延后处理，同一读取窗口内的重复信号合并为一次后续读取，任何重读失败都会关闭 manager 并撤回快照。显式 account refresh 与模型目录 refresh 仍串行，刷新期间只让对应旧 snapshot 失去 currentness，失败则关闭 manager，避免继续发布陈旧认证事实。daemon 只在 manager ready 且快照仍属于同一 worker session 时，通过无参数只读 `account.status` RPC 返回完整去敏快照；不可用、过期或投影不合法时统一返回 `service.unavailable`。Electron main 再把快照投影为只含状态、凭据类别和 plan type 的最小启动观察，snapshot ID、worker session ID 和观察时间均不进入 renderer。该观察不包含 email/token，不是执行授权，也尚未通过 daemon 事件实时推送到桌面；login、logout 和 token refresh 继续关闭。
+同一 worker manager 在进入 ready 前还必须执行一次固定 `account/read { refreshToken: false }`，并把响应立即投影为去敏 account snapshot。adapter 在结果离开协议边界前剥离 email 和所有未知字段；manager 只保存认证是否已满足、是否需要 OpenAI 认证、固定凭据类别、已知 ChatGPT plan type、snapshot ID、worker session ID 和观察时间。account 为 null 时区分 `authentication_required` 与 `not_required`，存在固定 account 时报告 `authenticated`；未知 account/plan、主动 refresh 参数、读取失败或 freshness 非法都失败关闭。`account/updated` 的参数不足以成为权威账户事实，因此 adapter 只把合法通知降为无 payload 的失效信号，worker manager 随后串行重读固定 `account/read`；启动或刷新期间的信号延后处理，同一读取窗口内的重复信号合并为一次后续读取，任何重读失败都会关闭 manager 并撤回快照。显式 account refresh 与模型目录 refresh 仍串行，刷新期间只让对应旧 snapshot 失去 currentness，失败则关闭 manager，避免继续发布陈旧认证事实。daemon 只在 manager ready 且快照仍属于同一 worker session 时，通过无参数只读 `account.status` RPC 返回完整去敏快照；不可用、过期或投影不合法时统一返回 `service.unavailable`。新权威账户快照安装后，manager 还会同步通知 daemon；daemon 只向当前已认证连接发布严格的 `account.status_changed` 事件，参数复用同一完整去敏快照契约。Electron main 把启动读取和后续事件都投影为只含状态、凭据类别和 plan type 的最小当前观察，snapshot ID、worker session ID、观察时间和事件序号均不进入 renderer。该观察不包含 email/token，也不是执行授权；login、logout 和 token refresh 继续关闭。
 
 daemon 的单 worker manager 为每个实际 worker 实例分配新的 session UUID，并以固定 `cursor: null`、`includeHidden: true`、`limit: 1000` 开始模型查询，最多闭合 128 页、累计 10,000 个模型和 64 MiB 重编码响应；重复游标、畸形响应、超预算、请求失败或目录工厂失败都会关闭整个 manager。初始加载和显式刷新只有在末页 `nextCursor: null` 且既有目录工厂完成全部模型约束后，才原子安装一个新 snapshot UUID；刷新开始、刷新失败、worker 断线或关闭开始时旧快照立即失去 current 资格。current 检查同时要求 manager ready、同一进程内快照对象身份和同一 worker session，clone、序列化、进程重启或新 manager 均不能继承。manager 不保存历史目录、不持久化快照、不自动重启，也不把目录可用解释为执行授权。
 
@@ -246,7 +246,7 @@ main 与 daemon 使用换行分隔 JSON。每个连接的第一帧必须是严�
 
 daemon 的连接核心与具体 Unix socket 或 named pipe 解耦：`@codex-harness/protocol` 统一提供双端共用的有界增量 JSONL 帧解码与严格 envelope parser，依次完成字节上限、换行边界和 fatal UTF-8 校验；连接状态机再执行首次 hello、启动 capability 认证、版本与 capability 协商以及 RPC 分发。`system.shutdown` 只产生一次请求排空的生命周期信号；连接层本身不直接终止进程。实际监听器、父进程存活检测和进程组监督在该连接核心之上实现。
 
-Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，并使用启动 capability 完成首次 hello。客户端在请求发送前执行方法参数验证，在响应进入应用逻辑前执行角色、协议版本、请求 ID 和方法结果验证；未知或重复响应、坏帧、截断流与事件序号缺口都会保守关闭连接并拒绝全部待决请求。请求超时后的执行结果视为未知，客户端不得自动重放。daemon 的启动、kill domain、升级终止和受控重连由独立的进程监督层负责，不能混入 RPC 客户端。
+Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，并使用启动 capability 完成首次 hello。客户端在请求发送前执行方法参数验证，在响应进入应用逻辑前执行角色、协议版本、请求 ID 和方法结果验证；事件必须先匹配当前协议注册的方法与参数契约，再进入序号和 handler。未知或重复响应、未知/畸形事件、坏帧、截断流与事件序号缺口都会保守关闭连接并拒绝全部待决请求。请求超时后的执行结果视为未知，客户端不得自动重放。daemon 的启动、kill domain、升级终止和受控重连由独立的进程监督层负责，不能混入 RPC 客户端。
 
 握手后连接固定到精确匹配的应用协议版本。V1 wire version 为 `1`，应用协议版本为 `1.0`。应用层使用 `request`、`response`、`error` 和 `event` 四类 envelope；V1 只允许 main 发起 RPC。
 
@@ -254,14 +254,14 @@ Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，�
 
 - 启动 capability 是 256 位 CSPRNG 的规范、无填充 43 字符 base64url 编码，并使用常量时间比较。
 - `streamId` 是 128 位 CSPRNG 的规范、无填充 22 字符 base64url 编码。
-- 事件序号从 `1` 严格递增；重复事件可忽略，缺口触发重新同步，不同 `streamId` 必须从持久状态重建。
+- 每条连接的事件序号从 `1` 严格递增；重复事件可忽略，缺口触发重新同步，不同 `streamId` 必须从权威快照重建。当前没有 replay buffer 或自动重连：带 resume 的 hello 固定要求 resync，桌面选择关闭 supervisor 并显示 daemon 不可用。
 - 帧上限为 1 MiB UTF-8 字节，不含 LF 和可选 CR；解码必须使用 fatal UTF-8，并在未终止缓冲区超限前关闭连接。
 - 请求 ID 在单连接的 in-flight 集合中唯一；断连请求不得自动重放，后续写 API 使用独立幂等键。
-- 请求及请求参数使用严格 Schema；非内部响应和事件可接受同协议内新增的可选字段。
+- 请求及请求参数使用严格 Schema；非内部响应和事件默认可接受同协议内新增的可选字段，但账户等安全敏感契约可以明确要求精确字段并拒绝扩展。
 - `JsonValue` 验证限制最大深度 64、访问节点和待处理工作各 100,000，并拒绝循环、访问器、类实例、非有限数和其他非 JSON 值。
 - `internal.error` 使用固定安全消息，只允许非敏感 correlation ID，禁止序列化堆栈、环境变量、请求参数、原始帧或凭据。
 
-初始应用方法为 `system.health`、`account.status` 和 `system.shutdown`。`account.status` 只读取当前去敏账户快照，不刷新 token 也不改变认证状态；`system.shutdown` 只请求经过认证的优雅排空，不向 renderer 提供直接终止进程能力。
+初始应用方法为 `system.health`、`account.status` 和 `system.shutdown`，初始应用事件为 `account.status_changed`。`account.status` 只读取当前去敏账户快照，不刷新 token 也不改变认证状态；账户事件只在 manager 安装新权威快照后发布同一去敏结构。`system.shutdown` 只请求经过认证的优雅排空，不向 renderer 提供直接终止进程能力。
 
 ## 13. Desktop 安全边界
 
@@ -272,11 +272,11 @@ Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，�
 - 文件选择、shell、剪贴板、通知和外部链接等系统能力由 main 单独审批。
 - Provider 凭据保存在操作系统钥匙串，只在 daemon 需要时通过受控通道使用，不返回 renderer。
 
-macOS 首个 application bootstrap 使用 Electron 43 与 React renderer。应用在 ready 前全局启用 renderer sandbox，通过固定 `app://harness/` 安全 origin 只加载本地构建资源，拒绝 permission request/check、任意导航、新窗口和 webview；响应与 HTML 同时设置严格 CSP。Preload 只暴露无参数的 readiness 快照读取和单向状态订阅，main 还要求 IPC sender 是当前受管窗口的精确 main frame。Renderer 只接收深冻结的 `starting`、`ready`、`failed`、`stopping` 状态及封闭故障码；`ready` 内的账户数据只保留状态、凭据类别和 plan type，不接收路径、endpoint、快照标识、worker session、观察时间、原始错误或关闭能力。
+macOS 首个 application bootstrap 使用 Electron 43 与 React renderer。应用在 ready 前全局启用 renderer sandbox，通过固定 `app://harness/` 安全 origin 只加载本地构建资源，拒绝 permission request/check、任意导航、新窗口和 webview；响应与 HTML 同时设置严格 CSP。Preload 只暴露无参数的 readiness 快照读取和单向状态订阅，main 还要求 IPC sender 是当前受管窗口的精确 main frame。Renderer 只接收深冻结的 `starting`、`ready`、`failed`、`stopping` 状态及封闭故障码；`ready` 内的账户数据会随严格 daemon 事件更新，但仍只保留状态、凭据类别和 plan type，不接收路径、endpoint、快照标识、worker session、观察时间、事件序号、原始错误或关闭能力。
 
 Electron main 在应用生命周期内只创建一个 daemon supervisor。开发态必须通过显式环境变量提供绝对 Codex executable，不自动扫描、下载或猜测安装位置；打包态忽略该变量，只接受 `process.resourcesPath` 下固定的 `harnessd/cli.js` 和 `codex/codex`，正式资源复制、签名和公证完成前不得宣称打包模式可发布。daemon 子进程暂时使用当前 Electron executable 的 `ELECTRON_RUN_AS_NODE=1` 模式运行编译 CLI；该变量只加到受控 daemon 子进程，不进入 renderer。正式打包 PR 必须单独决定 Electron fuse 与 launcher 契约。
 
-桌面启动先显示 `starting`，只有 supervisor 已完成 daemon RPC hello，且 daemon 内部精确 Codex 版本、App Server 初始化、完整模型目录和去敏 account snapshot 均通过，main 再通过 `account.status` 取得当前快照后才显示 `ready`。账户卡只显示启动时观察，不提供操作也不暗示实时更新。ready 后 daemon 非预期关闭只显示稳定 `daemon_unavailable`，不自动重启或重放。macOS 关闭全部窗口保留单一应用/daemon，Dock activate 可以重建窗口；`before-quit` 必须等待 supervisor 排空，无法证明进程包含时以失败状态退出。当前界面只证明底座 readiness 并展示最小账户观察；thread/turn、任务、TODO/DAG、登录操作和路由执行继续关闭。
+桌面启动先显示 `starting`，只有 supervisor 已完成 daemon RPC hello，且 daemon 内部精确 Codex 版本、App Server 初始化、完整模型目录和去敏 account snapshot 均通过，main 再通过 `account.status` 取得当前快照后才显示 `ready`。RPC client 在账户响应所在输入流位置记录已观察事件序号屏障；controller 只允许屏障之后的缓存事件覆盖启动读取，避免响应与事件交错造成状态回退。ready 后连续账户事件实时更新账户卡，语义相同的状态由 main 状态仓库去重；daemon 非预期关闭、未知事件、事件缺口或 stream 改变只显示稳定 `daemon_unavailable`，不自动重启或重放。macOS 关闭全部窗口保留单一应用/daemon，Dock activate 可以重建窗口；`before-quit` 必须等待 supervisor 排空，无法证明进程包含时以失败状态退出。当前界面只证明底座 readiness 并展示最小账户观察；thread/turn、任务、TODO/DAG、登录操作和路由执行继续关闭。
 
 ## 14. 审批、权限与证据
 
@@ -295,14 +295,14 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 运行时能力在依赖具备前保持关闭：
 
 1. 工作区、协议契约与 CI：已由 PR #1 完成。
-2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list` 与非刷新 `account/read`、单 worker manager、完整目录分页、去敏 account snapshot、两类 session freshness、`account/updated` 失效信号驱动的权威重读、daemon 排空绑定以及 Electron supervisor → daemon CLI 的真实启动接线已完成；macOS application bootstrap、开发态显式资源定位、只读 readiness UI、严格 `account.status` RPC 与最小账户启动观察已完成，daemon 到桌面的实时账户事件、登录流程、正式安装资源复制/签名、thread/turn、审批和工具 gate 待后续 PR。
+2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list` 与非刷新 `account/read`、单 worker manager、完整目录分页、去敏 account snapshot、两类 session freshness、`account/updated` 失效信号驱动的权威重读、严格 daemon 账户事件、事件序号屏障、daemon 排空绑定以及 Electron supervisor → daemon CLI 的真实启动接线已完成；macOS application bootstrap、开发态显式资源定位、只读 readiness UI、严格 `account.status` RPC 与最小账户实时观察已完成，登录流程、正式安装资源复制/签名、thread/turn、审批和工具 gate 待后续 PR。
 3. daemon 生命周期与本地传输。
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
 7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、worker session 目录 freshness、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划、工作区分析与运行目标四个 observer、品牌证据组合 coordinator 和 RouteDecision 审计已完成；其余运行时 manifest/权限计划/工作区分析/目标 inventory 新鲜度强制、evidence-to-feature 适配、执行前目录复核、daemon 路由 coordinator 和影子评估待后续 PR。
 8. 串行调度。
-9. 安全 Electron 桌面壳与任务 UI：sandbox、固定本地 origin、白名单 preload、单例 daemon 生命周期、readiness 状态屏和最小账户启动观察已完成；任务列表、详情、TODO/DAG、实时账户更新与登录操作、交互写 RPC 和正式打包待后续 PR。
+9. 安全 Electron 桌面壳与任务 UI：sandbox、固定本地 origin、白名单 preload、单例 daemon 生命周期、readiness 状态屏和最小账户实时观察已完成；任务列表、详情、TODO/DAG、登录操作、交互写 RPC 和正式打包待后续 PR。
 10. 审批、证据、运行恢复和打包门禁。
 11. 端到端验证、故障注入、安全检查和发布。
 

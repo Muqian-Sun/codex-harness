@@ -6,7 +6,7 @@
 Electron main → Harness daemon → Codex App Server worker → 完整模型目录 + 去敏账户快照
 ```
 
-界面当前显示这条链路的启动状态，并在就绪时显示去敏的账户启动观察。任务创建、TODO/DAG、thread/turn 和智能路由执行尚未开放，不能把“就绪”理解为产品功能已经完整可用。
+界面当前显示这条链路的启动状态，并在就绪后持续显示去敏的当前账户观察。任务创建、TODO/DAG、thread/turn 和智能路由执行尚未开放，不能把“就绪”理解为产品功能已经完整可用。
 
 ## 前置条件
 
@@ -47,13 +47,13 @@ CODEX_HARNESS_CODEX_EXECUTABLE=/absolute/path/to/codex pnpm desktop:start
 ## 状态含义
 
 - `starting`：正在验证本地资源并启动受控进程链。
-- `ready`：daemon RPC hello、精确 Codex 版本、App Server 初始化、完整模型目录和去敏账户快照均已通过，main 还已通过只读 `account.status` 获得当前快照。UI 只显示认证状态、凭据类别和已知套餐类别，不显示邮箱、token、快照标识、worker session 或观察时间。
+- `ready`：daemon RPC hello、精确 Codex 版本、App Server 初始化、完整模型目录和去敏账户快照均已通过，main 还已通过只读 `account.status` 获得当前快照。后续权威快照通过严格、连续的 `account.status_changed` 事件更新。UI 只显示认证状态、凭据类别和已知套餐类别，不显示邮箱、token、快照标识、worker session、观察时间或事件序号。
 - `failed`：启动或运行时故障已经保守隔离；界面只显示稳定故障码，不显示路径、stderr 或原始异常。
 - `stopping`：正在排空连接并验证受控进程已经退出。
 
 应用不会在失败后自动重启、自动重放或切换到其他 Codex executable。
 
-账户卡仍是启动时的一次性观察，不是实时认证监视。daemon 内部 worker manager 已把合法 `account/updated` 当作失效信号并通过固定 `account/read` 重建权威去敏快照，但该变化尚未通过 daemon 事件推送到桌面。当前也没有登录、退出或 token 刷新入口；会话中账户变化要到后续的 daemon → desktop 通知链路完成后才能安全地实时显示。
+账户卡是实时去敏观察，但不是账户操作入口，也不授予任务或工具执行权。daemon 内部 worker manager 把合法 `account/updated` 当作失效信号，通过固定 `account/read` 重建权威快照，再由 daemon 发布严格的 `account.status_changed` 事件。桌面会校验事件方法、参数、stream 和连续 sequence；任何缺口、未知事件或断线都会关闭 supervisor 并显示 `daemon_unavailable`，当前不自动重连或重放。登录、退出和 token refresh 仍未开放。
 
 ## Electron 首次安装与代理
 

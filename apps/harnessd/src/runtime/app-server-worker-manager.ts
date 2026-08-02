@@ -76,6 +76,8 @@ export type AppServerWorkerManagerCloseResult = Readonly<{
   stderrObserved: boolean;
 }>;
 
+export type AccountStatusSnapshotListener = (snapshot: AccountStatusSnapshot) => void;
+
 export type ManagedAppServerWorker = Readonly<{
   state: AppServerWorkerState;
   listModels(params: unknown): Promise<JsonValue>;
@@ -110,6 +112,7 @@ export class AppServerWorkerManager {
   #accountStatus: AccountStatusSnapshot | undefined;
   #accountUpdatePending = false;
   #accountUpdateRefresh: Promise<void> | undefined;
+  readonly #accountStatusListeners = new Set<AccountStatusSnapshotListener>();
   #lastWorkerClose: AppServerWorkerCloseResult | undefined;
   #closePromise: Promise<AppServerWorkerManagerCloseResult> | undefined;
 
@@ -264,6 +267,27 @@ export class AppServerWorkerManager {
       candidate === this.#accountStatus &&
       this.#accountStatus?.workerSessionId === this.#workerSessionId
     );
+  }
+
+  subscribeAccountStatusChanges(listener: AccountStatusSnapshotListener): () => void {
+    if (typeof listener !== "function") {
+      throw new AppServerWorkerManagerError("invalid_configuration");
+    }
+    if (this.#state !== "ready") {
+      throw new AppServerWorkerManagerError(
+        this.#state === "closing" || this.#state === "closed" ? "closed" : "refresh_unavailable",
+      );
+    }
+    const subscription: AccountStatusSnapshotListener = (snapshot) => listener(snapshot);
+    this.#accountStatusListeners.add(subscription);
+    let subscribed = true;
+    return (): void => {
+      if (!subscribed) {
+        return;
+      }
+      subscribed = false;
+      this.#accountStatusListeners.delete(subscription);
+    };
   }
 
   async refreshCatalog(): Promise<ModelCatalogSnapshot> {
@@ -492,6 +516,16 @@ export class AppServerWorkerManager {
     }
     this.#accountStatus = snapshot;
     this.#state = "ready";
+    for (const listener of this.#accountStatusListeners) {
+      listener(snapshot);
+    }
+    if (
+      this.#state !== "ready" ||
+      this.#accountStatus !== snapshot ||
+      this.#closePromise !== undefined
+    ) {
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
+    }
   }
 
   #publishesSnapshots(): boolean {
@@ -537,6 +571,7 @@ export class AppServerWorkerManager {
     this.#state = "closing";
     this.#catalog = undefined;
     this.#accountStatus = undefined;
+    this.#accountStatusListeners.clear();
 
     let workerClose = normalizeWorkerCloseResult(observedWorkerClose) ?? this.#lastWorkerClose;
     if (workerClose === undefined) {

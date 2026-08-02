@@ -12,6 +12,7 @@ import {
   StreamIdSchema,
   decodeClientBootstrapFrame,
   decodeClientRpcFrame,
+  decodeEventParams,
   negotiateHello,
   validateJsonValue,
   type JsonValue,
@@ -111,6 +112,7 @@ export class ConnectionSession {
   readonly #readAccountStatus: () => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
   #streamId: string | undefined;
+  #nextEventSequence: number | undefined;
 
   constructor(config: ConnectionSessionConfig) {
     if (!StartupCapabilitySchema.safeParse(config.startupCapability).success) {
@@ -182,6 +184,38 @@ export class ConnectionSession {
     this.#state = "closed";
   }
 
+  publishEvent(method: string, params: unknown): readonly ConnectionSessionAction[] {
+    if (this.#state !== "authenticated") {
+      return Object.freeze([]);
+    }
+    try {
+      const streamId = this.#streamId;
+      const sequence = this.#nextEventSequence;
+      const decoded = decodeEventParams(method, params);
+      if (
+        streamId === undefined ||
+        sequence === undefined ||
+        sequence >= Number.MAX_SAFE_INTEGER ||
+        !decoded.ok
+      ) {
+        return this.#failInternal();
+      }
+      const action = send({
+        kind: "event",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        streamId,
+        sequence,
+        method,
+        params: decoded.value,
+      });
+      this.#nextEventSequence = sequence + 1;
+      return Object.freeze([action]);
+    } catch {
+      return this.#failInternal();
+    }
+  }
+
   #handleHello(frame: Uint8Array): readonly ConnectionSessionAction[] {
     const parsed = decodeClientBootstrapFrame(frame);
     if (!parsed.ok) {
@@ -223,6 +257,7 @@ export class ConnectionSession {
       return this.#failInternal();
     }
     this.#streamId = streamId;
+    this.#nextEventSequence = 1;
     this.#state = "authenticated";
     return Object.freeze([
       send({

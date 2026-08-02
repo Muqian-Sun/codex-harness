@@ -75,6 +75,12 @@ export const AccountStatusResultSchema = z
 
 export type HarnessAccountStatusResult = z.infer<typeof AccountStatusResultSchema>;
 
+export const EVENT_CONTRACTS = Object.freeze({
+  "account.status_changed": AccountStatusResultSchema,
+});
+
+export type RpcEventMethodName = keyof typeof EVENT_CONTRACTS;
+
 export const METHOD_CONTRACTS = Object.freeze({
   "account.status": Object.freeze({
     params: AccountStatusParamsSchema,
@@ -94,6 +100,10 @@ export type RpcMethodName = keyof typeof METHOD_CONTRACTS;
 
 function hasMethod(method: string): method is RpcMethodName {
   return Object.prototype.hasOwnProperty.call(METHOD_CONTRACTS, method);
+}
+
+function hasEvent(method: string): method is RpcEventMethodName {
+  return Object.prototype.hasOwnProperty.call(EVENT_CONTRACTS, method);
 }
 
 function decodeMethodValue(
@@ -122,4 +132,18 @@ export function decodeRequestParams(method: string, params: unknown): ProtocolRe
 
 export function decodeResponseResult(method: string, result: unknown): ProtocolResult<JsonValue> {
   return decodeMethodValue(method, result, "result");
+}
+
+export function decodeEventParams(method: string, params: unknown): ProtocolResult<JsonValue> {
+  if (!hasEvent(method)) {
+    return protocolFailure("unknown_event");
+  }
+  if (!validateJsonValue(params).ok) {
+    return protocolFailure("invalid_event");
+  }
+
+  const parsed = EVENT_CONTRACTS[method].safeParse(params);
+  return parsed.success
+    ? protocolSuccess(Object.freeze(parsed.data) as JsonValue)
+    : protocolFailure("invalid_event");
 }
