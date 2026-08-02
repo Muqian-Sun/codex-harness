@@ -44,6 +44,9 @@ importers:
 
   apps/harnessd:
     dependencies:
+      '@codex-harness/app-server-adapter':
+        specifier: workspace:*
+        version: link:../../packages/app-server-adapter
       '@codex-harness/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

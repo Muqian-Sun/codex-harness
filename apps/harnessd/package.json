@@ -10,6 +10,7 @@
     "build": "tsc -b --pretty false"
   },
   "dependencies": {
+    "@codex-harness/app-server-adapter": "workspace:*",
     "@codex-harness/protocol": "workspace:*"
   }
 }
