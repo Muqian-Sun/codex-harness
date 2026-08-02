@@ -36,6 +36,10 @@ const { smokeHarnessPermissionRouteObserver } =
   await import("./smoke-harness-permission-route-observer.mjs");
 await smokeHarnessPermissionRouteObserver();
 
+const { smokeHarnessWorkspaceRouteObserver } =
+  await import("./smoke-harness-workspace-route-observer.mjs");
+await smokeHarnessWorkspaceRouteObserver();
+
 const { smokeModelCatalog } = await import("./smoke-model-catalog.mjs");
 await smokeModelCatalog();
 

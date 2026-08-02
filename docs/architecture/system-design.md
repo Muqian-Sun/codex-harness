@@ -166,6 +166,8 @@ Harness route evidence 使用 daemon authority session 内的进程品牌约束�
 
 权限计划路由 observer 接受显式标记 `complete: true`、有界且可为空的固定 capability 请求列表，不允许调用方直接填写安全布尔值。它在创建时固定 `permission_plan` policy version，并从凭据访问、特权命令、权限边界和生产访问确定 security-sensitive，从两类显式不可逆 capability 确定不可逆操作，同时把权限边界 capability 独立报告为边界变更；普通工作区、命令、网络或外部写请求仍由权限系统单独决定批准级别，不自动等同于安全敏感。观察结果同样绑定 Task recovery fence、可选活动 DAG 节点、观察时间和进程内 observer session，clone 或严格解码不能恢复 WeakSet 品牌。`complete: true` 目前只是调用契约，尚未由操作 manifest、App Server approval 或实际工具 gate 强制，因此该 observer 不授予权限、不接入 route evidence authority 或执行路径，单一 `permission_plan` 的 `absent` 不能替代双来源负面证明，也不能解除 `deep` 下限。
 
+工作区分析路由 observer 接受显式标记 `complete: true`、绑定不透明 workspace snapshot ID 与小写 SHA-256 digest、最多 512 项的固定 finding 集合，不允许调用方直接提交安全布尔值，也不保存路径或代码内容。它从共享可变状态和并发资源访问 finding 确定并发敏感，从数据库 schema 和持久数据重写 finding 确定迁移，从导出 API 和协议契约 finding 确定公共 API 变化，并从认证授权、凭据处理、密码学和安全边界 finding 确定安全敏感；快照绑定 Task recovery fence、可选活动 DAG 节点、观察时间、策略和进程内 observer session，严格解码可重算完整投影但不能恢复 WeakSet 品牌。本模块不读取文件系统、不重算 digest，也不证明上游分析确实穷尽或该 workspace snapshot 仍是 Project 当前工作区，因此 `complete: true` 和 `isCurrent` 都不能单独解决 workspace TOCTOU；在真实分析器、工作区快照注册表和安全边界 coordinator 落地前，它只提供 shadow 证据，不接入 route evidence authority 或执行路径，单一来源的 `absent` 不能解除 `deep` 下限。
+
 影子 RouteDecision 由 Harness 从命令特征和当前 profile 配置重新计算，调用方不能提交最终档位、理由或模型目标。记录绑定 decision、Task/version、可选节点、profile、配置 revision fence 和发生时间，以 `taskId/decisionId` 作为只增审计投影键；决策 decoder 会重新运行固定策略并核对全部派生字段。写入前先按 decision ID 查询：已存在时只接受所有业务字段、特征、配置 fence 和 metadata 均相同的历史重试，即使 profile 后来更新也返回原决策；不存在时必须证明期望配置仍是 profile 当前 revision，且 decision 时间不早于该 revision 的生效时间，过期 fence 或不可能的时间线不得创建新决策。记录始终保持 `shadow` 与不可执行，不成为权限或调度授权。
 
 模型目录事实来自同一 Codex App Server worker 认证会话的完整 `model/list(includeHidden=true)` 分页结果，不能来自 Harness 内置的静态模型名单。目录快照绑定 daemon 分配的 snapshot ID、worker session ID、provider 和观察时间，不保存账号或凭据；第一页、游标链、末页闭合、模型与 effort 唯一性都必须验证，旧目录缺失 `inputModalities` 时按 App Server 兼容规则视为 `text` 与 `image`。只有当前 daemon 进程内经过完整分页工厂创建的冻结实例具有验证资格，序列化、克隆或进程重启不继承该资格。用户三档目标只按精确 provider、model 和 reasoning effort 检查，结果区分已观测可用、provider 未观测、model 不可用和 effort 不支持，不猜测名称、不自动回退。快照只证明该认证边界在该时间点的目录事实，固定不可授权执行；worker 断线、重启或重新认证后的失效，以及执行前的当前目录复核，由后续 worker manager 和运行时门禁负责。
@@ -280,7 +282,7 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
-7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单与权限计划两个 observer 和 RouteDecision 审计已完成；其余安全 observer、运行时 manifest/权限计划强制、证据到 feature 的组合、目录 freshness、组合 coordinator 和影子评估待后续 PR。
+7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划与工作区分析三个 observer 和 RouteDecision 审计已完成；其余 runtime target observer、运行时 manifest/权限计划/工作区分析新鲜度强制、证据到 feature 的组合、目录 freshness、组合 coordinator 和影子评估待后续 PR。
 8. 串行调度。
 9. 安全 Electron 桌面壳与任务 UI。
 10. 审批、证据、运行恢复和打包门禁。
