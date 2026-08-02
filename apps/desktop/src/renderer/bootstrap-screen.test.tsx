@@ -51,6 +51,23 @@ const CONFIGURED_ROUTING = Object.freeze({
   }),
 });
 
+const EMPTY_PROJECTS = Object.freeze({ projects: Object.freeze([]), hasMore: false });
+const PROJECTS = Object.freeze({
+  projects: Object.freeze([
+    Object.freeze({
+      projectId: "00000000-0000-4000-8000-000000000891",
+      projectVersion: 1 as const,
+      displayName: "workspace<script>",
+      workspace: Object.freeze({
+        platform: "macos" as const,
+        absolutePath: "/Users/example/workspace<script>",
+        identityStatus: "unverified" as const,
+      }),
+    }),
+  ]),
+  hasMore: false,
+});
+
 describe("desktop bootstrap screen", () => {
   it("captures routing input before React runs the state updater", () => {
     const draft = Object.freeze({
@@ -100,6 +117,7 @@ describe("desktop bootstrap screen", () => {
             account: { status, credentialKind, planType },
             catalog: CATALOG,
             routing: UNCONFIGURED_ROUTING,
+            projects: EMPTY_PROJECTS,
           }}
         />,
       );
@@ -133,6 +151,7 @@ describe("desktop bootstrap screen", () => {
           account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
           catalog: { ...CATALOG, totalVisibleModels: 5, hasMore: true },
           routing: CONFIGURED_ROUTING,
+          projects: PROJECTS,
         }}
       />,
     );
@@ -153,6 +172,12 @@ describe("desktop bootstrap screen", () => {
     expect(markup).toContain('data-routing-availability="observed_available"');
     expect(markup).toContain("保存路由配置");
     expect(markup).toContain("EXECUTION LOCKED");
+    expect(markup).toContain('data-project-count="1"');
+    expect(markup).toContain('data-project-identity="unverified"');
+    expect(markup).toContain("UNVERIFIED IDENTITY");
+    expect(markup).toContain("workspace&lt;script&gt;");
+    expect(markup).not.toContain("workspace<script>");
+    expect(markup).toContain("添加工作区");
   });
 
   it("renders a stable empty observation when Codex reports no visible model", () => {
@@ -163,6 +188,7 @@ describe("desktop bootstrap screen", () => {
           account: { status: "not_required", credentialKind: null, planType: null },
           catalog: { provider: "openai", totalVisibleModels: 0, models: [], hasMore: false },
           routing: UNCONFIGURED_ROUTING,
+          projects: EMPTY_PROJECTS,
         }}
       />,
     );
@@ -172,6 +198,7 @@ describe("desktop bootstrap screen", () => {
     expect(markup).toContain('data-routing-configured="false"');
     expect(markup).toContain("尚未校验");
     expect(markup).toContain("disabled");
+    expect(markup).toContain("尚未注册 Project");
   });
 
   it("renders only the stable failure code", () => {

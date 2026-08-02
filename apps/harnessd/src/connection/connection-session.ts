@@ -43,6 +43,8 @@ export type ConnectionSessionConfig = Readonly<{
   uptimeMs?: () => number;
   readAccountStatus?: () => unknown;
   readModelCatalogPage?: (params: JsonValue) => unknown;
+  readProjectCatalogPage?: (params: JsonValue) => unknown;
+  registerProject?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
@@ -114,6 +116,8 @@ export class ConnectionSession {
   readonly #uptimeMs: () => number;
   readonly #readAccountStatus: () => unknown;
   readonly #readModelCatalogPage: (params: JsonValue) => unknown;
+  readonly #readProjectCatalogPage: (params: JsonValue) => unknown;
+  readonly #registerProject: (params: JsonValue) => unknown;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
@@ -137,6 +141,13 @@ export class ConnectionSession {
       throw new Error("Invalid connection session configuration.");
     }
     if (
+      (config.readProjectCatalogPage !== undefined &&
+        typeof config.readProjectCatalogPage !== "function") ||
+      (config.registerProject !== undefined && typeof config.registerProject !== "function")
+    ) {
+      throw new Error("Invalid connection session configuration.");
+    }
+    if (
       (config.readRoutingConfiguration !== undefined &&
         typeof config.readRoutingConfiguration !== "function") ||
       (config.setRoutingConfiguration !== undefined &&
@@ -150,6 +161,8 @@ export class ConnectionSession {
     this.#uptimeMs = config.uptimeMs ?? (() => process.uptime() * 1_000);
     this.#readAccountStatus = config.readAccountStatus ?? (() => null);
     this.#readModelCatalogPage = config.readModelCatalogPage ?? (() => null);
+    this.#readProjectCatalogPage = config.readProjectCatalogPage ?? (() => null);
+    this.#registerProject = config.registerProject ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
     this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
@@ -321,6 +334,8 @@ export class ConnectionSession {
       closing: this.#state === "closing",
       readAccountStatus: this.#readAccountStatus,
       readModelCatalogPage: this.#readModelCatalogPage,
+      readProjectCatalogPage: this.#readProjectCatalogPage,
+      registerProject: this.#registerProject,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
     });

@@ -192,6 +192,23 @@ function routingConfiguration(): JsonValue {
   };
 }
 
+function projectSummary(): JsonValue {
+  return {
+    projectId: "00000000-0000-4000-8000-000000000861",
+    projectVersion: 1,
+    displayName: "workspace",
+    workspace: {
+      platform: "macos",
+      absolutePath: "/Users/example/workspace",
+      identityStatus: "unverified",
+    },
+  };
+}
+
+function projectCatalogPage(): JsonValue {
+  return { schemaVersion: 1, projects: [projectSummary()], nextCursor: null };
+}
+
 async function closeServer(server: Server): Promise<void> {
   if (!server.listening) {
     return;
@@ -397,6 +414,68 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
     await expect(client.routingConfiguration()).resolves.toEqual(routingConfiguration());
     await expect(client.setRoutingConfiguration(params)).resolves.toEqual(routingConfiguration());
     expect(observedMethods).toEqual(["routing.configuration.get", "routing.configuration.set"]);
+  });
+
+  it("reads and registers only strictly validated Project records", async () => {
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      const method = record(value).method;
+      expect(method === "project.catalog_page" || method === "project.register").toBe(true);
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result:
+          method === "project.catalog_page"
+            ? projectCatalogPage()
+            : { schemaVersion: 1, status: "registered", project: projectSummary() },
+      });
+    });
+    const client = await createClient(endpoint);
+    const registration = {
+      commandId: "00000000-0000-4000-8000-000000000862",
+      projectId: "00000000-0000-4000-8000-000000000861",
+      displayName: "workspace",
+      workspace: { platform: "macos" as const, absolutePath: "/Users/example/workspace" },
+    };
+
+    await expect(client.projectCatalogPage({ cursor: null, limit: 12 })).resolves.toEqual(
+      projectCatalogPage(),
+    );
+    await expect(client.registerProject(registration)).resolves.toEqual({
+      schemaVersion: 1,
+      status: "registered",
+      project: projectSummary(),
+    });
+    await expect(client.projectCatalogPage({ cursor: null, limit: 13 })).rejects.toMatchObject({
+      code: "invalid_request",
+    });
+  });
+
+  it("closes on a Project response that leaks uncontracted fields", async () => {
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result: { ...record(projectCatalogPage()), databasePath: "/private/harness.db" },
+      });
+    });
+    const client = await createClient(endpoint);
+
+    await expect(client.projectCatalogPage({ cursor: null, limit: 12 })).rejects.toMatchObject({
+      code: "protocol_violation",
+    });
+    expect(client.state).toBe("closed");
   });
 
   it("captures the event sequence barrier at the exact account response position", async () => {

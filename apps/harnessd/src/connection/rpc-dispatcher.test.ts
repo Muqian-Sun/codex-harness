@@ -42,6 +42,29 @@ const ROUTING_CONFIGURATION = Object.freeze({
   availability: null,
 });
 
+const PROJECT = Object.freeze({
+  projectId: "00000000-0000-4000-8000-000000000861",
+  projectVersion: 1,
+  displayName: "workspace",
+  workspace: Object.freeze({
+    platform: "macos",
+    absolutePath: "/Users/example/workspace",
+    identityStatus: "unverified",
+  }),
+});
+
+const PROJECT_CATALOG_PAGE = Object.freeze({
+  schemaVersion: 1,
+  projects: Object.freeze([PROJECT]),
+  nextCursor: null,
+});
+
+const PROJECT_REGISTRATION = Object.freeze({
+  schemaVersion: 1,
+  status: "registered",
+  project: PROJECT,
+});
+
 function request(method: string, params: unknown = {}): RpcRequest {
   return {
     kind: "request",
@@ -63,6 +86,8 @@ function context(
     closing: false,
     readAccountStatus,
     readModelCatalogPage,
+    readProjectCatalogPage: () => PROJECT_CATALOG_PAGE,
+    registerProject: () => PROJECT_REGISTRATION,
     readRoutingConfiguration: () => ROUTING_CONFIGURATION,
     setRoutingConfiguration: () => ROUTING_CONFIGURATION,
   };
@@ -273,5 +298,89 @@ describe("RPC dispatcher routing configuration", () => {
       error: { code: RPC_ERROR_CODES.invalidParams },
     });
     expect(setRoutingConfiguration).not.toHaveBeenCalled();
+  });
+});
+
+describe("RPC dispatcher Project registry", () => {
+  it("passes validated catalog and registration parameters to their providers", () => {
+    const readProjectCatalogPage = vi.fn(() => PROJECT_CATALOG_PAGE);
+    const registerProject = vi.fn(() => PROJECT_REGISTRATION);
+    const catalogParams = { cursor: null, limit: 12 };
+    const registerParams = {
+      commandId: "00000000-0000-4000-8000-000000000862",
+      projectId: PROJECT.projectId,
+      displayName: PROJECT.displayName,
+      workspace: {
+        platform: PROJECT.workspace.platform,
+        absolutePath: PROJECT.workspace.absolutePath,
+      },
+    };
+    const base = context(() => ACCOUNT_STATUS);
+
+    expect(
+      dispatchRpcRequest(request("project.catalog_page", catalogParams), {
+        ...base,
+        readProjectCatalogPage,
+      }),
+    ).toMatchObject({ envelope: { kind: "response", result: PROJECT_CATALOG_PAGE } });
+    expect(readProjectCatalogPage).toHaveBeenCalledWith(catalogParams);
+
+    expect(
+      dispatchRpcRequest(request("project.register", registerParams), {
+        ...base,
+        registerProject,
+      }),
+    ).toMatchObject({ envelope: { kind: "response", result: PROJECT_REGISTRATION } });
+    expect(registerProject).toHaveBeenCalledWith(registerParams);
+  });
+
+  it("validates Project parameters and results and maps provider failures without path leaks", () => {
+    const readProjectCatalogPage = vi.fn(() => PROJECT_CATALOG_PAGE);
+    const registerProject = vi.fn(() => PROJECT_REGISTRATION);
+    const base = context(() => ACCOUNT_STATUS);
+
+    expect(
+      dispatchRpcRequest(request("project.catalog_page", { cursor: null, limit: 13 }), {
+        ...base,
+        readProjectCatalogPage,
+      }).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(readProjectCatalogPage).not.toHaveBeenCalled();
+
+    for (const candidate of [
+      { ...base, readProjectCatalogPage: () => ({ ...PROJECT_CATALOG_PAGE, private: true }) },
+      {
+        ...base,
+        registerProject: () => {
+          throw new RpcProviderError("conflict");
+        },
+      },
+      {
+        ...base,
+        registerProject: () => {
+          throw new Error("/private/secret/path");
+        },
+      },
+    ]) {
+      const method =
+        candidate.readProjectCatalogPage === base.readProjectCatalogPage
+          ? "project.register"
+          : "project.catalog_page";
+      const params =
+        method === "project.catalog_page"
+          ? { cursor: null, limit: 12 }
+          : {
+              commandId: "00000000-0000-4000-8000-000000000862",
+              projectId: PROJECT.projectId,
+              displayName: PROJECT.displayName,
+              workspace: { platform: "macos", absolutePath: "/Users/example/workspace" },
+            };
+      const dispatched = dispatchRpcRequest(request(method, params), candidate);
+      expect(dispatched.envelope).toMatchObject({ kind: "error" });
+      expect(JSON.stringify(dispatched)).not.toContain("private");
+      expect(JSON.stringify(dispatched)).not.toContain("secret");
+    }
+
+    expect(registerProject).not.toHaveBeenCalled();
   });
 });

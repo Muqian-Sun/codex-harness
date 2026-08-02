@@ -15,6 +15,8 @@ export type RpcDispatchContext = Readonly<{
   closing: boolean;
   readAccountStatus: () => unknown;
   readModelCatalogPage: (params: JsonValue) => unknown;
+  readProjectCatalogPage: (params: JsonValue) => unknown;
+  registerProject: (params: JsonValue) => unknown;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -153,6 +155,51 @@ export function dispatchRpcRequest(
             shutdownReason: undefined,
           }
         : unavailable(request.id, "The routing configuration is unavailable.");
+    }
+
+    if (request.method === "project.catalog_page") {
+      let candidate: unknown;
+      try {
+        candidate = context.readProjectCatalogPage(decodedParams.value);
+      } catch {
+        return unavailable(request.id, "The Project catalog is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("project.catalog_page", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project catalog is unavailable.");
+    }
+
+    if (request.method === "project.register") {
+      let candidate: unknown;
+      try {
+        candidate = context.registerProject(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(
+              request.id,
+              RPC_ERROR_CODES.conflict,
+              "The Project registry changed.",
+            ),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Project registry is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("project.register", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project registry is unavailable.");
     }
 
     if (request.method === "routing.configuration.set") {

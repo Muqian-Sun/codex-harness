@@ -38,6 +38,7 @@ export async function smokeDesktopApplication() {
       codexExecutable: validCodex,
       expected: "ready",
       routingMode: "configure",
+      projectMode: "register",
     });
     await runScenario({
       directory: join(directory, "ready"),
@@ -46,6 +47,7 @@ export async function smokeDesktopApplication() {
       codexExecutable: validCodex,
       expected: "ready",
       routingMode: "recover",
+      projectMode: "recover",
     });
     await runScenario({
       directory: join(directory, "failed"),
@@ -68,8 +70,13 @@ async function runScenario({
   expected,
   expectedCode,
   routingMode,
+  projectMode,
 }) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  const projectPath = join(directory, "workspace");
+  if (projectMode !== undefined) {
+    await mkdir(projectPath, { recursive: true, mode: 0o700 });
+  }
   const child = spawn(electronExecutable, [desktopEntry], {
     env: {
       ...process.env,
@@ -77,6 +84,12 @@ async function runScenario({
       CODEX_HARNESS_DESKTOP_SMOKE_EXPECTED: expected,
       CODEX_HARNESS_DESKTOP_SMOKE_USER_DATA: directory,
       ...(routingMode === undefined ? {} : { CODEX_HARNESS_DESKTOP_SMOKE_ROUTING: routingMode }),
+      ...(projectMode === undefined
+        ? {}
+        : {
+            CODEX_HARNESS_DESKTOP_SMOKE_PROJECT: projectMode,
+            CODEX_HARNESS_DESKTOP_SMOKE_PROJECT_PATH: projectPath,
+          }),
       ELECTRON_ENABLE_SECURITY_WARNINGS: "true",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -110,10 +123,12 @@ async function runScenario({
       (expected === "ready" && result.accountObserved !== true) ||
       (expected === "ready" && result.modelCatalogObserved !== true) ||
       (expected === "ready" && result.routingObserved !== true) ||
+      (expected === "ready" && result.projectObserved !== true) ||
       (expected !== "ready" &&
         ("accountObserved" in result ||
           "modelCatalogObserved" in result ||
-          "routingObserved" in result))
+          "routingObserved" in result ||
+          "projectObserved" in result))
     ) {
       throw new Error(`The Electron desktop ${expected} rendered state was invalid.`);
     }

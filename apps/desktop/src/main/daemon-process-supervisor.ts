@@ -16,6 +16,10 @@ import {
   type HarnessAccountStatusResult,
   type HarnessModelCatalogPageParams,
   type HarnessModelCatalogPageResult,
+  type HarnessProjectCatalogPageParams,
+  type HarnessProjectCatalogPageResult,
+  type HarnessProjectRegisterParams,
+  type HarnessProjectRegisterResult,
   type HarnessRoutingConfigurationResult,
   type HarnessRoutingConfigurationSetParams,
   type HarnessRpcClientConfig,
@@ -465,6 +469,18 @@ export class DaemonProcessSupervisor {
 
   async readRoutingConfiguration(): Promise<HarnessRoutingConfigurationResult> {
     return await this.client.routingConfiguration();
+  }
+
+  async readProjectCatalogPage(
+    params: HarnessProjectCatalogPageParams,
+  ): Promise<HarnessProjectCatalogPageResult> {
+    return await this.client.projectCatalogPage(params);
+  }
+
+  async registerProject(
+    params: HarnessProjectRegisterParams,
+  ): Promise<HarnessProjectRegisterResult> {
+    return await this.client.registerProject(params);
   }
 
   async setRoutingConfiguration(

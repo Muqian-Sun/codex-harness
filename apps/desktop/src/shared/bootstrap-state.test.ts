@@ -5,10 +5,14 @@ import {
   BootstrapStateTransitionError,
   advanceDesktopBootstrapState,
   decodeDesktopBootstrapState,
+  decodeDesktopProjectSelectionResult,
+  decodeDesktopProjectWorkspaceRegistration,
   decodeDesktopRoutingConfigurationMutationResult,
   decodeDesktopRoutingConfigurationUpdate,
   failedBootstrapState,
   projectDesktopModelCatalogSummary,
+  projectDesktopProjectCatalog,
+  projectDesktopProjectRegistration,
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
 } from "./bootstrap-state.js";
@@ -53,6 +57,22 @@ const ROUTING = Object.freeze({
   }),
 });
 
+const PROJECT = Object.freeze({
+  projectId: "00000000-0000-4000-8000-000000000871",
+  projectVersion: 1 as const,
+  displayName: "workspace",
+  workspace: Object.freeze({
+    platform: "macos" as const,
+    absolutePath: "/Users/example/workspace",
+    identityStatus: "unverified" as const,
+  }),
+});
+
+const PROJECTS = Object.freeze({
+  projects: Object.freeze([PROJECT]),
+  hasMore: false,
+});
+
 const READY = Object.freeze({
   phase: "ready" as const,
   account: Object.freeze({
@@ -62,6 +82,7 @@ const READY = Object.freeze({
   }),
   catalog: CATALOG,
   routing: ROUTING,
+  projects: PROJECTS,
 });
 
 describe("desktop bootstrap state", () => {
@@ -94,6 +115,7 @@ describe("desktop bootstrap state", () => {
         account: { ...READY.account, email: "private@example.com" },
         catalog: READY.catalog,
         routing: READY.routing,
+        projects: READY.projects,
       }),
     ).toBe(undefined);
     expect(
@@ -102,6 +124,7 @@ describe("desktop bootstrap state", () => {
         account: READY.account,
         catalog: { ...READY.catalog, nextCursor: "private-cursor" },
         routing: READY.routing,
+        projects: READY.projects,
       }),
     ).toBe(undefined);
     expect(decodeDesktopBootstrapState({ phase: "failed", code: "raw_error" })).toBe(undefined);
@@ -124,7 +147,12 @@ describe("desktop bootstrap state", () => {
       nextCursor: null,
     });
     const routing = projectDesktopRoutingConfiguration({ schemaVersion: 1, ...ROUTING });
-    const state = readyBootstrapState(account, catalog, routing);
+    const projects = projectDesktopProjectCatalog({
+      schemaVersion: 1,
+      projects: PROJECTS.projects,
+      nextCursor: null,
+    });
+    const state = readyBootstrapState(account, catalog, routing, projects);
 
     expect(state).toEqual(READY);
     expect(JSON.stringify(state)).not.toContain("snapshotId");
@@ -133,6 +161,67 @@ describe("desktop bootstrap state", () => {
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.phase === "ready" ? state.account : undefined)).toBe(true);
     expect(JSON.stringify(state)).not.toContain("schemaVersion");
+  });
+
+  it("projects and validates Project catalog, chooser input, and selection results", () => {
+    const projects = projectDesktopProjectCatalog({
+      schemaVersion: 1,
+      projects: PROJECTS.projects,
+      nextCursor: null,
+    });
+    const registration = projectDesktopProjectRegistration({
+      schemaVersion: 1,
+      status: "registered",
+      project: PROJECT,
+    });
+    const chooserInput = {
+      displayName: PROJECT.displayName,
+      workspace: {
+        platform: PROJECT.workspace.platform,
+        absolutePath: PROJECT.workspace.absolutePath,
+      },
+    };
+
+    expect(projects).toEqual(PROJECTS);
+    expect(registration).toEqual({ registrationStatus: "registered", project: PROJECT });
+    expect(decodeDesktopProjectWorkspaceRegistration(chooserInput)).toEqual(chooserInput);
+    expect(
+      decodeDesktopProjectSelectionResult({
+        status: "selected",
+        registrationStatus: "registered",
+        project: PROJECT,
+        projects,
+      }),
+    ).toEqual({
+      status: "selected",
+      registrationStatus: "registered",
+      project: PROJECT,
+      projects,
+    });
+    expect(decodeDesktopProjectSelectionResult({ status: "cancelled" })).toEqual({
+      status: "cancelled",
+    });
+    expect(
+      decodeDesktopProjectWorkspaceRegistration({
+        ...chooserInput,
+        workspace: { ...chooserInput.workspace, absolutePath: "/Users/example/../secret" },
+      }),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectSelectionResult({
+        status: "selected",
+        registrationStatus: "registered",
+        project: { ...PROJECT, createdAtMs: 1 },
+        projects,
+      }),
+    ).toBeUndefined();
+    expect(() =>
+      projectDesktopProjectCatalog({
+        schemaVersion: 1,
+        projects: [PROJECT, PROJECT],
+        nextCursor: null,
+      }),
+    ).toThrow(BootstrapStateTransitionError);
   });
 
   it("strictly projects routing state and validates renderer mutation boundaries", () => {

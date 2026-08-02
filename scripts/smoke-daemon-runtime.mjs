@@ -75,6 +75,31 @@ export async function smokeDaemonRuntime() {
     ) {
       throw new Error("The supervised daemon initial routing configuration was invalid.");
     }
+    const initialProjects = await supervisor.readProjectCatalogPage({ cursor: null, limit: 12 });
+    if (initialProjects.projects.length !== 0 || initialProjects.nextCursor !== null) {
+      throw new Error("The supervised daemon initial Project catalog was invalid.");
+    }
+    const projectPath = join(directory, "workspace");
+    await mkdir(projectPath, { mode: 0o700 });
+    const projectId = "00000000-0000-4000-8000-000000000951";
+    const projectCommandId = "00000000-0000-4000-8000-000000000952";
+    const registeredProject = await supervisor.registerProject({
+      commandId: projectCommandId,
+      projectId,
+      displayName: "workspace",
+      workspace: { platform: "macos", absolutePath: projectPath },
+    });
+    const persistedProjects = await supervisor.readProjectCatalogPage({ cursor: null, limit: 12 });
+    if (
+      registeredProject.status !== "registered" ||
+      registeredProject.project.projectId !== projectId ||
+      registeredProject.project.workspace.identityStatus !== "unverified" ||
+      persistedProjects.projects.length !== 1 ||
+      persistedProjects.projects[0]?.projectId !== projectId ||
+      JSON.stringify(persistedProjects).includes("createdAtMs")
+    ) {
+      throw new Error("The supervised daemon did not persist a valid Project.");
+    }
     const routingRevisionId = "00000000-0000-4000-8000-000000000941";
     const savedRouting = await supervisor.setRoutingConfiguration({
       commandId: routingRevisionId,
@@ -131,6 +156,7 @@ export async function smokeDaemonRuntime() {
       runtimeRoot,
       stateDatabasePath,
       routingRevisionId,
+      projectId,
     );
     const recoveredStateIdentity = await verifyStateDatabase(stateRoot);
     if (
@@ -157,6 +183,7 @@ async function smokeSupervisorRpcLoss(
   runtimeRoot,
   stateDatabasePath,
   routingRevisionId,
+  projectId,
 ) {
   const supervisor = await DaemonProcessSupervisor.start({
     command: process.execPath,
@@ -174,6 +201,14 @@ async function smokeSupervisorRpcLoss(
     recoveredRouting.tiers?.deep.model !== "smoke-b"
   ) {
     throw new Error("The supervised daemon did not recover its routing configuration.");
+  }
+  const recoveredProjects = await supervisor.readProjectCatalogPage({ cursor: null, limit: 12 });
+  if (
+    recoveredProjects.projects.length !== 1 ||
+    recoveredProjects.projects[0]?.projectId !== projectId ||
+    recoveredProjects.projects[0]?.workspace.identityStatus !== "unverified"
+  ) {
+    throw new Error("The supervised daemon did not recover its Project registry.");
   }
   supervisor.client.close();
   const closed = await supervisor.closed;

@@ -85,6 +85,43 @@ export type DesktopRoutingConfigurationMutationResult =
     }>
   | Readonly<{ status: "unavailable" }>;
 
+export const DESKTOP_PROJECT_PLATFORMS = Object.freeze(["macos", "windows", "linux"] as const);
+export type DesktopProjectPlatform = (typeof DESKTOP_PROJECT_PLATFORMS)[number];
+export type DesktopProjectWorkspace = Readonly<{
+  platform: DesktopProjectPlatform;
+  absolutePath: string;
+  identityStatus: "unverified";
+}>;
+export type DesktopProjectSummary = Readonly<{
+  projectId: string;
+  projectVersion: 1;
+  displayName: string;
+  workspace: DesktopProjectWorkspace;
+}>;
+export type DesktopProjectCatalog = Readonly<{
+  projects: readonly DesktopProjectSummary[];
+  hasMore: boolean;
+}>;
+export type DesktopProjectWorkspaceRegistration = Readonly<{
+  displayName: string;
+  workspace: Readonly<{
+    platform: DesktopProjectPlatform;
+    absolutePath: string;
+  }>;
+}>;
+export type DesktopProjectRegistrationProjection = Readonly<{
+  registrationStatus: "registered" | "existing";
+  project: DesktopProjectSummary;
+}>;
+export type DesktopProjectSelectionResult =
+  | Readonly<{ status: "cancelled" | "unavailable" }>
+  | Readonly<{
+      status: "selected";
+      registrationStatus: "registered" | "existing";
+      project: DesktopProjectSummary;
+      projects: DesktopProjectCatalog;
+    }>;
+
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
   | Readonly<{
@@ -92,6 +129,7 @@ export type DesktopBootstrapState =
       account: DesktopAccountStatus;
       catalog: DesktopModelCatalogSummary;
       routing: DesktopRoutingConfiguration;
+      projects: DesktopProjectCatalog;
     }>
   | Readonly<{ phase: "failed"; code: DesktopBootstrapFailureCode }>
   | Readonly<{ phase: "stopping" }>;
@@ -106,6 +144,9 @@ const MAX_MODEL_CHARACTERS = 4_096;
 const MAX_REASONING_EFFORT_CHARACTERS = 128;
 const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
 const MAX_MODEL_REASONING_EFFORTS = 64;
+const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
+const MAX_PROJECT_DISPLAY_NAME_BYTES = 256;
+const MAX_PROJECT_PATH_BYTES = 4_096;
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -115,20 +156,25 @@ export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapSta
   const keys = Object.keys(record);
   if (record.phase === "ready") {
     if (
-      keys.length !== 4 ||
+      keys.length !== 5 ||
       !keys.includes("phase") ||
       !keys.includes("account") ||
       !keys.includes("catalog") ||
-      !keys.includes("routing")
+      !keys.includes("routing") ||
+      !keys.includes("projects")
     ) {
       return undefined;
     }
     const account = decodeDesktopAccountStatus(record.account, true);
     const catalog = decodeDesktopModelCatalogSummary(record.catalog);
     const routing = decodeDesktopRoutingConfiguration(record.routing, false);
-    return account === undefined || catalog === undefined || routing === undefined
+    const projects = decodeDesktopProjectCatalog(record.projects, false);
+    return account === undefined ||
+      catalog === undefined ||
+      routing === undefined ||
+      projects === undefined
       ? undefined
-      : Object.freeze({ phase: "ready", account, catalog, routing });
+      : Object.freeze({ phase: "ready", account, catalog, routing, projects });
   }
   if (record.phase === "failed") {
     if (
@@ -175,14 +221,103 @@ export function readyBootstrapState(
   accountInput: unknown,
   catalogInput: unknown,
   routingInput: unknown,
+  projectsInput: unknown,
 ): DesktopBootstrapState {
   const account = decodeDesktopAccountStatus(accountInput, false);
   const catalog = decodeDesktopModelCatalogSummary(catalogInput);
   const routing = decodeDesktopRoutingConfiguration(routingInput, false);
-  if (account === undefined || catalog === undefined || routing === undefined) {
+  const projects = decodeDesktopProjectCatalog(projectsInput, false);
+  if (
+    account === undefined ||
+    catalog === undefined ||
+    routing === undefined ||
+    projects === undefined
+  ) {
     throw new BootstrapStateTransitionError();
   }
-  return Object.freeze({ phase: "ready", account, catalog, routing });
+  return Object.freeze({ phase: "ready", account, catalog, routing, projects });
+}
+
+export function projectDesktopProjectCatalog(input: unknown): DesktopProjectCatalog {
+  const projects = decodeDesktopProjectCatalog(input, true);
+  if (projects === undefined) {
+    throw new BootstrapStateTransitionError();
+  }
+  return projects;
+}
+
+export function projectDesktopProjectRegistration(
+  input: unknown,
+): DesktopProjectRegistrationProjection {
+  const record = exactRecord(input, ["project", "schemaVersion", "status"]);
+  if (
+    record === undefined ||
+    record.schemaVersion !== 1 ||
+    (record.status !== "registered" && record.status !== "existing")
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  const project = decodeDesktopProjectSummary(record.project);
+  if (project === undefined) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({ registrationStatus: record.status, project });
+}
+
+export function decodeDesktopProjectWorkspaceRegistration(
+  input: unknown,
+): DesktopProjectWorkspaceRegistration | undefined {
+  const record = exactRecord(input, ["displayName", "workspace"]);
+  if (!validProjectDisplayName(record?.displayName)) {
+    return undefined;
+  }
+  const workspaceRecord = exactRecord(record.workspace, ["absolutePath", "platform"]);
+  if (
+    workspaceRecord === undefined ||
+    !isDesktopProjectPlatform(workspaceRecord.platform) ||
+    typeof workspaceRecord.absolutePath !== "string" ||
+    utf8ByteLength(workspaceRecord.absolutePath) > MAX_PROJECT_PATH_BYTES ||
+    !isNormalizedProjectPath(workspaceRecord.platform, workspaceRecord.absolutePath)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    displayName: record.displayName,
+    workspace: Object.freeze({
+      platform: workspaceRecord.platform,
+      absolutePath: workspaceRecord.absolutePath,
+    }),
+  });
+}
+
+export function decodeDesktopProjectSelectionResult(
+  input: unknown,
+): DesktopProjectSelectionResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (
+    terminal !== undefined &&
+    (terminal.status === "cancelled" || terminal.status === "unavailable")
+  ) {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["project", "projects", "registrationStatus", "status"]);
+  if (
+    record === undefined ||
+    record.status !== "selected" ||
+    (record.registrationStatus !== "registered" && record.registrationStatus !== "existing")
+  ) {
+    return undefined;
+  }
+  const project = decodeDesktopProjectSummary(record.project);
+  const projects = decodeDesktopProjectCatalog(record.projects, false);
+  return project === undefined || projects === undefined
+    ? undefined
+    : Object.freeze({
+        status: "selected",
+        registrationStatus: record.registrationStatus,
+        project,
+        projects,
+      });
 }
 
 export function projectDesktopRoutingConfiguration(input: unknown): DesktopRoutingConfiguration {
@@ -334,7 +469,8 @@ function sameState(current: DesktopBootstrapState, candidate: DesktopBootstrapSt
       current.account.credentialKind === candidate.account.credentialKind &&
       current.account.planType === candidate.account.planType &&
       modelCatalogSummariesEqual(current.catalog, candidate.catalog) &&
-      routingConfigurationsEqual(current.routing, candidate.routing)
+      routingConfigurationsEqual(current.routing, candidate.routing) &&
+      projectCatalogsEqual(current.projects, candidate.projects)
     );
   }
   return true;
@@ -470,6 +606,153 @@ function routingConfigurationsEqual(
   left: DesktopRoutingConfiguration,
   right: DesktopRoutingConfiguration,
 ): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function decodeDesktopProjectCatalog(
+  input: unknown,
+  includesSchemaVersion: boolean,
+): DesktopProjectCatalog | undefined {
+  const expectedKeys = includesSchemaVersion
+    ? ["nextCursor", "projects", "schemaVersion"]
+    : ["hasMore", "projects"];
+  const record = exactRecord(input, expectedKeys);
+  if (
+    record === undefined ||
+    (includesSchemaVersion && record.schemaVersion !== 1) ||
+    !Array.isArray(record.projects) ||
+    record.projects.length > MAX_PROJECT_CATALOG_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  const hasMore = includesSchemaVersion ? record.nextCursor !== null : record.hasMore;
+  if (
+    typeof hasMore !== "boolean" ||
+    (includesSchemaVersion && record.nextCursor !== null && !isUuid(record.nextCursor))
+  ) {
+    return undefined;
+  }
+  const projects = record.projects.map(decodeDesktopProjectSummary);
+  if (projects.some((project) => project === undefined)) {
+    return undefined;
+  }
+  const decoded = projects as DesktopProjectSummary[];
+  const ids = decoded.map((project) => project.projectId);
+  const workspaces = decoded.map(
+    (project) => `${project.workspace.platform}\0${project.workspace.absolutePath}`,
+  );
+  if (
+    new Set(ids).size !== ids.length ||
+    new Set(workspaces).size !== workspaces.length ||
+    (hasMore && decoded.length === 0)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ projects: Object.freeze(decoded), hasMore });
+}
+
+function decodeDesktopProjectSummary(input: unknown): DesktopProjectSummary | undefined {
+  const record = exactRecord(input, ["displayName", "projectId", "projectVersion", "workspace"]);
+  if (
+    record === undefined ||
+    !isUuid(record.projectId) ||
+    record.projectVersion !== 1 ||
+    !validProjectDisplayName(record.displayName)
+  ) {
+    return undefined;
+  }
+  const workspace = exactRecord(record.workspace, ["absolutePath", "identityStatus", "platform"]);
+  if (
+    workspace === undefined ||
+    workspace.identityStatus !== "unverified" ||
+    !isDesktopProjectPlatform(workspace.platform) ||
+    typeof workspace.absolutePath !== "string" ||
+    utf8ByteLength(workspace.absolutePath) > MAX_PROJECT_PATH_BYTES ||
+    !isNormalizedProjectPath(workspace.platform, workspace.absolutePath)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    projectVersion: 1,
+    displayName: record.displayName,
+    workspace: Object.freeze({
+      platform: workspace.platform,
+      absolutePath: workspace.absolutePath,
+      identityStatus: "unverified",
+    }),
+  });
+}
+
+function validProjectDisplayName(input: unknown): input is string {
+  return (
+    validBoundedText(input, MAX_PROJECT_DISPLAY_NAME_BYTES) &&
+    utf8ByteLength(input) <= MAX_PROJECT_DISPLAY_NAME_BYTES
+  );
+}
+
+function isDesktopProjectPlatform(input: unknown): input is DesktopProjectPlatform {
+  return input === "macos" || input === "windows" || input === "linux";
+}
+
+function utf8ByteLength(input: string): number {
+  return new TextEncoder().encode(input).byteLength;
+}
+
+function isNormalizedProjectPath(platform: DesktopProjectPlatform, input: string): boolean {
+  if (input.includes("\0")) {
+    return false;
+  }
+  if (platform !== "windows") {
+    if (input === "/") {
+      return true;
+    }
+    return (
+      input.startsWith("/") &&
+      !input.endsWith("/") &&
+      input
+        .slice(1)
+        .split("/")
+        .every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    );
+  }
+  if (input.includes("/") || input.startsWith("\\\\?\\") || input.startsWith("\\\\.\\")) {
+    return false;
+  }
+  if (/^[A-Z]:\\/.test(input)) {
+    if (input.length === 3) {
+      return true;
+    }
+    return (
+      !input.endsWith("\\") &&
+      input
+        .slice(3)
+        .split("\\")
+        .every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    );
+  }
+  if (!input.startsWith("\\\\")) {
+    return false;
+  }
+  const segments = input.slice(2).split("\\");
+  if (
+    segments.length < 2 ||
+    segments[0]?.length === 0 ||
+    segments[1]?.length === 0 ||
+    segments[0] === "." ||
+    segments[0] === ".." ||
+    segments[1] === "." ||
+    segments[1] === ".."
+  ) {
+    return false;
+  }
+  if (segments.length === 3 && segments[2] === "") {
+    return true;
+  }
+  return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function projectCatalogsEqual(left: DesktopProjectCatalog, right: DesktopProjectCatalog): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
