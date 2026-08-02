@@ -28,6 +28,10 @@ await smokeShadowRouteFeatureSnapshot();
 const { smokeHarnessRouteEvidence } = await import("./smoke-harness-route-evidence.mjs");
 await smokeHarnessRouteEvidence();
 
+const { smokeHarnessOperationRouteObserver } =
+  await import("./smoke-harness-operation-route-observer.mjs");
+await smokeHarnessOperationRouteObserver();
+
 const { smokeModelCatalog } = await import("./smoke-model-catalog.mjs");
 await smokeModelCatalog();
 
