@@ -17,6 +17,7 @@ const MAX_PROJECT_PATH_BYTES = 4_096;
 export const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
 export const MAX_MODEL_REASONING_EFFORTS = 64;
 export const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
+export const MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE = 16;
 
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
@@ -324,6 +325,153 @@ export type HarnessProjectRegisterResult = Readonly<{
   project: HarnessProjectSummary;
 }>;
 
+const ProjectRoutingBindingRecordSchema = z
+  .object({
+    projectId: z.string().regex(UUID_PATTERN),
+    bindingVersion: NonNegativeSafeIntegerSchema.min(1),
+    profileId: z.string().regex(UUID_PATTERN),
+    profileVersionAtBinding: NonNegativeSafeIntegerSchema.min(1),
+    configurationRevisionIdAtBinding: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
+const ProjectRoutingBindingStatusSchema = z.union([
+  z
+    .object({
+      projectId: z.string().regex(UUID_PATTERN),
+      status: z.literal("unbound"),
+      binding: z.null(),
+    })
+    .strict(),
+  z
+    .object({
+      projectId: z.string().regex(UUID_PATTERN),
+      status: z.literal("default_bound"),
+      binding: ProjectRoutingBindingRecordSchema,
+    })
+    .strict(),
+  z
+    .object({
+      projectId: z.string().regex(UUID_PATTERN),
+      status: z.literal("other_profile_bound"),
+      binding: ProjectRoutingBindingRecordSchema,
+    })
+    .strict(),
+]);
+
+export const ProjectRoutingBindingStatusBatchParamsSchema = z
+  .object({
+    projectIds: z.array(z.string().regex(UUID_PATTERN)).max(MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.projectIds).size !== value.projectIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["projectIds"],
+        message: "Project identifiers must be unique",
+      });
+    }
+  });
+
+export const ProjectRoutingBindingStatusBatchResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    statuses: z
+      .array(ProjectRoutingBindingStatusSchema)
+      .max(MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const ids = value.statuses.map((status) => status.projectId);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["statuses"],
+        message: "Project binding statuses must be unique",
+      });
+    }
+    value.statuses.forEach((status, index) => {
+      if (status.binding !== null && status.binding.projectId !== status.projectId) {
+        context.addIssue({
+          code: "custom",
+          path: ["statuses", index, "binding", "projectId"],
+          message: "Project binding must match its status",
+        });
+      }
+    });
+  });
+
+export const ProjectRoutingBindingBindDefaultParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    expectedBindingVersion: NonNegativeSafeIntegerSchema,
+    previousProfileId: z.string().regex(UUID_PATTERN).nullable(),
+    expectedProfileVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedConfigurationRevisionId: z.string().regex(UUID_PATTERN),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.expectedBindingVersion === 0) !== (value.previousProfileId === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["previousProfileId"],
+        message: "The previous profile must match the expected binding version",
+      });
+    }
+    if (value.commandId === value.expectedConfigurationRevisionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "A binding command cannot reuse a configuration revision identifier",
+      });
+    }
+  });
+
+export const ProjectRoutingBindingBindDefaultResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["bound", "existing"]),
+    binding: ProjectRoutingBindingRecordSchema,
+  })
+  .strict();
+
+export type HarnessProjectRoutingBindingRecord = Readonly<{
+  projectId: string;
+  bindingVersion: number;
+  profileId: string;
+  profileVersionAtBinding: number;
+  configurationRevisionIdAtBinding: string;
+}>;
+export type HarnessProjectRoutingBindingStatus =
+  | Readonly<{ projectId: string; status: "unbound"; binding: null }>
+  | Readonly<{
+      projectId: string;
+      status: "default_bound" | "other_profile_bound";
+      binding: HarnessProjectRoutingBindingRecord;
+    }>;
+export type HarnessProjectRoutingBindingStatusBatchParams = Readonly<{
+  projectIds: readonly string[];
+}>;
+export type HarnessProjectRoutingBindingStatusBatchResult = Readonly<{
+  schemaVersion: 1;
+  statuses: readonly HarnessProjectRoutingBindingStatus[];
+}>;
+export type HarnessProjectRoutingBindingBindDefaultParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  expectedBindingVersion: number;
+  previousProfileId: string | null;
+  expectedProfileVersion: number;
+  expectedConfigurationRevisionId: string;
+}>;
+export type HarnessProjectRoutingBindingBindDefaultResult = Readonly<{
+  schemaVersion: 1;
+  status: "bound" | "existing";
+  binding: HarnessProjectRoutingBindingRecord;
+}>;
+
 export const ROUTING_AVAILABILITY_STATUSES = Object.freeze([
   "model_unavailable",
   "observed_available",
@@ -462,6 +610,14 @@ export const METHOD_CONTRACTS = Object.freeze({
   "project.register": Object.freeze({
     params: ProjectRegisterParamsSchema,
     result: ProjectRegisterResultSchema,
+  }),
+  "project.routing_binding.bind_default": Object.freeze({
+    params: ProjectRoutingBindingBindDefaultParamsSchema,
+    result: ProjectRoutingBindingBindDefaultResultSchema,
+  }),
+  "project.routing_binding.status_batch": Object.freeze({
+    params: ProjectRoutingBindingStatusBatchParamsSchema,
+    result: ProjectRoutingBindingStatusBatchResultSchema,
   }),
   "routing.configuration.get": Object.freeze({
     params: RoutingConfigurationGetParamsSchema,

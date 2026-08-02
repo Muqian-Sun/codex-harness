@@ -17,6 +17,8 @@ export type RpcDispatchContext = Readonly<{
   readModelCatalogPage: (params: JsonValue) => unknown;
   readProjectCatalogPage: (params: JsonValue) => unknown;
   registerProject: (params: JsonValue) => unknown;
+  readProjectRoutingBindingStatuses: (params: JsonValue) => unknown;
+  bindProjectDefaultRouting: (params: JsonValue) => unknown;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -200,6 +202,62 @@ export function dispatchRpcRequest(
             shutdownReason: undefined,
           }
         : unavailable(request.id, "The Project registry is unavailable.");
+    }
+
+    if (request.method === "project.routing_binding.status_batch") {
+      let candidate: unknown;
+      try {
+        candidate = context.readProjectRoutingBindingStatuses(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(
+              request.id,
+              RPC_ERROR_CODES.conflict,
+              "The Project routing binding status changed.",
+            ),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Project routing binding status is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("project.routing_binding.status_batch", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project routing binding status is unavailable.");
+    }
+
+    if (request.method === "project.routing_binding.bind_default") {
+      let candidate: unknown;
+      try {
+        candidate = context.bindProjectDefaultRouting(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(
+              request.id,
+              RPC_ERROR_CODES.conflict,
+              "The Project routing binding changed.",
+            ),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Project routing binding is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("project.routing_binding.bind_default", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project routing binding is unavailable.");
     }
 
     if (request.method === "routing.configuration.set") {

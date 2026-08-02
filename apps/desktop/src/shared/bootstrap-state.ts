@@ -121,6 +121,17 @@ export type DesktopProjectSelectionResult =
       project: DesktopProjectSummary;
       projects: DesktopProjectCatalog;
     }>;
+export type DesktopProjectRoutingBindingStatus = Readonly<{
+  projectId: string;
+  status: "unbound" | "default_bound" | "other_profile_bound";
+  bindingVersion: number | null;
+}>;
+export type DesktopProjectRoutingBindings = Readonly<{
+  bindings: readonly DesktopProjectRoutingBindingStatus[];
+}>;
+export type DesktopProjectRoutingBindingMutationResult = Readonly<{
+  status: "bound" | "existing" | "conflict" | "routing_unconfigured" | "unavailable";
+}>;
 
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
@@ -130,6 +141,7 @@ export type DesktopBootstrapState =
       catalog: DesktopModelCatalogSummary;
       routing: DesktopRoutingConfiguration;
       projects: DesktopProjectCatalog;
+      projectRoutingBindings: DesktopProjectRoutingBindings;
     }>
   | Readonly<{ phase: "failed"; code: DesktopBootstrapFailureCode }>
   | Readonly<{ phase: "stopping" }>;
@@ -156,12 +168,13 @@ export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapSta
   const keys = Object.keys(record);
   if (record.phase === "ready") {
     if (
-      keys.length !== 5 ||
+      keys.length !== 6 ||
       !keys.includes("phase") ||
       !keys.includes("account") ||
       !keys.includes("catalog") ||
       !keys.includes("routing") ||
-      !keys.includes("projects")
+      !keys.includes("projects") ||
+      !keys.includes("projectRoutingBindings")
     ) {
       return undefined;
     }
@@ -169,12 +182,24 @@ export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapSta
     const catalog = decodeDesktopModelCatalogSummary(record.catalog);
     const routing = decodeDesktopRoutingConfiguration(record.routing, false);
     const projects = decodeDesktopProjectCatalog(record.projects, false);
+    const projectRoutingBindings = decodeDesktopProjectRoutingBindings(
+      record.projectRoutingBindings,
+      projects?.projects.map((project) => project.projectId),
+    );
     return account === undefined ||
       catalog === undefined ||
       routing === undefined ||
-      projects === undefined
+      projects === undefined ||
+      projectRoutingBindings === undefined
       ? undefined
-      : Object.freeze({ phase: "ready", account, catalog, routing, projects });
+      : Object.freeze({
+          phase: "ready",
+          account,
+          catalog,
+          routing,
+          projects,
+          projectRoutingBindings,
+        });
   }
   if (record.phase === "failed") {
     if (
@@ -222,20 +247,33 @@ export function readyBootstrapState(
   catalogInput: unknown,
   routingInput: unknown,
   projectsInput: unknown,
+  projectRoutingBindingsInput: unknown,
 ): DesktopBootstrapState {
   const account = decodeDesktopAccountStatus(accountInput, false);
   const catalog = decodeDesktopModelCatalogSummary(catalogInput);
   const routing = decodeDesktopRoutingConfiguration(routingInput, false);
   const projects = decodeDesktopProjectCatalog(projectsInput, false);
+  const projectRoutingBindings = decodeDesktopProjectRoutingBindings(
+    projectRoutingBindingsInput,
+    projects?.projects.map((project) => project.projectId),
+  );
   if (
     account === undefined ||
     catalog === undefined ||
     routing === undefined ||
-    projects === undefined
+    projects === undefined ||
+    projectRoutingBindings === undefined
   ) {
     throw new BootstrapStateTransitionError();
   }
-  return Object.freeze({ phase: "ready", account, catalog, routing, projects });
+  return Object.freeze({
+    phase: "ready",
+    account,
+    catalog,
+    routing,
+    projects,
+    projectRoutingBindings,
+  });
 }
 
 export function projectDesktopProjectCatalog(input: unknown): DesktopProjectCatalog {
@@ -262,6 +300,49 @@ export function projectDesktopProjectRegistration(
     throw new BootstrapStateTransitionError();
   }
   return Object.freeze({ registrationStatus: record.status, project });
+}
+
+export function projectDesktopProjectRoutingBindings(
+  input: unknown,
+  expectedProjectIds: readonly string[],
+): DesktopProjectRoutingBindings {
+  const record = exactRecord(input, ["schemaVersion", "statuses"]);
+  if (
+    record === undefined ||
+    record.schemaVersion !== 1 ||
+    !Array.isArray(record.statuses) ||
+    record.statuses.length !== expectedProjectIds.length ||
+    record.statuses.length > MAX_PROJECT_CATALOG_PAGE_SIZE
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  const bindings = record.statuses.map((status, index) =>
+    projectRoutingBindingStatus(status, expectedProjectIds[index]),
+  );
+  if (bindings.some((binding) => binding === undefined)) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({
+    bindings: Object.freeze(bindings as DesktopProjectRoutingBindingStatus[]),
+  });
+}
+
+export function decodeDesktopProjectRoutingBindingMutationResult(
+  input: unknown,
+): DesktopProjectRoutingBindingMutationResult | undefined {
+  const record = exactRecord(input, ["status"]);
+  return record !== undefined &&
+    (record.status === "bound" ||
+      record.status === "existing" ||
+      record.status === "conflict" ||
+      record.status === "routing_unconfigured" ||
+      record.status === "unavailable")
+    ? Object.freeze({ status: record.status })
+    : undefined;
+}
+
+export function decodeDesktopProjectRoutingBindingProjectId(input: unknown): string | undefined {
+  return isUuid(input) ? input : undefined;
 }
 
 export function decodeDesktopProjectWorkspaceRegistration(
@@ -470,7 +551,8 @@ function sameState(current: DesktopBootstrapState, candidate: DesktopBootstrapSt
       current.account.planType === candidate.account.planType &&
       modelCatalogSummariesEqual(current.catalog, candidate.catalog) &&
       routingConfigurationsEqual(current.routing, candidate.routing) &&
-      projectCatalogsEqual(current.projects, candidate.projects)
+      projectCatalogsEqual(current.projects, candidate.projects) &&
+      projectRoutingBindingsEqual(current.projectRoutingBindings, candidate.projectRoutingBindings)
     );
   }
   return true;
@@ -684,6 +766,96 @@ function decodeDesktopProjectSummary(input: unknown): DesktopProjectSummary | un
   });
 }
 
+function decodeDesktopProjectRoutingBindings(
+  input: unknown,
+  expectedProjectIds: readonly string[] | undefined,
+): DesktopProjectRoutingBindings | undefined {
+  const record = exactRecord(input, ["bindings"]);
+  if (
+    record === undefined ||
+    expectedProjectIds === undefined ||
+    !Array.isArray(record.bindings) ||
+    record.bindings.length !== expectedProjectIds.length ||
+    record.bindings.length > MAX_PROJECT_CATALOG_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  const bindings = record.bindings.map((binding, index) => {
+    const decoded = exactRecord(binding, ["bindingVersion", "projectId", "status"]);
+    const expectedProjectId = expectedProjectIds[index];
+    if (
+      decoded === undefined ||
+      decoded.projectId !== expectedProjectId ||
+      (decoded.status !== "unbound" &&
+        decoded.status !== "default_bound" &&
+        decoded.status !== "other_profile_bound") ||
+      (decoded.status === "unbound"
+        ? decoded.bindingVersion !== null
+        : !isPositiveSafeInteger(decoded.bindingVersion))
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      projectId: decoded.projectId as string,
+      status: decoded.status,
+      bindingVersion: decoded.bindingVersion as number | null,
+    });
+  });
+  return bindings.some((binding) => binding === undefined)
+    ? undefined
+    : Object.freeze({
+        bindings: Object.freeze(bindings as DesktopProjectRoutingBindingStatus[]),
+      });
+}
+
+function projectRoutingBindingStatus(
+  input: unknown,
+  expectedProjectId: string | undefined,
+): DesktopProjectRoutingBindingStatus | undefined {
+  const record = exactRecord(input, ["binding", "projectId", "status"]);
+  if (
+    record === undefined ||
+    expectedProjectId === undefined ||
+    record.projectId !== expectedProjectId ||
+    (record.status !== "unbound" &&
+      record.status !== "default_bound" &&
+      record.status !== "other_profile_bound")
+  ) {
+    return undefined;
+  }
+  if (record.status === "unbound") {
+    return record.binding === null
+      ? Object.freeze({
+          projectId: expectedProjectId,
+          status: "unbound" as const,
+          bindingVersion: null,
+        })
+      : undefined;
+  }
+  const binding = exactRecord(record.binding, [
+    "bindingVersion",
+    "configurationRevisionIdAtBinding",
+    "profileId",
+    "profileVersionAtBinding",
+    "projectId",
+  ]);
+  if (
+    binding === undefined ||
+    binding.projectId !== expectedProjectId ||
+    !isPositiveSafeInteger(binding.bindingVersion) ||
+    !isUuid(binding.profileId) ||
+    !isPositiveSafeInteger(binding.profileVersionAtBinding) ||
+    !isUuid(binding.configurationRevisionIdAtBinding)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: expectedProjectId,
+    status: record.status,
+    bindingVersion: binding.bindingVersion,
+  });
+}
+
 function validProjectDisplayName(input: unknown): input is string {
   return (
     validBoundedText(input, MAX_PROJECT_DISPLAY_NAME_BYTES) &&
@@ -753,6 +925,13 @@ function isNormalizedProjectPath(platform: DesktopProjectPlatform, input: string
 }
 
 function projectCatalogsEqual(left: DesktopProjectCatalog, right: DesktopProjectCatalog): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function projectRoutingBindingsEqual(
+  left: DesktopProjectRoutingBindings,
+  right: DesktopProjectRoutingBindings,
+): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 

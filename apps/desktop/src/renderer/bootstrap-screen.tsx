@@ -6,6 +6,8 @@ import type {
   DesktopBootstrapState,
   DesktopModelCatalogSummary,
   DesktopProjectCatalog,
+  DesktopProjectRoutingBindingMutationResult,
+  DesktopProjectRoutingBindings,
   DesktopProjectSelectionResult,
   DesktopProjectSummary,
   DesktopRoutingAvailabilityStatus,
@@ -139,7 +141,13 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
           <BoundaryCard />
         )}
 
-        {state.phase === "ready" ? <ProjectRegistryPanel projects={state.projects} /> : null}
+        {state.phase === "ready" ? (
+          <ProjectRegistryPanel
+            projects={state.projects}
+            projectRoutingBindings={state.projectRoutingBindings}
+            routingConfigured={state.routing.configured}
+          />
+        ) : null}
 
         {state.phase === "ready" ? (
           <RoutingConfigurationPanel routing={state.routing} catalog={state.catalog} />
@@ -159,11 +167,25 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
   );
 }
 
-function ProjectRegistryPanel({ projects }: Readonly<{ projects: DesktopProjectCatalog }>) {
+function ProjectRegistryPanel({
+  projects,
+  projectRoutingBindings,
+  routingConfigured,
+}: Readonly<{
+  projects: DesktopProjectCatalog;
+  projectRoutingBindings: DesktopProjectRoutingBindings;
+  routingConfigured: boolean;
+}>) {
   const [selectionState, setSelectionState] = useState<
     "idle" | "choosing" | "registered" | "existing" | "unavailable"
   >("idle");
   const [selectedProject, setSelectedProject] = useState<DesktopProjectSummary | undefined>();
+  const [bindingMutation, setBindingMutation] = useState<
+    Readonly<{
+      status: "idle" | "binding" | DesktopProjectRoutingBindingMutationResult["status"];
+      projectId?: string;
+    }>
+  >({ status: "idle" });
 
   const choose = async (): Promise<void> => {
     if (selectionState === "choosing") {
@@ -183,6 +205,19 @@ function ProjectRegistryPanel({ projects }: Readonly<{ projects: DesktopProjectC
       setSelectionState(result.status === "selected" ? result.registrationStatus : "unavailable");
     } catch {
       setSelectionState("unavailable");
+    }
+  };
+
+  const bindDefaultRouting = async (projectId: string): Promise<void> => {
+    if (bindingMutation.status === "binding") {
+      return;
+    }
+    setBindingMutation({ status: "binding", projectId });
+    try {
+      const result = await desktopProjectApi().bindProjectToDefaultRouting(projectId);
+      setBindingMutation({ status: result.status, projectId });
+    } catch {
+      setBindingMutation({ status: "unavailable", projectId });
     }
   };
 
@@ -215,25 +250,53 @@ function ProjectRegistryPanel({ projects }: Readonly<{ projects: DesktopProjectC
         </div>
       ) : (
         <ol className="project-list">
-          {projects.projects.map((project, index) => (
-            <li key={project.projectId} data-project-id={project.projectId}>
-              <span className="project-sequence">{String(index + 1).padStart(2, "0")}</span>
-              <div className="project-identity">
-                <strong>{project.displayName}</strong>
-                <code data-project-path={project.workspace.absolutePath}>
-                  {project.workspace.absolutePath}
-                </code>
-              </div>
-              <div className="project-badges">
-                <span data-project-platform={project.workspace.platform}>
-                  {project.workspace.platform.toUpperCase()}
-                </span>
-                <span data-project-identity={project.workspace.identityStatus}>
-                  UNVERIFIED IDENTITY
-                </span>
-              </div>
-            </li>
-          ))}
+          {projects.projects.map((project, index) => {
+            const binding = projectRoutingBindings.bindings[index]!;
+            const pending = bindingMutation.status === "binding";
+            return (
+              <li
+                key={project.projectId}
+                data-project-id={project.projectId}
+                data-project-routing={binding.status}
+              >
+                <span className="project-sequence">{String(index + 1).padStart(2, "0")}</span>
+                <div className="project-identity">
+                  <strong>{project.displayName}</strong>
+                  <code data-project-path={project.workspace.absolutePath}>
+                    {project.workspace.absolutePath}
+                  </code>
+                </div>
+                <div className="project-badges">
+                  <span data-project-platform={project.workspace.platform}>
+                    {project.workspace.platform.toUpperCase()}
+                  </span>
+                  <span data-project-identity={project.workspace.identityStatus}>
+                    UNVERIFIED IDENTITY
+                  </span>
+                  <span data-project-routing-status={binding.status}>
+                    {projectRoutingBindingLabel(binding.status)}
+                  </span>
+                </div>
+                <div className="project-routing-action">
+                  <span>策略引用 · V{binding.bindingVersion ?? 0}</span>
+                  <button
+                    type="button"
+                    data-project-routing-bind={project.projectId}
+                    disabled={!routingConfigured || pending || binding.status === "default_bound"}
+                    onClick={() => void bindDefaultRouting(project.projectId)}
+                  >
+                    {pending && bindingMutation.projectId === project.projectId
+                      ? "正在绑定"
+                      : binding.status === "default_bound"
+                        ? "已绑定默认路由"
+                        : binding.status === "other_profile_bound"
+                          ? "切换到默认路由"
+                          : "绑定默认路由"}
+                  </button>
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
 
@@ -246,11 +309,52 @@ function ProjectRegistryPanel({ projects }: Readonly<{ projects: DesktopProjectC
       )}
 
       <footer className="project-note" aria-live="polite">
-        <span data-project-feedback>{projectSelectionFeedback(selectionState)}</span>
+        <span data-project-feedback>
+          {projectBindingFeedback(bindingMutation.status, routingConfigured) ??
+            projectSelectionFeedback(selectionState)}
+        </span>
         <span>{projects.hasMore ? "另有 Project 未在首屏展开" : "EXECUTION LOCKED"}</span>
       </footer>
     </section>
   );
+}
+
+function projectRoutingBindingLabel(
+  status: "unbound" | "default_bound" | "other_profile_bound",
+): string {
+  switch (status) {
+    case "unbound":
+      return "ROUTING UNBOUND";
+    case "default_bound":
+      return "DEFAULT ROUTING";
+    case "other_profile_bound":
+      return "OTHER PROFILE";
+  }
+}
+
+function projectBindingFeedback(
+  status: "idle" | "binding" | DesktopProjectRoutingBindingMutationResult["status"],
+  routingConfigured: boolean,
+): string | undefined {
+  if (!routingConfigured && status === "idle") {
+    return "请先保存完整三级模型配置，再为 Project 绑定默认路由。";
+  }
+  switch (status) {
+    case "idle":
+      return undefined;
+    case "binding":
+      return "正在校验 Project、绑定版本与当前路由配置。";
+    case "bound":
+      return "Project 已绑定默认路由；执行权限仍未开放。";
+    case "existing":
+      return "Project 已处于相同默认路由绑定，无需重复写入。";
+    case "conflict":
+      return "绑定或路由配置已变化，已刷新权威状态，请重新确认。";
+    case "routing_unconfigured":
+      return "默认路由尚未配置，请先保存完整三级模型配置。";
+    case "unavailable":
+      return "当前无法确认绑定结果，请刷新或重启后核对。";
+  }
 }
 
 function projectSelectionFeedback(
@@ -502,11 +606,17 @@ function desktopRoutingApi(): Readonly<{
 
 function desktopProjectApi(): Readonly<{
   chooseProjectWorkspace(): Promise<DesktopProjectSelectionResult>;
+  bindProjectToDefaultRouting(
+    projectId: string,
+  ): Promise<DesktopProjectRoutingBindingMutationResult>;
 }> {
   return (
     globalThis as unknown as {
       codexHarness: Readonly<{
         chooseProjectWorkspace(): Promise<DesktopProjectSelectionResult>;
+        bindProjectToDefaultRouting(
+          projectId: string,
+        ): Promise<DesktopProjectRoutingBindingMutationResult>;
       }>;
     }
   ).codexHarness;

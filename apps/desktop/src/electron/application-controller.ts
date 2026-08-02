@@ -10,17 +10,20 @@ import {
 } from "../main/harness-rpc-client.js";
 import {
   failedBootstrapState,
+  decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopRoutingConfigurationUpdate,
   decodeDesktopProjectWorkspaceRegistration,
   projectDesktopModelCatalogSummary,
   projectDesktopProjectCatalog,
   projectDesktopProjectRegistration,
+  projectDesktopProjectRoutingBindings,
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
   type BootstrapStateStore,
   type DesktopBootstrapFailureCode,
   type DesktopRoutingConfigurationMutationResult,
   type DesktopProjectSelectionResult,
+  type DesktopProjectRoutingBindingMutationResult,
 } from "../shared/bootstrap-state.js";
 import { DesktopRuntimeResourceError, DesktopRuntimeRootError } from "./runtime-resources.js";
 
@@ -31,6 +34,8 @@ export type DesktopSupervisorHandle = Pick<
   | "readModelCatalogPage"
   | "readProjectCatalogPage"
   | "registerProject"
+  | "readProjectRoutingBindingStatuses"
+  | "bindProjectDefaultRouting"
   | "readRoutingConfiguration"
   | "setRoutingConfiguration"
   | "stop"
@@ -84,7 +89,13 @@ export class DesktopApplicationController {
         return Object.freeze({ status: "unavailable" });
       }
       this.#stateStore.transition(
-        readyBootstrapState(current.account, current.catalog, routing, current.projects),
+        readyBootstrapState(
+          current.account,
+          current.catalog,
+          routing,
+          current.projects,
+          current.projectRoutingBindings,
+        ),
       );
       return Object.freeze({ status: "saved", routing });
     } catch (error: unknown) {
@@ -100,7 +111,13 @@ export class DesktopApplicationController {
           return Object.freeze({ status: "unavailable" });
         }
         this.#stateStore.transition(
-          readyBootstrapState(current.account, current.catalog, routing, current.projects),
+          readyBootstrapState(
+            current.account,
+            current.catalog,
+            routing,
+            current.projects,
+            current.projectRoutingBindings,
+          ),
         );
         return Object.freeze({ status: "conflict", routing });
       } catch {
@@ -127,12 +144,24 @@ export class DesktopApplicationController {
       const projects = projectDesktopProjectCatalog(
         await supervisor.readProjectCatalogPage({ cursor: null, limit: 12 }),
       );
+      const projectRoutingBindings = projectDesktopProjectRoutingBindings(
+        await supervisor.readProjectRoutingBindingStatuses({
+          projectIds: projects.projects.map((project) => project.projectId),
+        }),
+        projects.projects.map((project) => project.projectId),
+      );
       const current = this.#stateStore.current;
       if (current.phase !== "ready") {
         return Object.freeze({ status: "unavailable" });
       }
       this.#stateStore.transition(
-        readyBootstrapState(current.account, current.catalog, current.routing, projects),
+        readyBootstrapState(
+          current.account,
+          current.catalog,
+          current.routing,
+          projects,
+          projectRoutingBindings,
+        ),
       );
       return Object.freeze({
         status: "selected",
@@ -142,6 +171,110 @@ export class DesktopApplicationController {
       });
     } catch {
       return Object.freeze({ status: "unavailable" });
+    }
+  }
+
+  async bindProjectToDefaultRouting(
+    input: unknown,
+  ): Promise<DesktopProjectRoutingBindingMutationResult> {
+    const projectId = decodeDesktopProjectRoutingBindingProjectId(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (
+      projectId === undefined ||
+      state.phase !== "ready" ||
+      supervisor === undefined ||
+      !state.projects.projects.some((project) => project.projectId === projectId)
+    ) {
+      return Object.freeze({ status: "unavailable" });
+    }
+
+    try {
+      const [routingInput, bindingInput] = await Promise.all([
+        supervisor.readRoutingConfiguration(),
+        supervisor.readProjectRoutingBindingStatuses({ projectIds: [projectId] }),
+      ]);
+      const routing = projectDesktopRoutingConfiguration(routingInput);
+      const projectedBinding = projectDesktopProjectRoutingBindings(bindingInput, [projectId]);
+      if (!routing.configured || routing.configurationRevisionId === null) {
+        return Object.freeze({ status: "routing_unconfigured" });
+      }
+      const rawBinding = bindingInput.statuses[0];
+      const visibleBinding = projectedBinding.bindings[0];
+      if (rawBinding === undefined || visibleBinding === undefined) {
+        return Object.freeze({ status: "unavailable" });
+      }
+
+      const result = await supervisor.bindProjectDefaultRouting({
+        commandId: randomUUID(),
+        projectId,
+        expectedBindingVersion: visibleBinding.bindingVersion ?? 0,
+        previousProfileId: rawBinding.binding?.profileId ?? null,
+        expectedProfileVersion: routing.profileVersion,
+        expectedConfigurationRevisionId: routing.configurationRevisionId,
+      });
+      if (
+        (result.status !== "bound" && result.status !== "existing") ||
+        result.binding.projectId !== projectId ||
+        result.binding.profileVersionAtBinding !== routing.profileVersion ||
+        result.binding.configurationRevisionIdAtBinding !== routing.configurationRevisionId ||
+        result.binding.bindingVersion !==
+          (result.status === "bound"
+            ? (visibleBinding.bindingVersion ?? 0) + 1
+            : visibleBinding.bindingVersion)
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const refreshed = await this.#refreshProjectsAndBindings(supervisor);
+      const refreshedBinding = refreshed.projectRoutingBindings.bindings.find(
+        (binding) => binding.projectId === projectId,
+      );
+      if (
+        refreshedBinding?.status !== "default_bound" ||
+        refreshedBinding.bindingVersion !== result.binding.bindingVersion
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const current = this.#stateStore.current;
+      if (current.phase !== "ready") {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.#stateStore.transition(
+        readyBootstrapState(
+          current.account,
+          current.catalog,
+          current.routing,
+          refreshed.projects,
+          refreshed.projectRoutingBindings,
+        ),
+      );
+      return Object.freeze({ status: result.status });
+    } catch (error: unknown) {
+      if (!(error instanceof HarnessRpcClientError) || error.remoteCode !== "rpc.conflict") {
+        return Object.freeze({ status: "unavailable" });
+      }
+      try {
+        const [routing, refreshed] = await Promise.all([
+          supervisor.readRoutingConfiguration().then(projectDesktopRoutingConfiguration),
+          this.#refreshProjectsAndBindings(supervisor),
+        ]);
+        const current = this.#stateStore.current;
+        if (current.phase !== "ready") {
+          return Object.freeze({ status: "unavailable" });
+        }
+        this.#stateStore.transition(
+          readyBootstrapState(
+            current.account,
+            current.catalog,
+            routing,
+            refreshed.projects,
+            refreshed.projectRoutingBindings,
+          ),
+        );
+        return Object.freeze({ status: "conflict" });
+      } catch {
+        return Object.freeze({ status: "unavailable" });
+      }
     }
   }
 
@@ -169,6 +302,16 @@ export class DesktopApplicationController {
       if (this.#isStopping()) {
         return;
       }
+      const projects = projectDesktopProjectCatalog(projectCatalogPage);
+      const projectRoutingBindings = projectDesktopProjectRoutingBindings(
+        await supervisor.readProjectRoutingBindingStatuses({
+          projectIds: projects.projects.map((project) => project.projectId),
+        }),
+        projects.projects.map((project) => project.projectId),
+      );
+      if (this.#isStopping()) {
+        return;
+      }
       const pending = this.#pendingAccountStatusEvent;
       this.#pendingAccountStatusEvent = undefined;
       const accountStatus =
@@ -180,7 +323,8 @@ export class DesktopApplicationController {
           accountStatus,
           projectDesktopModelCatalogSummary(catalogPage),
           projectDesktopRoutingConfiguration(routingConfiguration),
-          projectDesktopProjectCatalog(projectCatalogPage),
+          projects,
+          projectRoutingBindings,
         ),
       );
     } catch (error: unknown) {
@@ -227,9 +371,32 @@ export class DesktopApplicationController {
     }
     if (state.phase === "ready") {
       this.#stateStore.transition(
-        readyBootstrapState(event.account, state.catalog, state.routing, state.projects),
+        readyBootstrapState(
+          event.account,
+          state.catalog,
+          state.routing,
+          state.projects,
+          state.projectRoutingBindings,
+        ),
       );
     }
+  }
+
+  async #refreshProjectsAndBindings(supervisor: DesktopSupervisorHandle): Promise<
+    Readonly<{
+      projects: ReturnType<typeof projectDesktopProjectCatalog>;
+      projectRoutingBindings: ReturnType<typeof projectDesktopProjectRoutingBindings>;
+    }>
+  > {
+    const projects = projectDesktopProjectCatalog(
+      await supervisor.readProjectCatalogPage({ cursor: null, limit: 12 }),
+    );
+    const projectIds = projects.projects.map((project) => project.projectId);
+    const projectRoutingBindings = projectDesktopProjectRoutingBindings(
+      await supervisor.readProjectRoutingBindingStatuses({ projectIds }),
+      projectIds,
+    );
+    return Object.freeze({ projects, projectRoutingBindings });
   }
 }
 

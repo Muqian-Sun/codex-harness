@@ -65,6 +65,31 @@ const PROJECT_REGISTRATION = Object.freeze({
   project: PROJECT,
 });
 
+const PROJECT_ROUTING_BINDING = Object.freeze({
+  projectId: PROJECT.projectId,
+  bindingVersion: 1,
+  profileId: "00000000-0000-4000-8000-000000000901",
+  profileVersionAtBinding: 1,
+  configurationRevisionIdAtBinding: "00000000-0000-4000-8000-000000000851",
+});
+
+const PROJECT_ROUTING_BINDING_STATUSES = Object.freeze({
+  schemaVersion: 1,
+  statuses: Object.freeze([
+    Object.freeze({
+      projectId: PROJECT.projectId,
+      status: "default_bound",
+      binding: PROJECT_ROUTING_BINDING,
+    }),
+  ]),
+});
+
+const PROJECT_ROUTING_BIND_RESULT = Object.freeze({
+  schemaVersion: 1,
+  status: "bound",
+  binding: PROJECT_ROUTING_BINDING,
+});
+
 function request(method: string, params: unknown = {}): RpcRequest {
   return {
     kind: "request",
@@ -88,6 +113,8 @@ function context(
     readModelCatalogPage,
     readProjectCatalogPage: () => PROJECT_CATALOG_PAGE,
     registerProject: () => PROJECT_REGISTRATION,
+    readProjectRoutingBindingStatuses: () => PROJECT_ROUTING_BINDING_STATUSES,
+    bindProjectDefaultRouting: () => PROJECT_ROUTING_BIND_RESULT,
     readRoutingConfiguration: () => ROUTING_CONFIGURATION,
     setRoutingConfiguration: () => ROUTING_CONFIGURATION,
   };
@@ -382,5 +409,125 @@ describe("RPC dispatcher Project registry", () => {
     }
 
     expect(registerProject).not.toHaveBeenCalled();
+  });
+});
+
+describe("RPC dispatcher Project routing binding", () => {
+  const statusParams = { projectIds: [PROJECT.projectId] };
+  const bindParams = {
+    commandId: "00000000-0000-4000-8000-000000000862",
+    projectId: PROJECT.projectId,
+    expectedBindingVersion: 0,
+    previousProfileId: null,
+    expectedProfileVersion: 1,
+    expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000851",
+  };
+
+  it("passes validated status and binding inputs to their providers", () => {
+    const readProjectRoutingBindingStatuses = vi.fn(() => PROJECT_ROUTING_BINDING_STATUSES);
+    const bindProjectDefaultRouting = vi.fn(() => PROJECT_ROUTING_BIND_RESULT);
+    const base = context(() => ACCOUNT_STATUS);
+
+    expect(
+      dispatchRpcRequest(request("project.routing_binding.status_batch", statusParams), {
+        ...base,
+        readProjectRoutingBindingStatuses,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: PROJECT_ROUTING_BINDING_STATUSES });
+    expect(readProjectRoutingBindingStatuses).toHaveBeenCalledWith(statusParams);
+
+    expect(
+      dispatchRpcRequest(request("project.routing_binding.bind_default", bindParams), {
+        ...base,
+        bindProjectDefaultRouting,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: PROJECT_ROUTING_BIND_RESULT });
+    expect(bindProjectDefaultRouting).toHaveBeenCalledWith(bindParams);
+  });
+
+  it("rejects malformed parameters before consulting providers", () => {
+    const readProjectRoutingBindingStatuses = vi.fn(() => PROJECT_ROUTING_BINDING_STATUSES);
+    const bindProjectDefaultRouting = vi.fn(() => PROJECT_ROUTING_BIND_RESULT);
+    const base = context(() => ACCOUNT_STATUS);
+
+    expect(
+      dispatchRpcRequest(
+        request("project.routing_binding.status_batch", {
+          projectIds: [PROJECT.projectId, PROJECT.projectId],
+        }),
+        { ...base, readProjectRoutingBindingStatuses },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(readProjectRoutingBindingStatuses).not.toHaveBeenCalled();
+
+    expect(
+      dispatchRpcRequest(
+        request("project.routing_binding.bind_default", {
+          ...bindParams,
+          previousProfileId: PROJECT_ROUTING_BINDING.profileId,
+        }),
+        { ...base, bindProjectDefaultRouting },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(bindProjectDefaultRouting).not.toHaveBeenCalled();
+  });
+
+  it("validates provider results and maps failures without leaking details", () => {
+    const base = context(() => ACCOUNT_STATUS);
+    const statusConflict = dispatchRpcRequest(
+      request("project.routing_binding.status_batch", statusParams),
+      {
+        ...base,
+        readProjectRoutingBindingStatuses: () => {
+          throw new RpcProviderError("conflict");
+        },
+      },
+    );
+    expect(statusConflict.envelope).toMatchObject({
+      kind: "error",
+      error: {
+        code: RPC_ERROR_CODES.conflict,
+        message: "The Project routing binding status changed.",
+      },
+    });
+
+    const conflict = dispatchRpcRequest(
+      request("project.routing_binding.bind_default", bindParams),
+      {
+        ...base,
+        bindProjectDefaultRouting: () => {
+          throw new RpcProviderError("conflict");
+        },
+      },
+    );
+    expect(conflict.envelope).toMatchObject({
+      kind: "error",
+      error: {
+        code: RPC_ERROR_CODES.conflict,
+        message: "The Project routing binding changed.",
+      },
+    });
+
+    for (const candidate of [
+      dispatchRpcRequest(request("project.routing_binding.status_batch", statusParams), {
+        ...base,
+        readProjectRoutingBindingStatuses: () => ({
+          ...PROJECT_ROUTING_BINDING_STATUSES,
+          private: true,
+        }),
+      }),
+      dispatchRpcRequest(request("project.routing_binding.bind_default", bindParams), {
+        ...base,
+        bindProjectDefaultRouting: () => {
+          throw new Error("private storage detail");
+        },
+      }),
+    ]) {
+      expect(candidate.envelope).toMatchObject({
+        kind: "error",
+        error: { code: RPC_ERROR_CODES.unavailable },
+      });
+      expect(JSON.stringify(candidate)).not.toContain("private");
+    }
   });
 });

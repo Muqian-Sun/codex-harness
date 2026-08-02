@@ -31,6 +31,8 @@ function createSession(options?: {
   uptimeMs?: () => number;
   readAccountStatus?: () => unknown;
   readModelCatalogPage?: (params: JsonValue) => unknown;
+  readProjectRoutingBindingStatuses?: (params: JsonValue) => unknown;
+  bindProjectDefaultRouting?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }): ConnectionSession {
@@ -45,6 +47,12 @@ function createSession(options?: {
     ...(options?.readModelCatalogPage === undefined
       ? {}
       : { readModelCatalogPage: options.readModelCatalogPage }),
+    ...(options?.readProjectRoutingBindingStatuses === undefined
+      ? {}
+      : { readProjectRoutingBindingStatuses: options.readProjectRoutingBindingStatuses }),
+    ...(options?.bindProjectDefaultRouting === undefined
+      ? {}
+      : { bindProjectDefaultRouting: options.bindProjectDefaultRouting }),
     ...(options?.readRoutingConfiguration === undefined
       ? {}
       : { readRoutingConfiguration: options.readRoutingConfiguration }),
@@ -263,6 +271,60 @@ describe("daemon connection session", () => {
       )[0],
     ).toMatchObject({ kind: "response", result: unconfigured });
     expect(setRoutingConfiguration).toHaveBeenCalledWith(params);
+  });
+
+  it("serves Project routing binding reads and writes through the authenticated session", () => {
+    const projectId = "00000000-0000-4000-8000-000000000861";
+    const profileId = "00000000-0000-4000-8000-000000000901";
+    const revisionId = "00000000-0000-4000-8000-000000000851";
+    const binding = {
+      projectId,
+      bindingVersion: 1,
+      profileId,
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: revisionId,
+    } as const;
+    const readProjectRoutingBindingStatuses = vi.fn(() => ({
+      schemaVersion: 1,
+      statuses: [{ projectId, status: "default_bound", binding }],
+    }));
+    const bindProjectDefaultRouting = vi.fn(() => ({
+      schemaVersion: 1,
+      status: "bound",
+      binding,
+    }));
+    const session = createSession({
+      readProjectRoutingBindingStatuses,
+      bindProjectDefaultRouting,
+    });
+    authenticate(session);
+
+    const statusParams = { projectIds: [projectId] };
+    expect(
+      sentValues(
+        session.receive(
+          frame(rpc("binding-get", "project.routing_binding.status_batch", statusParams)),
+        ),
+      )[0],
+    ).toMatchObject({ kind: "response", result: { statuses: [{ status: "default_bound" }] } });
+    expect(readProjectRoutingBindingStatuses).toHaveBeenCalledWith(statusParams);
+
+    const bindParams = {
+      commandId: "00000000-0000-4000-8000-000000000862",
+      projectId,
+      expectedBindingVersion: 0,
+      previousProfileId: null,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: revisionId,
+    } as const;
+    expect(
+      sentValues(
+        session.receive(
+          frame(rpc("binding-set", "project.routing_binding.bind_default", bindParams)),
+        ),
+      )[0],
+    ).toMatchObject({ kind: "response", result: { status: "bound", binding } });
+    expect(bindProjectDefaultRouting).toHaveBeenCalledWith(bindParams);
   });
 
   it("fails closed on authentication failure without echoing secrets", () => {

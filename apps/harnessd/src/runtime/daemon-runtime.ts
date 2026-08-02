@@ -25,6 +25,7 @@ import {
 import type { DaemonStateStore } from "./daemon-state-store.js";
 import type { ModelRoutingConfigurationService } from "./model-routing-configuration-service.js";
 import type { ProjectRegistryService } from "./project-registry-service.js";
+import type { ProjectRoutingBindingService } from "./project-routing-binding-service.js";
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -90,6 +91,7 @@ export class DaemonRuntime {
   readonly #stateStore: DaemonStateStore | undefined;
   readonly #routingConfigurationService: ModelRoutingConfigurationService | undefined;
   readonly #projectRegistryService: ProjectRegistryService | undefined;
+  readonly #projectRoutingBindingService: ProjectRoutingBindingService | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
@@ -119,6 +121,7 @@ export class DaemonRuntime {
       Readonly<{
         routingConfigurationService?: ModelRoutingConfigurationService;
         projectRegistryService?: ProjectRegistryService;
+        projectRoutingBindingService?: ProjectRoutingBindingService;
         stateStore?: DaemonStateStore;
         workerManager?: AppServerWorkerManager;
       }>,
@@ -132,6 +135,7 @@ export class DaemonRuntime {
     this.#stateStore = config.stateStore;
     this.#routingConfigurationService = config.routingConfigurationService;
     this.#projectRegistryService = config.projectRegistryService;
+    this.#projectRoutingBindingService = config.projectRoutingBindingService;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
@@ -191,6 +195,12 @@ export class DaemonRuntime {
           : new (await import("./project-registry-service.js")).ProjectRegistryService(
               config.stateStore,
             );
+      const projectRoutingBindingService =
+        config.stateStore === undefined
+          ? undefined
+          : new (await import("./project-routing-binding-service.js")).ProjectRoutingBindingService(
+              config.stateStore,
+            );
       runtime = new DaemonRuntime(endpoint, {
         startupCapability: config.startupCapability,
         serverVersion: config.serverVersion,
@@ -200,6 +210,7 @@ export class DaemonRuntime {
         ...(config.stateStore === undefined ? {} : { stateStore: config.stateStore }),
         ...(routingConfigurationService === undefined ? {} : { routingConfigurationService }),
         ...(projectRegistryService === undefined ? {} : { projectRegistryService }),
+        ...(projectRoutingBindingService === undefined ? {} : { projectRoutingBindingService }),
       });
     } catch {
       await Promise.all([
@@ -308,6 +319,9 @@ export class DaemonRuntime {
       readModelCatalogPage: (params) => this.#readCurrentModelCatalogPage(params),
       readProjectCatalogPage: (params) => this.#readProjectCatalogPage(params),
       registerProject: (params) => this.#registerProject(params),
+      readProjectRoutingBindingStatuses: (params) =>
+        this.#readProjectRoutingBindingStatuses(params),
+      bindProjectDefaultRouting: (params) => this.#bindProjectDefaultRouting(params),
       readRoutingConfiguration: () => this.#readRoutingConfiguration(),
       setRoutingConfiguration: (params) => this.#setRoutingConfiguration(params),
     });
@@ -441,6 +455,34 @@ export class DaemonRuntime {
       return service.register(params);
     } catch (error: unknown) {
       throw new RpcProviderError(isProjectRegistryConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
+  #readProjectRoutingBindingStatuses(params: unknown): unknown {
+    const service = this.#projectRoutingBindingService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.readStatuses(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(
+        isProjectRoutingBindingConflict(error) ? "conflict" : "unavailable",
+      );
+    }
+  }
+
+  #bindProjectDefaultRouting(params: unknown): unknown {
+    const service = this.#projectRoutingBindingService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.bindDefault(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(
+        isProjectRoutingBindingConflict(error) ? "conflict" : "unavailable",
+      );
     }
   }
 
@@ -604,6 +646,15 @@ function isProjectRegistryConflict(error: unknown): boolean {
   return (
     error instanceof Error &&
     error.name === "ProjectRegistryServiceError" &&
+    "code" in error &&
+    error.code === "conflict"
+  );
+}
+
+function isProjectRoutingBindingConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "ProjectRoutingBindingServiceError" &&
     "code" in error &&
     error.code === "conflict"
   );

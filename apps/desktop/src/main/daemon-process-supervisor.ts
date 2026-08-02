@@ -20,6 +20,10 @@ import {
   type HarnessProjectCatalogPageResult,
   type HarnessProjectRegisterParams,
   type HarnessProjectRegisterResult,
+  type HarnessProjectRoutingBindingBindDefaultParams,
+  type HarnessProjectRoutingBindingBindDefaultResult,
+  type HarnessProjectRoutingBindingStatusBatchParams,
+  type HarnessProjectRoutingBindingStatusBatchResult,
   type HarnessRoutingConfigurationResult,
   type HarnessRoutingConfigurationSetParams,
   type HarnessRpcClientConfig,
@@ -481,6 +485,18 @@ export class DaemonProcessSupervisor {
     params: HarnessProjectRegisterParams,
   ): Promise<HarnessProjectRegisterResult> {
     return await this.client.registerProject(params);
+  }
+
+  async readProjectRoutingBindingStatuses(
+    params: HarnessProjectRoutingBindingStatusBatchParams,
+  ): Promise<HarnessProjectRoutingBindingStatusBatchResult> {
+    return await this.client.projectRoutingBindingStatuses(params);
+  }
+
+  async bindProjectDefaultRouting(
+    params: HarnessProjectRoutingBindingBindDefaultParams,
+  ): Promise<HarnessProjectRoutingBindingBindDefaultResult> {
+    return await this.client.bindProjectDefaultRouting(params);
   }
 
   async setRoutingConfiguration(

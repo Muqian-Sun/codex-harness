@@ -52,6 +52,7 @@ const CONFIGURED_ROUTING = Object.freeze({
 });
 
 const EMPTY_PROJECTS = Object.freeze({ projects: Object.freeze([]), hasMore: false });
+const EMPTY_PROJECT_ROUTING_BINDINGS = Object.freeze({ bindings: Object.freeze([]) });
 const PROJECTS = Object.freeze({
   projects: Object.freeze([
     Object.freeze({
@@ -66,6 +67,15 @@ const PROJECTS = Object.freeze({
     }),
   ]),
   hasMore: false,
+});
+const PROJECT_ROUTING_BINDINGS = Object.freeze({
+  bindings: Object.freeze([
+    Object.freeze({
+      projectId: PROJECTS.projects[0]!.projectId,
+      status: "unbound" as const,
+      bindingVersion: null,
+    }),
+  ]),
 });
 
 describe("desktop bootstrap screen", () => {
@@ -118,6 +128,7 @@ describe("desktop bootstrap screen", () => {
             catalog: CATALOG,
             routing: UNCONFIGURED_ROUTING,
             projects: EMPTY_PROJECTS,
+            projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
           }}
         />,
       );
@@ -152,6 +163,7 @@ describe("desktop bootstrap screen", () => {
           catalog: { ...CATALOG, totalVisibleModels: 5, hasMore: true },
           routing: CONFIGURED_ROUTING,
           projects: PROJECTS,
+          projectRoutingBindings: PROJECT_ROUTING_BINDINGS,
         }}
       />,
     );
@@ -178,6 +190,10 @@ describe("desktop bootstrap screen", () => {
     expect(markup).toContain("workspace&lt;script&gt;");
     expect(markup).not.toContain("workspace<script>");
     expect(markup).toContain("添加工作区");
+    expect(markup).toContain('data-project-routing="unbound"');
+    expect(markup).toContain('data-project-routing-status="unbound"');
+    expect(markup).toContain("ROUTING UNBOUND");
+    expect(markup).toContain("绑定默认路由");
   });
 
   it("renders a stable empty observation when Codex reports no visible model", () => {
@@ -189,6 +205,7 @@ describe("desktop bootstrap screen", () => {
           catalog: { provider: "openai", totalVisibleModels: 0, models: [], hasMore: false },
           routing: UNCONFIGURED_ROUTING,
           projects: EMPTY_PROJECTS,
+          projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
         }}
       />,
     );
@@ -200,6 +217,38 @@ describe("desktop bootstrap screen", () => {
     expect(markup).toContain("disabled");
     expect(markup).toContain("尚未注册 Project");
   });
+
+  it.each([
+    ["default_bound", 2, "DEFAULT ROUTING", "已绑定默认路由", true],
+    ["other_profile_bound", 3, "OTHER PROFILE", "切换到默认路由", false],
+  ] as const)(
+    "renders the %s Project routing state without exposing profile identity",
+    (status, bindingVersion, badge, action, disabled) => {
+      const markup = renderToStaticMarkup(
+        <BootstrapScreen
+          state={{
+            phase: "ready",
+            account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
+            catalog: CATALOG,
+            routing: CONFIGURED_ROUTING,
+            projects: PROJECTS,
+            projectRoutingBindings: {
+              bindings: [{ projectId: PROJECTS.projects[0]!.projectId, status, bindingVersion }],
+            },
+          }}
+        />,
+      );
+
+      expect(markup).toContain(`data-project-routing="${status}"`);
+      expect(markup).toContain(badge);
+      expect(markup).toContain(action);
+      expect(markup).toContain(`策略引用 · V${bindingVersion}`);
+      if (disabled) {
+        expect(markup).toMatch(/data-project-routing-bind="[^"]+" disabled=""/u);
+      }
+      expect(markup).not.toContain("00000000-0000-4000-8000-000000000901");
+    },
+  );
 
   it("renders only the stable failure code", () => {
     const markup = renderToStaticMarkup(

@@ -19,8 +19,7 @@ import {
 import type { ModelCatalogSnapshot } from "../domain/model-catalog.js";
 import type { AppServerWorkerManager } from "./app-server-worker-manager.js";
 import type { DaemonStateStore } from "./daemon-state-store.js";
-
-export const DESKTOP_DEFAULT_ROUTING_PROFILE_ID = "00000000-0000-4000-8000-000000000901";
+import { DESKTOP_DEFAULT_ROUTING_PROFILE_ID } from "./desktop-default-routing-profile.js";
 
 export type ModelRoutingConfigurationServiceErrorCode = "conflict" | "unavailable";
 
