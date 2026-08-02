@@ -19,6 +19,8 @@ import { desktopBootstrapMetadata } from "../main/index.js";
 import {
   BootstrapStateStore,
   DESKTOP_ACCOUNT_PLAN_TYPES,
+  decodeDesktopRoutingConfigurationMutationResult,
+  decodeDesktopRoutingConfigurationUpdate,
   failedBootstrapState,
   type DesktopBootstrapState,
 } from "../shared/bootstrap-state.js";
@@ -37,9 +39,11 @@ import {
 
 const GET_BOOTSTRAP_STATE_CHANNEL = "desktop.bootstrap.get";
 const BOOTSTRAP_STATE_CHANGED_CHANNEL = "desktop.bootstrap.changed";
+const SET_ROUTING_CONFIGURATION_CHANNEL = "desktop.routing.set";
 const DEVELOPMENT_CODEX_ENVIRONMENT = "CODEX_HARNESS_CODEX_EXECUTABLE";
 const DEVELOPMENT_SMOKE_EXPECTED_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_EXPECTED";
 const DEVELOPMENT_SMOKE_USER_DATA_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_USER_DATA";
+const DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_ROUTING";
 const preloadPath = fileURLToPath(new URL("../preload/index.cjs", import.meta.url));
 const rendererRoot = fileURLToPath(new URL("../renderer", import.meta.url));
 const developmentDaemonEntry = fileURLToPath(
@@ -148,6 +152,23 @@ async function runDesktopApplication(): Promise<void> {
     },
   );
 
+  ipcMain.handle(
+    SET_ROUTING_CONFIGURATION_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      if (args.length !== 1 || !isManagedRenderer(event, windows)) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      const update = decodeDesktopRoutingConfigurationUpdate(args[0]);
+      if (update === undefined) {
+        throw new Error("The desktop routing update is invalid.");
+      }
+      const result = decodeDesktopRoutingConfigurationMutationResult(
+        await controller.setRoutingConfiguration(update),
+      );
+      return result ?? Object.freeze({ status: "unavailable" as const });
+    },
+  );
+
   const createWindow = (): BrowserWindow => {
     const window = new BrowserWindow(createSecureWindowOptions(preloadPath));
     windows.add(window);
@@ -203,9 +224,16 @@ async function runDesktopApplication(): Promise<void> {
   if (!app.isPackaged) {
     const expected = process.env[DEVELOPMENT_SMOKE_EXPECTED_ENVIRONMENT];
     if (expected === "ready" || expected === "failed") {
-      installSmokeObservation(mainWindow, stateStore, expected, () => {
-        smokeExitOverride = 1;
-      });
+      const routingMode = process.env[DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT];
+      installSmokeObservation(
+        mainWindow,
+        stateStore,
+        expected,
+        () => {
+          smokeExitOverride = 1;
+        },
+        routingMode === "configure" || routingMode === "recover" ? routingMode : undefined,
+      );
     }
   }
 
@@ -248,6 +276,7 @@ function installSmokeObservation(
   stateStore: BootstrapStateStore,
   expected: "ready" | "failed",
   markFailure: () => void,
+  routingMode: "configure" | "recover" | undefined,
 ): void {
   let finished = false;
   const timeout = setTimeout(() => {
@@ -266,6 +295,27 @@ function installSmokeObservation(
       try {
         const rendered = (await window.webContents.executeJavaScript(
           `(() => {
+            const routingMode = ${JSON.stringify(routingMode)};
+            const matrix = document.querySelector("[data-routing-configured]");
+            if (routingMode === "configure" && matrix?.dataset.routingConfigured === "false" && !window.__codexHarnessRoutingSmokeStarted) {
+              window.__codexHarnessRoutingSmokeStarted = true;
+              const values = {
+                fast: { model: "smoke-a", reasoningEffort: "low" },
+                standard: { model: "smoke-b", reasoningEffort: "medium" },
+                deep: { model: "smoke-b", reasoningEffort: "medium" }
+              };
+              for (const [tier, target] of Object.entries(values)) {
+                for (const [field, value] of Object.entries(target)) {
+                  const input = document.querySelector('[data-routing-tier="' + tier + '"][data-routing-field="' + field + '"]');
+                  if (input instanceof HTMLInputElement) {
+                    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+                    setter?.call(input, value);
+                    input.dispatchEvent(new Event("input", { bubbles: true }));
+                  }
+                }
+              }
+              setTimeout(() => document.querySelector("[data-routing-save]")?.click(), 0);
+            }
             const text = document.body?.textContent ?? "";
             return {
               phase: document.querySelector("[data-bootstrap-phase]")?.dataset.bootstrapPhase,
@@ -276,6 +326,12 @@ function installSmokeObservation(
               modelProvider: document.querySelector("[data-model-catalog-provider]")?.dataset.modelCatalogProvider,
               modelCount: document.querySelector("[data-model-catalog-count]")?.dataset.modelCatalogCount,
               modelNames: Array.from(document.querySelectorAll("[data-model-name]"), (element) => element.dataset.modelName),
+              routingConfigured: matrix?.dataset.routingConfigured,
+              routingRevision: matrix?.dataset.routingRevision,
+              routingModels: Array.from(document.querySelectorAll('[data-routing-field="model"]'), (element) => element.value),
+              routingEfforts: Array.from(document.querySelectorAll('[data-routing-field="reasoningEffort"]'), (element) => element.value),
+              routingAvailability: Array.from(document.querySelectorAll("[data-routing-availability]"), (element) => element.dataset.routingAvailability),
+              routingFeedback: document.querySelector("[data-routing-feedback]")?.textContent,
               containsSensitiveText: ["private@example.com", "must-not-survive", "snapshotId", "workerSessionId", "nextCursor", "id-smoke"].some((value) => text.includes(value))
             };
           })()`,
@@ -289,6 +345,12 @@ function installSmokeObservation(
           modelProvider?: unknown;
           modelCount?: unknown;
           modelNames?: unknown;
+          routingConfigured?: unknown;
+          routingRevision?: unknown;
+          routingModels?: unknown;
+          routingEfforts?: unknown;
+          routingAvailability?: unknown;
+          routingFeedback?: unknown;
           containsSensitiveText?: unknown;
         };
         const accountObserved =
@@ -306,16 +368,29 @@ function installSmokeObservation(
             rendered.modelCount,
             rendered.modelNames,
           );
+        const routingObserved =
+          expected === "ready" &&
+          (routingMode === undefined ||
+            (rendered.routingConfigured === "true" &&
+              rendered.routingRevision === "1" &&
+              Array.isArray(rendered.routingModels) &&
+              rendered.routingModels.join(",") === "smoke-a,smoke-b,smoke-b" &&
+              Array.isArray(rendered.routingEfforts) &&
+              rendered.routingEfforts.join(",") === "low,medium,medium" &&
+              Array.isArray(rendered.routingAvailability) &&
+              rendered.routingAvailability.every((status) => status === "observed_available") &&
+              (routingMode !== "configure" ||
+                rendered.routingFeedback === "配置已持久化；实际执行仍未开放。")));
         if (
           rendered.phase === expected &&
           (expected !== "failed" ||
             (typeof rendered.code === "string" && rendered.code.length > 0)) &&
-          (expected !== "ready" || (accountObserved && modelCatalogObserved))
+          (expected !== "ready" || (accountObserved && modelCatalogObserved && routingObserved))
         ) {
           finished = true;
           clearTimeout(timeout);
           process.stdout.write(
-            `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true } : {}) })}\n`,
+            `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true, routingObserved: true } : {}) })}\n`,
           );
           app.quit();
           return;

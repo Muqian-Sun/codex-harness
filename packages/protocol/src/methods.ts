@@ -191,6 +191,122 @@ export type HarnessModelCatalogPageResult = Readonly<{
   nextCursor: string | null;
 }>;
 
+export const ROUTING_AVAILABILITY_STATUSES = Object.freeze([
+  "model_unavailable",
+  "observed_available",
+  "provider_unobserved",
+  "reasoning_effort_unsupported",
+] as const);
+
+const RoutingTierTargetSchema = z
+  .object({
+    provider: routingIdentifier(MAX_PROVIDER_CHARACTERS),
+    model: routingIdentifier(MAX_MODEL_CHARACTERS),
+    reasoningEffort: routingIdentifier(MAX_REASONING_EFFORT_CHARACTERS),
+  })
+  .strict();
+
+const RoutingTierTargetsSchema = z
+  .object({
+    fast: RoutingTierTargetSchema,
+    standard: RoutingTierTargetSchema,
+    deep: RoutingTierTargetSchema,
+  })
+  .strict();
+
+const RoutingAvailabilitySchema = z
+  .object({
+    fast: z.enum(ROUTING_AVAILABILITY_STATUSES),
+    standard: z.enum(ROUTING_AVAILABILITY_STATUSES),
+    deep: z.enum(ROUTING_AVAILABILITY_STATUSES),
+  })
+  .strict();
+
+export const RoutingConfigurationGetParamsSchema = z.object({}).strict();
+
+export const RoutingConfigurationSetParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    expectedProfileVersion: NonNegativeSafeIntegerSchema,
+    previousConfigurationRevisionId: z.string().regex(UUID_PATTERN).nullable(),
+    tiers: RoutingTierTargetsSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.expectedProfileVersion === 0) !== (value.previousConfigurationRevisionId === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["previousConfigurationRevisionId"],
+        message: "The previous revision must match the expected profile version",
+      });
+    }
+    if (value.commandId === value.previousConfigurationRevisionId) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "A command cannot reuse the previous revision identifier",
+      });
+    }
+  });
+
+export const RoutingConfigurationResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    configured: z.boolean(),
+    profileVersion: NonNegativeSafeIntegerSchema,
+    configurationRevisionId: z.string().regex(UUID_PATTERN).nullable(),
+    tiers: RoutingTierTargetsSchema.nullable(),
+    availability: RoutingAvailabilitySchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const configuredShape =
+      value.profileVersion >= 1 &&
+      value.configurationRevisionId !== null &&
+      value.tiers !== null &&
+      value.availability !== null;
+    const unconfiguredShape =
+      value.profileVersion === 0 &&
+      value.configurationRevisionId === null &&
+      value.tiers === null &&
+      value.availability === null;
+    if ((value.configured && !configuredShape) || (!value.configured && !unconfiguredShape)) {
+      context.addIssue({
+        code: "custom",
+        path: ["configured"],
+        message: "Configured routing state fields are inconsistent",
+      });
+    }
+  });
+
+export type HarnessRoutingAvailabilityStatus = (typeof ROUTING_AVAILABILITY_STATUSES)[number];
+export type HarnessRoutingTierTarget = Readonly<{
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+}>;
+export type HarnessRoutingTierTargets = Readonly<{
+  fast: HarnessRoutingTierTarget;
+  standard: HarnessRoutingTierTarget;
+  deep: HarnessRoutingTierTarget;
+}>;
+export type HarnessRoutingConfigurationSetParams = Readonly<{
+  commandId: string;
+  expectedProfileVersion: number;
+  previousConfigurationRevisionId: string | null;
+  tiers: HarnessRoutingTierTargets;
+}>;
+export type HarnessRoutingConfigurationResult = Readonly<{
+  schemaVersion: 1;
+  configured: boolean;
+  profileVersion: number;
+  configurationRevisionId: string | null;
+  tiers: HarnessRoutingTierTargets | null;
+  availability: Readonly<
+    Record<"fast" | "standard" | "deep", HarnessRoutingAvailabilityStatus>
+  > | null;
+}>;
+
 export const EVENT_CONTRACTS = Object.freeze({
   "account.status_changed": AccountStatusResultSchema,
 });
@@ -206,6 +322,14 @@ export const METHOD_CONTRACTS = Object.freeze({
     params: ModelCatalogPageParamsSchema,
     result: ModelCatalogPageResultSchema,
   }),
+  "routing.configuration.get": Object.freeze({
+    params: RoutingConfigurationGetParamsSchema,
+    result: RoutingConfigurationResultSchema,
+  }),
+  "routing.configuration.set": Object.freeze({
+    params: RoutingConfigurationSetParamsSchema,
+    result: RoutingConfigurationResultSchema,
+  }),
   "system.health": Object.freeze({
     params: SystemHealthParamsSchema,
     result: SystemHealthResultSchema,
@@ -217,6 +341,27 @@ export const METHOD_CONTRACTS = Object.freeze({
 });
 
 export type RpcMethodName = keyof typeof METHOD_CONTRACTS;
+
+function routingIdentifier(maxCharacters: number): z.ZodString {
+  return z
+    .string()
+    .min(1)
+    .max(maxCharacters)
+    .refine(
+      (value) => value.trim() === value && !containsControlCharacter(value),
+      "Routing identifiers cannot contain surrounding whitespace or control characters",
+    );
+}
+
+function containsControlCharacter(input: string): boolean {
+  for (const character of input) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function hasMethod(method: string): method is RpcMethodName {
   return Object.prototype.hasOwnProperty.call(METHOD_CONTRACTS, method);

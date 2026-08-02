@@ -43,6 +43,8 @@ export type ConnectionSessionConfig = Readonly<{
   uptimeMs?: () => number;
   readAccountStatus?: () => unknown;
   readModelCatalogPage?: (params: JsonValue) => unknown;
+  readRoutingConfiguration?: () => unknown;
+  setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
 
 const encoder = new TextEncoder();
@@ -112,6 +114,8 @@ export class ConnectionSession {
   readonly #uptimeMs: () => number;
   readonly #readAccountStatus: () => unknown;
   readonly #readModelCatalogPage: (params: JsonValue) => unknown;
+  readonly #readRoutingConfiguration: () => unknown;
+  readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
   #streamId: string | undefined;
   #nextEventSequence: number | undefined;
@@ -132,12 +136,22 @@ export class ConnectionSession {
     ) {
       throw new Error("Invalid connection session configuration.");
     }
+    if (
+      (config.readRoutingConfiguration !== undefined &&
+        typeof config.readRoutingConfiguration !== "function") ||
+      (config.setRoutingConfiguration !== undefined &&
+        typeof config.setRoutingConfiguration !== "function")
+    ) {
+      throw new Error("Invalid connection session configuration.");
+    }
     this.#startupCapability = config.startupCapability;
     this.#serverVersion = config.serverVersion;
     this.#streamIdFactory = config.streamIdFactory ?? generateStreamId;
     this.#uptimeMs = config.uptimeMs ?? (() => process.uptime() * 1_000);
     this.#readAccountStatus = config.readAccountStatus ?? (() => null);
     this.#readModelCatalogPage = config.readModelCatalogPage ?? (() => null);
+    this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
+    this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
 
   get state(): ConnectionSessionState {
@@ -307,6 +321,8 @@ export class ConnectionSession {
       closing: this.#state === "closing",
       readAccountStatus: this.#readAccountStatus,
       readModelCatalogPage: this.#readModelCatalogPage,
+      readRoutingConfiguration: this.#readRoutingConfiguration,
+      setRoutingConfiguration: this.#setRoutingConfiguration,
     });
     const actions: ConnectionSessionAction[] = [send(dispatched.envelope)];
     if (dispatched.shutdownRequested && this.#state !== "closing") {

@@ -1,8 +1,16 @@
+import { useState } from "react";
+
 import type {
   DesktopAccountPlanType,
   DesktopAccountStatus,
   DesktopBootstrapState,
   DesktopModelCatalogSummary,
+  DesktopRoutingAvailabilityStatus,
+  DesktopRoutingConfiguration,
+  DesktopRoutingConfigurationMutationResult,
+  DesktopRoutingConfigurationUpdate,
+  DesktopRoutingTier,
+  DesktopRoutingTierTargets,
 } from "../shared/bootstrap-state.js";
 
 const credentialLabels = Object.freeze({
@@ -32,6 +40,22 @@ const modalityLabels = Object.freeze({
   image: "Image",
   text: "Text",
 });
+
+const routingTierPresentation: Readonly<
+  Record<DesktopRoutingTier, Readonly<{ index: string; title: string; summary: string }>>
+> = Object.freeze({
+  fast: Object.freeze({ index: "A", title: "FAST", summary: "低成本 · 简单任务" }),
+  standard: Object.freeze({ index: "B", title: "STANDARD", summary: "代码编写 · 常规任务" }),
+  deep: Object.freeze({ index: "C", title: "DEEP", summary: "架构决策 · 系统性问题" }),
+});
+
+const availabilityLabels: Readonly<Record<DesktopRoutingAvailabilityStatus, string>> =
+  Object.freeze({
+    observed_available: "当前可用",
+    provider_unobserved: "Provider 未观察",
+    model_unavailable: "模型不可用",
+    reasoning_effort_unsupported: "推理强度不支持",
+  });
 
 const phasePresentation = Object.freeze({
   starting: Object.freeze({
@@ -112,16 +136,257 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
           <BoundaryCard />
         )}
 
+        {state.phase === "ready" ? (
+          <RoutingConfigurationPanel routing={state.routing} catalog={state.catalog} />
+        ) : null}
+
         {state.phase === "ready" ? <ModelCatalogSummary catalog={state.catalog} /> : null}
       </section>
 
       <footer className="footer-note">
-        <span>模型目录仅供观察；配置、任务、TODO / DAG 与智能路由仍由后续安全门禁控制。</span>
+        <span>路由配置可持久化；任务、TODO / DAG、实际模型选择与执行仍由后续安全门禁控制。</span>
         <span className="footer-rule" aria-hidden="true" />
         <span>LOCAL ONLY</span>
       </footer>
     </main>
   );
+}
+
+type RoutingDraft = Readonly<
+  Record<DesktopRoutingTier, Readonly<{ model: string; reasoningEffort: string }>>
+>;
+
+function RoutingConfigurationPanel({
+  routing,
+  catalog,
+}: Readonly<{
+  routing: DesktopRoutingConfiguration;
+  catalog: DesktopModelCatalogSummary;
+}>) {
+  const [draft, setDraft] = useState<RoutingDraft>(() => initialRoutingDraft(routing));
+  const [mutationState, setMutationState] = useState<
+    "idle" | "saving" | "saved" | "conflict" | "unavailable"
+  >("idle");
+  const complete = (Object.keys(routingTierPresentation) as DesktopRoutingTier[]).every(
+    (tier) => draft[tier].model.length > 0 && draft[tier].reasoningEffort.length > 0,
+  );
+
+  const save = async (): Promise<void> => {
+    if (!complete || mutationState === "saving") {
+      return;
+    }
+    setMutationState("saving");
+    try {
+      const result = await desktopRoutingApi().setRoutingConfiguration({
+        expectedProfileVersion: routing.profileVersion,
+        previousConfigurationRevisionId: routing.configurationRevisionId,
+        tiers: buildRoutingTargets(catalog.provider, draft),
+      });
+      if (result.status !== "unavailable") {
+        setDraft(initialRoutingDraft(result.routing));
+      }
+      setMutationState(result.status);
+    } catch {
+      setMutationState("unavailable");
+    }
+  };
+
+  return (
+    <section
+      className="routing-matrix"
+      aria-label="三级模型路由配置"
+      data-routing-configured={String(routing.configured)}
+      data-routing-revision={String(routing.profileVersion)}
+    >
+      <header className="routing-header">
+        <div>
+          <p className="card-index">03 / ROUTING MATRIX</p>
+          <h2>三级模型控制台</h2>
+          <p>模型与推理强度由用户明确配置；Harness 只保存精确映射，不根据名称猜测能力。</p>
+        </div>
+        <div className="routing-meta">
+          <span>{catalog.provider}</span>
+          <strong>V{routing.profileVersion.toString().padStart(2, "0")}</strong>
+          <small>{routing.configured ? "PERSISTED" : "CONFIGURATION REQUIRED"}</small>
+        </div>
+      </header>
+
+      <div className="routing-lanes">
+        {(Object.keys(routingTierPresentation) as DesktopRoutingTier[]).map((tier) => {
+          const lane = routingTierPresentation[tier];
+          const model = catalog.models.find((entry) => entry.model === draft[tier].model);
+          const efforts = model?.supportedReasoningEfforts ?? uniqueCatalogEfforts(catalog);
+          const availability = routing.availability?.[tier];
+          return (
+            <fieldset className={`routing-lane tier-${tier}`} key={tier}>
+              <legend>
+                <span>{lane.index}</span>
+                <strong>{lane.title}</strong>
+                <small>{lane.summary}</small>
+              </legend>
+              <label>
+                <span>PROVIDER</span>
+                <output>{catalog.provider}</output>
+              </label>
+              <label>
+                <span>MODEL</span>
+                <input
+                  data-routing-tier={tier}
+                  data-routing-field="model"
+                  value={draft[tier].model}
+                  list="routing-model-options"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="输入精确模型名称"
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      updateRoutingDraft(
+                        current,
+                        tier,
+                        "model",
+                        readInputValue(event.currentTarget),
+                      ),
+                    )
+                  }
+                />
+              </label>
+              <label>
+                <span>REASONING EFFORT</span>
+                <input
+                  data-routing-tier={tier}
+                  data-routing-field="reasoningEffort"
+                  value={draft[tier].reasoningEffort}
+                  list={`routing-efforts-${tier}`}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="输入精确推理强度"
+                  onChange={(event) =>
+                    setDraft((current) =>
+                      updateRoutingDraft(
+                        current,
+                        tier,
+                        "reasoningEffort",
+                        readInputValue(event.currentTarget),
+                      ),
+                    )
+                  }
+                />
+                <datalist id={`routing-efforts-${tier}`}>
+                  {efforts.map((effort) => (
+                    <option key={effort} value={effort} />
+                  ))}
+                </datalist>
+              </label>
+              <p
+                className={`lane-availability availability-${availability ?? "unconfigured"}`}
+                data-routing-availability={availability ?? "unconfigured"}
+              >
+                <span aria-hidden="true" />
+                {availability === undefined ? "尚未校验" : availabilityLabels[availability]}
+              </p>
+            </fieldset>
+          );
+        })}
+      </div>
+
+      <datalist id="routing-model-options">
+        {catalog.models.map((model) => (
+          <option key={model.model} value={model.model} />
+        ))}
+      </datalist>
+
+      <footer className="routing-actions">
+        <div aria-live="polite">
+          <strong>EXECUTION LOCKED</strong>
+          <span data-routing-feedback>{routingFeedback(mutationState)}</span>
+        </div>
+        <button
+          type="button"
+          data-routing-save
+          disabled={!complete || mutationState === "saving"}
+          onClick={save}
+        >
+          {mutationState === "saving" ? "正在校验并保存" : "保存路由配置"}
+        </button>
+      </footer>
+    </section>
+  );
+}
+
+function initialRoutingDraft(routing: DesktopRoutingConfiguration): RoutingDraft {
+  return Object.freeze({
+    fast: Object.freeze({
+      model: routing.tiers?.fast.model ?? "",
+      reasoningEffort: routing.tiers?.fast.reasoningEffort ?? "",
+    }),
+    standard: Object.freeze({
+      model: routing.tiers?.standard.model ?? "",
+      reasoningEffort: routing.tiers?.standard.reasoningEffort ?? "",
+    }),
+    deep: Object.freeze({
+      model: routing.tiers?.deep.model ?? "",
+      reasoningEffort: routing.tiers?.deep.reasoningEffort ?? "",
+    }),
+  });
+}
+
+function updateRoutingDraft(
+  current: RoutingDraft,
+  tier: DesktopRoutingTier,
+  field: "model" | "reasoningEffort",
+  value: string,
+): RoutingDraft {
+  return Object.freeze({
+    ...current,
+    [tier]: Object.freeze({ ...current[tier], [field]: value }),
+  });
+}
+
+function buildRoutingTargets(provider: string, draft: RoutingDraft): DesktopRoutingTierTargets {
+  return Object.freeze({
+    fast: Object.freeze({ provider, ...draft.fast }),
+    standard: Object.freeze({ provider, ...draft.standard }),
+    deep: Object.freeze({ provider, ...draft.deep }),
+  });
+}
+
+function uniqueCatalogEfforts(catalog: DesktopModelCatalogSummary): readonly string[] {
+  return [...new Set(catalog.models.flatMap((model) => model.supportedReasoningEfforts))].sort();
+}
+
+function routingFeedback(state: "idle" | "saving" | "saved" | "conflict" | "unavailable"): string {
+  switch (state) {
+    case "idle":
+      return "保存只更新配置，不会启动任务或模型调用。";
+    case "saving":
+      return "正在用当前 Codex 模型目录校验三个精确目标。";
+    case "saved":
+      return "配置已持久化；实际执行仍未开放。";
+    case "conflict":
+      return "配置已被其他更新改变，已加载最新版本，请重新确认。";
+    case "unavailable":
+      return "当前无法保存；未改变已有配置，请稍后重试。";
+  }
+}
+
+function desktopRoutingApi(): Readonly<{
+  setRoutingConfiguration(
+    update: DesktopRoutingConfigurationUpdate,
+  ): Promise<DesktopRoutingConfigurationMutationResult>;
+}> {
+  return (
+    globalThis as unknown as {
+      codexHarness: Readonly<{
+        setRoutingConfiguration(
+          update: DesktopRoutingConfigurationUpdate,
+        ): Promise<DesktopRoutingConfigurationMutationResult>;
+      }>;
+    }
+  ).codexHarness;
+}
+
+function readInputValue(input: unknown): string {
+  return (input as { value: string }).value;
 }
 
 function ModelCatalogSummary({ catalog }: Readonly<{ catalog: DesktopModelCatalogSummary }>) {
@@ -135,7 +400,7 @@ function ModelCatalogSummary({ catalog }: Readonly<{ catalog: DesktopModelCatalo
     >
       <header className="catalog-header">
         <div>
-          <p className="card-index">03 / MODEL ROSTER</p>
+          <p className="card-index">04 / MODEL ROSTER</p>
           <h2>可见模型目录</h2>
         </div>
         <div className="catalog-summary">

@@ -9,7 +9,7 @@ import {
   type JsonValue,
 } from "@codex-harness/protocol";
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ConnectionSession, type ConnectionSessionAction } from "./connection-session.js";
 
@@ -31,6 +31,8 @@ function createSession(options?: {
   uptimeMs?: () => number;
   readAccountStatus?: () => unknown;
   readModelCatalogPage?: (params: JsonValue) => unknown;
+  readRoutingConfiguration?: () => unknown;
+  setRoutingConfiguration?: (params: JsonValue) => unknown;
 }): ConnectionSession {
   return new ConnectionSession({
     startupCapability: STARTUP_CAPABILITY,
@@ -43,6 +45,12 @@ function createSession(options?: {
     ...(options?.readModelCatalogPage === undefined
       ? {}
       : { readModelCatalogPage: options.readModelCatalogPage }),
+    ...(options?.readRoutingConfiguration === undefined
+      ? {}
+      : { readRoutingConfiguration: options.readRoutingConfiguration }),
+    ...(options?.setRoutingConfiguration === undefined
+      ? {}
+      : { setRoutingConfiguration: options.setRoutingConfiguration }),
   });
 }
 
@@ -218,6 +226,43 @@ describe("daemon connection session", () => {
     });
     expect(observedParams).toEqual([params]);
     expect(session.state).toBe("authenticated");
+  });
+
+  it("serves routing reads and writes through the authenticated session", () => {
+    const unconfigured = {
+      schemaVersion: 1,
+      configured: false,
+      profileVersion: 0,
+      configurationRevisionId: null,
+      tiers: null,
+      availability: null,
+    } as const;
+    const setRoutingConfiguration = vi.fn(() => unconfigured);
+    const session = createSession({
+      readRoutingConfiguration: () => unconfigured,
+      setRoutingConfiguration,
+    });
+    authenticate(session);
+
+    expect(
+      sentValues(session.receive(frame(rpc("routing-get", "routing.configuration.get", {}))))[0],
+    ).toMatchObject({ kind: "response", result: unconfigured });
+    const params = {
+      commandId: "00000000-0000-4000-8000-000000000851",
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: {
+        fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+        standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+        deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+      },
+    } as const;
+    expect(
+      sentValues(
+        session.receive(frame(rpc("routing-set", "routing.configuration.set", params))),
+      )[0],
+    ).toMatchObject({ kind: "response", result: unconfigured });
+    expect(setRoutingConfiguration).toHaveBeenCalledWith(params);
   });
 
   it("fails closed on authentication failure without echoing secrets", () => {

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   DaemonProcessSupervisorError,
   type DaemonProcessSupervisor,
@@ -8,16 +10,24 @@ import {
 } from "../main/harness-rpc-client.js";
 import {
   failedBootstrapState,
+  decodeDesktopRoutingConfigurationUpdate,
   projectDesktopModelCatalogSummary,
+  projectDesktopRoutingConfiguration,
   readyBootstrapState,
   type BootstrapStateStore,
   type DesktopBootstrapFailureCode,
+  type DesktopRoutingConfigurationMutationResult,
 } from "../shared/bootstrap-state.js";
 import { DesktopRuntimeResourceError, DesktopRuntimeRootError } from "./runtime-resources.js";
 
 export type DesktopSupervisorHandle = Pick<
   DaemonProcessSupervisor,
-  "closed" | "readAccountStatusObservation" | "readModelCatalogPage" | "stop"
+  | "closed"
+  | "readAccountStatusObservation"
+  | "readModelCatalogPage"
+  | "readRoutingConfiguration"
+  | "setRoutingConfiguration"
+  | "stop"
 >;
 
 export type DesktopApplicationControllerConfig = Readonly<{
@@ -50,6 +60,45 @@ export class DesktopApplicationController {
     return this.#stopPromise;
   }
 
+  async setRoutingConfiguration(
+    input: unknown,
+  ): Promise<DesktopRoutingConfigurationMutationResult> {
+    const update = decodeDesktopRoutingConfigurationUpdate(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (update === undefined || state.phase !== "ready" || supervisor === undefined) {
+      return Object.freeze({ status: "unavailable" });
+    }
+    try {
+      const routing = projectDesktopRoutingConfiguration(
+        await supervisor.setRoutingConfiguration({ commandId: randomUUID(), ...update }),
+      );
+      const current = this.#stateStore.current;
+      if (current.phase !== "ready") {
+        return Object.freeze({ status: "unavailable" });
+      }
+      this.#stateStore.transition(readyBootstrapState(current.account, current.catalog, routing));
+      return Object.freeze({ status: "saved", routing });
+    } catch (error: unknown) {
+      if (!(error instanceof HarnessRpcClientError) || error.remoteCode !== "rpc.conflict") {
+        return Object.freeze({ status: "unavailable" });
+      }
+      try {
+        const routing = projectDesktopRoutingConfiguration(
+          await supervisor.readRoutingConfiguration(),
+        );
+        const current = this.#stateStore.current;
+        if (current.phase !== "ready") {
+          return Object.freeze({ status: "unavailable" });
+        }
+        this.#stateStore.transition(readyBootstrapState(current.account, current.catalog, routing));
+        return Object.freeze({ status: "conflict", routing });
+      } catch {
+        return Object.freeze({ status: "unavailable" });
+      }
+    }
+  }
+
   async #start(): Promise<void> {
     try {
       const supervisor = await this.#createSupervisor((event) =>
@@ -64,9 +113,10 @@ export class DesktopApplicationController {
       if (this.#isStopping()) {
         return;
       }
-      const [observation, catalogPage] = await Promise.all([
+      const [observation, catalogPage, routingConfiguration] = await Promise.all([
         supervisor.readAccountStatusObservation(),
         supervisor.readModelCatalogPage({ cursor: null, limit: 12 }),
+        supervisor.readRoutingConfiguration(),
       ]);
       if (this.#isStopping()) {
         return;
@@ -78,7 +128,11 @@ export class DesktopApplicationController {
           ? pending.account
           : observation.account;
       this.#stateStore.transition(
-        readyBootstrapState(accountStatus, projectDesktopModelCatalogSummary(catalogPage)),
+        readyBootstrapState(
+          accountStatus,
+          projectDesktopModelCatalogSummary(catalogPage),
+          projectDesktopRoutingConfiguration(routingConfiguration),
+        ),
       );
     } catch (error: unknown) {
       if (this.#stateStore.current.phase !== "stopping") {
@@ -123,7 +177,7 @@ export class DesktopApplicationController {
       return;
     }
     if (state.phase === "ready") {
-      this.#stateStore.transition(readyBootstrapState(event.account, state.catalog));
+      this.#stateStore.transition(readyBootstrapState(event.account, state.catalog, state.routing));
     }
   }
 }

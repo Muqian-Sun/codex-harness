@@ -23,6 +23,34 @@ const CATALOG = Object.freeze({
   hasMore: false,
 });
 
+const UNCONFIGURED_ROUTING = Object.freeze({
+  configured: false,
+  profileVersion: 0,
+  configurationRevisionId: null,
+  tiers: null,
+  availability: null,
+});
+
+const CONFIGURED_ROUTING = Object.freeze({
+  configured: true,
+  profileVersion: 1,
+  configurationRevisionId: "00000000-0000-4000-8000-000000000881",
+  tiers: Object.freeze({
+    fast: Object.freeze({ provider: "openai", model: "gpt-fast", reasoningEffort: "low" }),
+    standard: Object.freeze({
+      provider: "openai",
+      model: "gpt-standard",
+      reasoningEffort: "medium",
+    }),
+    deep: Object.freeze({ provider: "openai", model: "gpt-standard", reasoningEffort: "high" }),
+  }),
+  availability: Object.freeze({
+    fast: "observed_available" as const,
+    standard: "observed_available" as const,
+    deep: "observed_available" as const,
+  }),
+});
+
 describe("desktop bootstrap screen", () => {
   it.each([
     ["starting", "正在建立受控运行时"],
@@ -51,6 +79,7 @@ describe("desktop bootstrap screen", () => {
             phase: "ready",
             account: { status, credentialKind, planType },
             catalog: CATALOG,
+            routing: UNCONFIGURED_ROUTING,
           }}
         />,
       );
@@ -83,6 +112,7 @@ describe("desktop bootstrap screen", () => {
           phase: "ready",
           account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
           catalog: { ...CATALOG, totalVisibleModels: 5, hasMore: true },
+          routing: CONFIGURED_ROUTING,
         }}
       />,
     );
@@ -97,6 +127,12 @@ describe("desktop bootstrap screen", () => {
     expect(markup).not.toContain("nextCursor");
     expect(markup).not.toContain("snapshotId");
     expect(markup).not.toContain("workerSessionId");
+    expect(markup).toContain('data-routing-configured="true"');
+    expect(markup).toContain('data-routing-revision="1"');
+    expect(markup).toContain('data-routing-tier="fast"');
+    expect(markup).toContain('data-routing-availability="observed_available"');
+    expect(markup).toContain("保存路由配置");
+    expect(markup).toContain("EXECUTION LOCKED");
   });
 
   it("renders a stable empty observation when Codex reports no visible model", () => {
@@ -106,12 +142,16 @@ describe("desktop bootstrap screen", () => {
           phase: "ready",
           account: { status: "not_required", credentialKind: null, planType: null },
           catalog: { provider: "openai", totalVisibleModels: 0, models: [], hasMore: false },
+          routing: UNCONFIGURED_ROUTING,
         }}
       />,
     );
 
     expect(markup).toContain("当前 Codex 会话没有报告可见模型");
     expect(markup).toContain('data-model-catalog-count="0"');
+    expect(markup).toContain('data-routing-configured="false"');
+    expect(markup).toContain("尚未校验");
+    expect(markup).toContain("disabled");
   });
 
   it("renders only the stable failure code", () => {

@@ -37,6 +37,15 @@ export async function smokeDesktopApplication() {
       desktopEntry,
       codexExecutable: validCodex,
       expected: "ready",
+      routingMode: "configure",
+    });
+    await runScenario({
+      directory: join(directory, "ready"),
+      electronExecutable,
+      desktopEntry,
+      codexExecutable: validCodex,
+      expected: "ready",
+      routingMode: "recover",
     });
     await runScenario({
       directory: join(directory, "failed"),
@@ -58,6 +67,7 @@ async function runScenario({
   codexExecutable,
   expected,
   expectedCode,
+  routingMode,
 }) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const child = spawn(electronExecutable, [desktopEntry], {
@@ -66,6 +76,7 @@ async function runScenario({
       CODEX_HARNESS_CODEX_EXECUTABLE: codexExecutable,
       CODEX_HARNESS_DESKTOP_SMOKE_EXPECTED: expected,
       CODEX_HARNESS_DESKTOP_SMOKE_USER_DATA: directory,
+      ...(routingMode === undefined ? {} : { CODEX_HARNESS_DESKTOP_SMOKE_ROUTING: routingMode }),
       ELECTRON_ENABLE_SECURITY_WARNINGS: "true",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -98,7 +109,11 @@ async function runScenario({
       (expectedCode !== undefined && result.code !== expectedCode) ||
       (expected === "ready" && result.accountObserved !== true) ||
       (expected === "ready" && result.modelCatalogObserved !== true) ||
-      (expected !== "ready" && ("accountObserved" in result || "modelCatalogObserved" in result))
+      (expected === "ready" && result.routingObserved !== true) ||
+      (expected !== "ready" &&
+        ("accountObserved" in result ||
+          "modelCatalogObserved" in result ||
+          "routingObserved" in result))
     ) {
       throw new Error(`The Electron desktop ${expected} rendered state was invalid.`);
     }

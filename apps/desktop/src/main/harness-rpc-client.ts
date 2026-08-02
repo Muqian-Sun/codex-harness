@@ -20,6 +20,8 @@ import {
   type HarnessAccountStatusResult as ProtocolAccountStatusResult,
   type HarnessModelCatalogPageParams as ProtocolModelCatalogPageParams,
   type HarnessModelCatalogPageResult as ProtocolModelCatalogPageResult,
+  type HarnessRoutingConfigurationResult as ProtocolRoutingConfigurationResult,
+  type HarnessRoutingConfigurationSetParams as ProtocolRoutingConfigurationSetParams,
   type RpcEvent,
   type RpcMethodName,
 } from "@codex-harness/protocol";
@@ -96,6 +98,8 @@ export type HarnessShutdownResult = Readonly<{ accepted: true }>;
 export type HarnessAccountStatusResult = Readonly<ProtocolAccountStatusResult>;
 export type HarnessModelCatalogPageParams = Readonly<ProtocolModelCatalogPageParams>;
 export type HarnessModelCatalogPageResult = Readonly<ProtocolModelCatalogPageResult>;
+export type HarnessRoutingConfigurationResult = Readonly<ProtocolRoutingConfigurationResult>;
+export type HarnessRoutingConfigurationSetParams = Readonly<ProtocolRoutingConfigurationSetParams>;
 export type HarnessAccountStatusObservation = Readonly<{
   account: HarnessAccountStatusResult;
   observedThroughSequence: number;
@@ -284,6 +288,22 @@ export class HarnessRpcClient {
       "model.catalog_page",
       params as JsonValue,
     )) as unknown as HarnessModelCatalogPageResult;
+  }
+
+  async routingConfiguration(): Promise<HarnessRoutingConfigurationResult> {
+    return (await this.request(
+      "routing.configuration.get",
+      {},
+    )) as HarnessRoutingConfigurationResult;
+  }
+
+  async setRoutingConfiguration(
+    params: HarnessRoutingConfigurationSetParams,
+  ): Promise<HarnessRoutingConfigurationResult> {
+    return (await this.request(
+      "routing.configuration.set",
+      params as JsonValue,
+    )) as unknown as HarnessRoutingConfigurationResult;
   }
 
   async requestShutdown(reason?: string): Promise<HarnessShutdownResult> {
