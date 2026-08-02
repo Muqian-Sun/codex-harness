@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { BootstrapScreen } from "./bootstrap-screen.js";
+import { BootstrapScreen, createRoutingDraftInputUpdate } from "./bootstrap-screen.js";
 
 const CATALOG = Object.freeze({
   provider: "openai",
@@ -52,6 +52,26 @@ const CONFIGURED_ROUTING = Object.freeze({
 });
 
 describe("desktop bootstrap screen", () => {
+  it("captures routing input before React runs the state updater", () => {
+    const draft = Object.freeze({
+      fast: Object.freeze({ model: "", reasoningEffort: "" }),
+      standard: Object.freeze({ model: "", reasoningEffort: "" }),
+      deep: Object.freeze({ model: "", reasoningEffort: "" }),
+    });
+    const modelInput = { value: "gpt-fast" };
+    const effortInput = { value: "low" };
+
+    const updateModel = createRoutingDraftInputUpdate("fast", "model", modelInput);
+    const updateEffort = createRoutingDraftInputUpdate("fast", "reasoningEffort", effortInput);
+    modelInput.value = "changed-after-handler";
+    effortInput.value = "changed-after-handler";
+
+    const updated = updateEffort(updateModel(draft));
+    expect(updated.fast).toEqual({ model: "gpt-fast", reasoningEffort: "low" });
+    expect(updated.standard).toBe(draft.standard);
+    expect(updated.deep).toBe(draft.deep);
+  });
+
   it.each([
     ["starting", "正在建立受控运行时"],
     ["stopping", "正在关闭受控进程"],

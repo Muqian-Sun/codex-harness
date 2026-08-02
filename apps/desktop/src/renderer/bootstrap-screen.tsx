@@ -239,14 +239,7 @@ function RoutingConfigurationPanel({
                   spellCheck={false}
                   placeholder="输入精确模型名称"
                   onChange={(event) =>
-                    setDraft((current) =>
-                      updateRoutingDraft(
-                        current,
-                        tier,
-                        "model",
-                        readInputValue(event.currentTarget),
-                      ),
-                    )
+                    setDraft(createRoutingDraftInputUpdate(tier, "model", event.currentTarget))
                   }
                 />
               </label>
@@ -261,13 +254,8 @@ function RoutingConfigurationPanel({
                   spellCheck={false}
                   placeholder="输入精确推理强度"
                   onChange={(event) =>
-                    setDraft((current) =>
-                      updateRoutingDraft(
-                        current,
-                        tier,
-                        "reasoningEffort",
-                        readInputValue(event.currentTarget),
-                      ),
+                    setDraft(
+                      createRoutingDraftInputUpdate(tier, "reasoningEffort", event.currentTarget),
                     )
                   }
                 />
@@ -340,6 +328,15 @@ function updateRoutingDraft(
     ...current,
     [tier]: Object.freeze({ ...current[tier], [field]: value }),
   });
+}
+
+export function createRoutingDraftInputUpdate(
+  tier: DesktopRoutingTier,
+  field: "model" | "reasoningEffort",
+  input: unknown,
+): (current: RoutingDraft) => RoutingDraft {
+  const value = readInputValue(input);
+  return (current) => updateRoutingDraft(current, tier, field, value);
 }
 
 function buildRoutingTargets(provider: string, draft: RoutingDraft): DesktopRoutingTierTargets {
