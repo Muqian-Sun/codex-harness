@@ -174,7 +174,9 @@ Harness route evidence 使用 daemon authority session 内的进程品牌约束�
 
 影子 RouteDecision 由 Harness 从命令特征和当前 profile 配置重新计算，调用方不能提交最终档位、理由或模型目标。记录绑定 decision、Task/version、可选节点、profile、配置 revision fence 和发生时间，以 `taskId/decisionId` 作为只增审计投影键；决策 decoder 会重新运行固定策略并核对全部派生字段。写入前先按 decision ID 查询：已存在时只接受所有业务字段、特征、配置 fence 和 metadata 均相同的历史重试，即使 profile 后来更新也返回原决策；不存在时必须证明期望配置仍是 profile 当前 revision，且 decision 时间不早于该 revision 的生效时间，过期 fence 或不可能的时间线不得创建新决策。记录始终保持 `shadow` 与不可执行，不成为权限或调度授权。
 
-模型目录事实来自同一 Codex App Server worker 认证会话的完整 `model/list(includeHidden=true)` 分页结果，不能来自 Harness 内置的静态模型名单。目录快照绑定 daemon 分配的 snapshot ID、worker session ID、provider 和观察时间，不保存账号或凭据；第一页、游标链、末页闭合、模型与 effort 唯一性都必须验证，旧目录缺失 `inputModalities` 时按 App Server 兼容规则视为 `text` 与 `image`。只有当前 daemon 进程内经过完整分页工厂创建的冻结实例具有验证资格，序列化、克隆或进程重启不继承该资格。用户三档目标只按精确 provider、model 和 reasoning effort 检查，结果区分已观测可用、provider 未观测、model 不可用和 effort 不支持，不猜测名称、不自动回退。快照只证明该认证边界在该时间点的目录事实，固定不可授权执行；worker 断线、重启或重新认证后的失效，以及执行前的当前目录复核，由后续 worker manager 和运行时门禁负责。
+模型目录事实来自同一 Codex App Server worker 认证会话的完整 `model/list(includeHidden=true)` 分页结果，不能来自 Harness 内置的静态模型名单。目录快照绑定 daemon 分配的 snapshot ID、worker session ID、provider 和观察时间，不保存账号或凭据；第一页、游标链、末页闭合、模型与 effort 唯一性都必须验证，旧目录缺失 `inputModalities` 时按 App Server 兼容规则视为 `text` 与 `image`。只有当前 daemon 进程内经过完整分页工厂创建的冻结实例具有验证资格，序列化、克隆或进程重启不继承该资格。用户三档目标只按精确 provider、model 和 reasoning effort 检查，结果区分已观测可用、provider 未观测、model 不可用和 effort 不支持，不猜测名称、不自动回退。快照只证明该认证边界在该时间点的目录事实，固定不可授权执行。
+
+daemon 的单 worker manager 为每个实际 worker 实例分配新的 session UUID，并以固定 `cursor: null`、`includeHidden: true`、`limit: 1000` 开始模型查询，最多闭合 128 页、累计 10,000 个模型和 64 MiB 重编码响应；重复游标、畸形响应、超预算、请求失败或目录工厂失败都会关闭整个 manager。初始加载和显式刷新只有在末页 `nextCursor: null` 且既有目录工厂完成全部模型约束后，才原子安装一个新 snapshot UUID；刷新开始、刷新失败、worker 断线或关闭开始时旧快照立即失去 current 资格。current 检查同时要求 manager ready、同一进程内快照对象身份和同一 worker session，clone、序列化、进程重启或新 manager 均不能继承。manager 不保存历史目录、不持久化快照、不自动重启，也不把目录可用解释为执行授权。
 
 路由按以下顺序决策：
 
@@ -232,7 +234,9 @@ App Server 的 `thread/compact/start` 只触发 Codex 侧压缩；Harness 的持
 
 V1 初始出站白名单只包含 `model/list`、`thread/start`、`thread/resume`、`thread/fork`、`thread/read`、`thread/list`、`thread/compact/start`、`turn/start`、`turn/steer` 和 `turn/interrupt`。初始化显式声明 `experimentalApi: false` 与 `requestAttestation: false`；`thread/shellCommand`、原始命令/文件接口、配置写入和账户写入不进入该边界。App Server 单条 JSONL 消息上限独立设为 16 MiB，不复用 desktop 到 daemon 的 1 MiB RPC 上限。未知通知可以作为未解释事件保留以便前向兼容，未知 server request 只能进入“不支持”分支，不能执行或自动批准。
 
-daemon 内部的首个受控 App Server worker 在创建子进程前使用同一绝对 Codex executable 执行有界 `--version` 检查，并要求精确匹配 Schema manifest 固定的 `codex-cli 0.146.0-alpha.9.2`；通过后只以无 shell 的固定参数 `app-server --listen stdio:// --strict-config` 启动，继承 daemon 所在的 Electron kill domain。worker 分离并持续排空 stderr，但不向公开错误或事件暴露其内容；stdout 使用 16 MiB 上限、fatal UTF-8 和严格 adapter 做增量 JSONL 解析，完成一次 `initialize`/`initialized` 后才进入 ready。当前公开请求面刻意只包含只读 `model/list`，没有通用 method 入口；任意 server request、坏帧、截断、未知/重复响应、消费回调失败或请求超时都会关闭整个 worker，超时请求不自动重放。正常关闭先结束 stdin，随后只对精确 child PID 依次升级 `SIGTERM`、`SIGKILL` 并报告无法证明退出的 `containment_unknown`；由于尚未开放 turn，细粒度 worker 后代排空继续后置，外层 daemon 进程组仍是最终包含边界。该 worker 目前不接入 daemon CLI、SQLite、desktop RPC 或模型目录 freshness coordinator，在审批、工具 gate 和安全 turn coordinator 完成前不得开放 thread/turn 执行。
+daemon 内部的首个受控 App Server worker 在创建子进程前使用同一绝对 Codex executable 执行有界 `--version` 检查，并要求精确匹配 Schema manifest 固定的 `codex-cli 0.146.0-alpha.9.2`；通过后只以无 shell 的固定参数 `app-server --listen stdio:// --strict-config` 启动，继承 daemon 所在的 Electron kill domain。worker 分离并持续排空 stderr，但不向公开错误或事件暴露其内容；stdout 使用 16 MiB 上限、fatal UTF-8 和严格 adapter 做增量 JSONL 解析，完成一次 `initialize`/`initialized` 后才进入 ready。当前公开请求面刻意只包含只读 `model/list`，没有通用 method 入口；任意 server request、坏帧、截断、未知/重复响应、消费回调失败或请求超时都会关闭整个 worker，超时请求不自动重放。正常关闭先结束 stdin，随后只对精确 child PID 依次升级 `SIGTERM`、`SIGKILL` 并报告无法证明退出的 `containment_unknown`；由于尚未开放 turn，细粒度 worker 后代排空继续后置，外层 daemon 进程组仍是最终包含边界。
+
+`DaemonRuntime` 可以显式接管一个已经 ready 且持有当前目录的 worker manager。接管后，任意 daemon 排空都会同时关闭 manager，daemon 的 `closed` 只有在端点清理和 worker 关闭均结束后才完成；manager 非预期关闭会以 `worker_failure` 停止监听并排空连接，worker 无法证明包含时报告 `worker_shutdown_failed`。该绑定不隐式寻找 Codex executable，也不改变无 manager 的最小 daemon 行为；Electron main 到 daemon CLI 的 executable 配置传递仍属后续 PR。当前 manager 不接入 SQLite、desktop RPC 或路由执行，在审批、工具 gate 和安全 turn coordinator 完成前不得开放 thread/turn。
 
 ## 12. Desktop 到 Harness 协议
 
@@ -283,12 +287,12 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 运行时能力在依赖具备前保持关闭：
 
 1. 工作区、协议契约与 CI：已由 PR #1 完成。
-2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化和只读 `model/list` 已完成；daemon worker manager、认证状态、目录 freshness、thread/turn、审批和工具 gate 待后续 PR。
+2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list`、单 worker manager、完整目录分页、session freshness 和 daemon 排空绑定已完成；Electron/CLI 启动接线、认证状态、thread/turn、审批和工具 gate 待后续 PR。
 3. daemon 生命周期与本地传输。
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
-7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划、工作区分析与运行目标四个 observer、品牌证据组合 coordinator 和 RouteDecision 审计已完成；其余运行时 manifest/权限计划/工作区分析/目标 inventory 新鲜度强制、evidence-to-feature 适配、目录 freshness、daemon 路由 coordinator 和影子评估待后续 PR。
+7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、worker session 目录 freshness、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划、工作区分析与运行目标四个 observer、品牌证据组合 coordinator 和 RouteDecision 审计已完成；其余运行时 manifest/权限计划/工作区分析/目标 inventory 新鲜度强制、evidence-to-feature 适配、执行前目录复核、daemon 路由 coordinator 和影子评估待后续 PR。
 8. 串行调度。
 9. 安全 Electron 桌面壳与任务 UI。
 10. 审批、证据、运行恢复和打包门禁。

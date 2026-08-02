@@ -7,6 +7,10 @@ import {
   type ConnectionSessionAction,
 } from "../connection/connection-session.js";
 import {
+  AppServerWorkerManager,
+  type AppServerWorkerManagerCloseResult,
+} from "./app-server-worker-manager.js";
+import {
   LocalEndpointError,
   prepareUnixEndpointForClose,
   removeCreatedUnixEndpoint,
@@ -25,13 +29,19 @@ const MAX_LIFECYCLE_TIMEOUT_MS = 60_000;
 export type DaemonRuntimeState = "starting" | "listening" | "quiescing" | "closed";
 
 export type DaemonQuiesceReason =
-  "parent_eof" | "parent_watchdog_error" | "requested" | "rpc_shutdown" | "signal";
+  | "parent_eof"
+  | "parent_watchdog_error"
+  | "requested"
+  | "rpc_shutdown"
+  | "signal"
+  | "worker_failure";
 
 export type DaemonRuntimeCloseResult = Readonly<{
   reason: DaemonQuiesceReason | "server_error";
   endpointCleanup:
     "missing" | "not_applicable" | "removed" | "replacement_preserved" | "unsafe_to_remove";
-  errorCode?: "endpoint_cleanup_failed" | "server_error";
+  errorCode?:
+    "endpoint_cleanup_failed" | "server_error" | "worker_failure" | "worker_shutdown_failed";
 }>;
 
 export type DaemonRuntimeConfig = Readonly<{
@@ -41,16 +51,19 @@ export type DaemonRuntimeConfig = Readonly<{
   platform?: RuntimePlatform;
   handshakeTimeoutMs?: number;
   drainTimeoutMs?: number;
+  workerManager?: AppServerWorkerManager;
 }>;
 
 export class DaemonRuntimeStartError extends Error {
-  readonly code: "invalid_configuration" | "listen_failed";
+  readonly code: "invalid_configuration" | "listen_failed" | "worker_unavailable";
 
-  constructor(code: "invalid_configuration" | "listen_failed") {
+  constructor(code: "invalid_configuration" | "listen_failed" | "worker_unavailable") {
     super(
       code === "listen_failed"
         ? "The daemon listener failed to start."
-        : "The daemon runtime configuration is invalid.",
+        : code === "worker_unavailable"
+          ? "The daemon worker manager became unavailable during startup."
+          : "The daemon runtime configuration is invalid.",
     );
     this.name = "DaemonRuntimeStartError";
     this.code = code;
@@ -64,6 +77,7 @@ export class DaemonRuntime {
   readonly #serverVersion: string;
   readonly #handshakeTimeoutMs: number;
   readonly #drainTimeoutMs: number;
+  readonly #workerManager: AppServerWorkerManager | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
@@ -76,6 +90,8 @@ export class DaemonRuntime {
   #quiesceReason: DaemonQuiesceReason | "server_error" | undefined;
   #listenerCreated = false;
   #serverFailed = false;
+  #workerFailed = false;
+  #workerClosePromise: Promise<AppServerWorkerManagerCloseResult | null> | undefined;
   #finalized = false;
 
   private constructor(
@@ -85,19 +101,28 @@ export class DaemonRuntime {
         DaemonRuntimeConfig,
         "startupCapability" | "serverVersion" | "handshakeTimeoutMs" | "drainTimeoutMs"
       >
-    >,
+    > &
+      Readonly<{ workerManager?: AppServerWorkerManager }>,
   ) {
     this.#endpoint = endpoint;
     this.#startupCapability = config.startupCapability;
     this.#serverVersion = config.serverVersion;
     this.#handshakeTimeoutMs = config.handshakeTimeoutMs;
     this.#drainTimeoutMs = config.drainTimeoutMs;
+    this.#workerManager = config.workerManager;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
     this.closed = new Promise((resolve) => {
       this.#resolveClosed = resolve;
     });
+    const workerManager = this.#workerManager;
+    if (workerManager !== undefined) {
+      void workerManager.closed.then(
+        () => this.#handleWorkerFailure(),
+        () => this.#handleWorkerFailure(),
+      );
+    }
   }
 
   static async start(config: DaemonRuntimeConfig): Promise<DaemonRuntime> {
@@ -105,8 +130,10 @@ export class DaemonRuntime {
       !StartupCapabilitySchema.safeParse(config.startupCapability).success ||
       !ProductVersionSchema.safeParse(config.serverVersion).success ||
       !validTimeout(config.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS) ||
-      !validTimeout(config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS)
+      !validTimeout(config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS) ||
+      !validReadyWorkerManager(config.workerManager)
     ) {
+      await closeProvidedWorkerManager(config.workerManager);
       throw new DaemonRuntimeStartError("invalid_configuration");
     }
 
@@ -114,6 +141,7 @@ export class DaemonRuntime {
     try {
       endpoint = await validateLocalEndpoint(config.endpoint, config.platform);
     } catch (error: unknown) {
+      await closeProvidedWorkerManager(config.workerManager);
       if (error instanceof LocalEndpointError) {
         throw error;
       }
@@ -125,6 +153,7 @@ export class DaemonRuntime {
       serverVersion: config.serverVersion,
       handshakeTimeoutMs: config.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
       drainTimeoutMs: config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
+      ...(config.workerManager === undefined ? {} : { workerManager: config.workerManager }),
     });
     await runtime.#listen();
     return runtime;
@@ -145,6 +174,7 @@ export class DaemonRuntime {
 
     this.#state = "quiescing";
     this.#quiesceReason = reason;
+    this.#beginWorkerClose();
     void this.#closeListenerSafely();
 
     const socket = this.#activeSocket;
@@ -171,14 +201,22 @@ export class DaemonRuntime {
         this.#server.listen(this.#endpoint.path);
       });
       this.#endpointIdentity = await secureCreatedUnixEndpoint(this.#endpoint);
+      if (this.#workerManager !== undefined && this.#workerManager.state !== "ready") {
+        this.#workerFailed = true;
+        this.#quiesceReason = "worker_failure";
+        throw new DaemonRuntimeStartError("worker_unavailable");
+      }
       if (this.#serverFailed || !this.#server.listening) {
         throw new DaemonRuntimeStartError("listen_failed");
       }
     } catch (error: unknown) {
       if (this.#listenerCreated && !this.#finalized) {
-        this.#quiesceReason = "server_error";
+        this.#quiesceReason ??= "server_error";
+        this.#beginWorkerClose();
         await this.#closeListenerSafely();
         await this.closed;
+      } else {
+        await this.#closeWorkerManager();
       }
       if (error instanceof DaemonRuntimeStartError || error instanceof LocalEndpointError) {
         throw error;
@@ -282,6 +320,34 @@ export class DaemonRuntime {
     this.#quiesceReason = "server_error";
   }
 
+  #handleWorkerFailure(): void {
+    if (this.#state === "quiescing" || this.#state === "closed") {
+      return;
+    }
+    this.#workerFailed = true;
+    if (this.#state === "listening") {
+      this.requestQuiesce("worker_failure");
+    }
+  }
+
+  #beginWorkerClose(): void {
+    if (this.#workerClosePromise === undefined) {
+      this.#workerClosePromise = this.#closeWorkerManager();
+    }
+  }
+
+  async #closeWorkerManager(): Promise<AppServerWorkerManagerCloseResult | null> {
+    const workerManager = this.#workerManager;
+    if (workerManager === undefined) {
+      return null;
+    }
+    try {
+      return await workerManager.close();
+    } catch {
+      return null;
+    }
+  }
+
   async #closeListenerSafely(): Promise<void> {
     try {
       this.#endpointClosePreparation = await prepareUnixEndpointForClose(
@@ -307,7 +373,6 @@ export class DaemonRuntime {
       return;
     }
     this.#finalized = true;
-    this.#state = "closed";
     this.#clearHandshakeTimer();
     if (this.#socketCloseTimer !== undefined) {
       clearTimeout(this.#socketCloseTimer);
@@ -321,6 +386,12 @@ export class DaemonRuntime {
       this.#endpointPreparationFailed ||
       endpointCleanup === "unsafe_to_remove" ||
       endpointCleanup === "replacement_preserved";
+    this.#beginWorkerClose();
+    const workerClose = await (this.#workerClosePromise ?? Promise.resolve(null));
+    const workerShutdownFailed =
+      this.#workerManager !== undefined &&
+      (workerClose === null || workerClose.containment === "containment_unknown");
+    this.#state = "closed";
     this.#resolveClosed(
       Object.freeze({
         reason: this.#quiesceReason ?? "server_error",
@@ -329,9 +400,41 @@ export class DaemonRuntime {
           ? { errorCode: "server_error" as const }
           : cleanupFailed
             ? { errorCode: "endpoint_cleanup_failed" as const }
-            : {}),
+            : this.#workerFailed
+              ? { errorCode: "worker_failure" as const }
+              : workerShutdownFailed
+                ? { errorCode: "worker_shutdown_failed" as const }
+                : {}),
       }),
     );
+  }
+}
+
+async function closeProvidedWorkerManager(
+  manager: AppServerWorkerManager | undefined,
+): Promise<void> {
+  if (!(manager instanceof AppServerWorkerManager)) {
+    return;
+  }
+  try {
+    await manager.close();
+  } catch {
+    // Invalid daemon startup cannot retain ownership of a live worker manager.
+  }
+}
+
+function validReadyWorkerManager(manager: AppServerWorkerManager | undefined): boolean {
+  if (manager === undefined) {
+    return true;
+  }
+  try {
+    if (!(manager instanceof AppServerWorkerManager)) {
+      return false;
+    }
+    const catalog = manager.catalog;
+    return manager.state === "ready" && catalog !== null && manager.isCatalogCurrent(catalog);
+  } catch {
+    return false;
   }
 }
 
