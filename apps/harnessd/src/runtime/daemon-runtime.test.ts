@@ -15,9 +15,21 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DaemonRuntime } from "./daemon-runtime.js";
+import type {
+  AppServerWorkerCloseResult,
+  AppServerWorkerConfig,
+  AppServerWorkerState,
+} from "./app-server-worker.js";
+import {
+  AppServerWorkerManager,
+  type AppServerWorkerManagerDependencies,
+  type ManagedAppServerWorker,
+} from "./app-server-worker-manager.js";
 import { monitorParentWatchdog } from "./parent-watchdog.js";
 
 const STARTUP_CAPABILITY = "A".repeat(43);
+const WORKER_SESSION_ID = "00000000-0000-4000-8000-000000000611";
+const SNAPSHOT_ID = "00000000-0000-4000-8000-000000000612";
 const temporaryDirectories: string[] = [];
 const runtimes: DaemonRuntime[] = [];
 const sockets: Socket[] = [];
@@ -25,6 +37,7 @@ const sockets: Socket[] = [];
 async function createRuntime(options?: {
   drainTimeoutMs?: number;
   handshakeTimeoutMs?: number;
+  workerManager?: AppServerWorkerManager;
 }): Promise<{ endpoint: string; runtime: DaemonRuntime }> {
   const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-"));
   temporaryDirectories.push(directory);
@@ -37,9 +50,92 @@ async function createRuntime(options?: {
     platform: "posix",
     drainTimeoutMs: options?.drainTimeoutMs ?? 100,
     handshakeTimeoutMs: options?.handshakeTimeoutMs ?? 100,
+    ...(options?.workerManager === undefined ? {} : { workerManager: options.workerManager }),
   });
   runtimes.push(runtime);
   return { endpoint, runtime };
+}
+
+class RuntimeFakeWorker implements ManagedAppServerWorker {
+  state: AppServerWorkerState = "ready";
+  readonly closed: Promise<AppServerWorkerCloseResult>;
+  readonly #closeResult: AppServerWorkerCloseResult;
+  readonly #closeGate: Promise<void> | undefined;
+  #resolveClosed!: (result: AppServerWorkerCloseResult) => void;
+  closeCalls = 0;
+
+  constructor(
+    closeResult: AppServerWorkerCloseResult = runtimeWorkerClose(),
+    closeGate?: Promise<void>,
+  ) {
+    this.#closeResult = closeResult;
+    this.#closeGate = closeGate;
+    this.closed = new Promise((resolve) => {
+      this.#resolveClosed = resolve;
+    });
+  }
+
+  async listModels(): Promise<JsonValue> {
+    return {
+      data: [
+        {
+          id: "id-runtime",
+          model: "runtime",
+          hidden: false,
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+          inputModalities: ["text"],
+        },
+      ],
+      nextCursor: null,
+    };
+  }
+
+  async close(): Promise<AppServerWorkerCloseResult> {
+    this.closeCalls += 1;
+    if (this.state === "closed") {
+      return this.#closeResult;
+    }
+    this.state = "closing";
+    await this.#closeGate;
+    this.state = "closed";
+    this.#resolveClosed(this.#closeResult);
+    return this.#closeResult;
+  }
+
+  fail(): void {
+    if (this.state === "closed") {
+      return;
+    }
+    this.state = "closed";
+    this.#resolveClosed(runtimeWorkerClose("already_exited", "worker_exited"));
+  }
+}
+
+function runtimeWorkerClose(
+  containment: AppServerWorkerCloseResult["containment"] = "graceful",
+  reason: AppServerWorkerCloseResult["reason"] = "requested",
+): AppServerWorkerCloseResult {
+  return Object.freeze({
+    reason,
+    containment,
+    exitCode: containment === "graceful" ? 0 : null,
+    signal: null,
+    stderrObserved: false,
+  });
+}
+
+async function createWorkerManager(worker: RuntimeFakeWorker): Promise<AppServerWorkerManager> {
+  const ids = [WORKER_SESSION_ID, SNAPSHOT_ID];
+  const dependencies: AppServerWorkerManagerDependencies = Object.freeze({
+    startWorker: async () => worker,
+    newId: () => ids.shift() ?? "missing-id",
+    now: () => 1_750_000_000_200,
+  });
+  return await AppServerWorkerManager.start(
+    { provider: "openai", worker: {} as AppServerWorkerConfig },
+    dependencies,
+  );
 }
 
 async function connect(endpoint: string, allowHalfOpen = false): Promise<Socket> {
@@ -228,4 +324,89 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
     expect(preservedName).toBeDefined();
     await expect(readFile(join(directory, preservedName ?? ""), "utf8")).resolves.toBe("sentinel");
   });
+
+  it("waits for its worker manager before completing requested quiesce", async () => {
+    const closeGate = deferred<void>();
+    const worker = new RuntimeFakeWorker(runtimeWorkerClose(), closeGate.promise);
+    const workerManager = await createWorkerManager(worker);
+    const { runtime } = await createRuntime({ workerManager });
+    let runtimeClosed = false;
+    void runtime.closed.then(() => {
+      runtimeClosed = true;
+    });
+
+    expect(runtime.requestQuiesce("requested")).toBe(true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(worker.closeCalls).toBe(1);
+    expect(runtimeClosed).toBe(false);
+
+    closeGate.resolve(undefined);
+    await expect(runtime.closed).resolves.toEqual({
+      reason: "requested",
+      endpointCleanup: "removed",
+    });
+    expect(runtime.state).toBe("closed");
+  });
+
+  it("quiesces with a stable failure when the managed worker exits", async () => {
+    const worker = new RuntimeFakeWorker();
+    const workerManager = await createWorkerManager(worker);
+    const { runtime } = await createRuntime({ workerManager });
+
+    worker.fail();
+    await expect(runtime.closed).resolves.toEqual({
+      reason: "worker_failure",
+      endpointCleanup: "removed",
+      errorCode: "worker_failure",
+    });
+    expect(workerManager.catalog).toBeNull();
+  });
+
+  it("reports unknown worker containment during requested shutdown", async () => {
+    const worker = new RuntimeFakeWorker(runtimeWorkerClose("containment_unknown"));
+    const workerManager = await createWorkerManager(worker);
+    const { runtime } = await createRuntime({ workerManager });
+
+    runtime.requestQuiesce("requested");
+    await expect(runtime.closed).resolves.toEqual({
+      reason: "requested",
+      endpointCleanup: "removed",
+      errorCode: "worker_shutdown_failed",
+    });
+  });
+
+  it("fails startup and removes the endpoint if the manager closes before listen is ready", async () => {
+    const worker = new RuntimeFakeWorker();
+    const workerManager = await createWorkerManager(worker);
+    const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-"));
+    temporaryDirectories.push(directory);
+    await chmod(directory, 0o700);
+    const endpoint = join(directory, "harnessd.sock");
+
+    const starting = DaemonRuntime.start({
+      endpoint,
+      startupCapability: STARTUP_CAPABILITY,
+      serverVersion: "0.0.0",
+      platform: "posix",
+      drainTimeoutMs: 100,
+      handshakeTimeoutMs: 100,
+      workerManager,
+    });
+    worker.fail();
+
+    await expect(starting).rejects.toMatchObject({ code: "worker_unavailable" });
+    await expect(lstat(endpoint)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(workerManager.closed).resolves.toMatchObject({ reason: "worker_failure" });
+  });
 });
+
+function deferred<T>(): Readonly<{
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return Object.freeze({ promise, resolve });
+}

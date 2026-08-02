@@ -69,5 +69,8 @@ await smokeSharedDomainRepositories();
 const { smokeAppServerWorker } = await import("./smoke-app-server-worker.mjs");
 await smokeAppServerWorker();
 
+const { smokeAppServerWorkerManager } = await import("./smoke-app-server-worker-manager.mjs");
+await smokeAppServerWorkerManager();
+
 const { smokeDaemonRuntime } = await import("./smoke-daemon-runtime.mjs");
 await smokeDaemonRuntime();

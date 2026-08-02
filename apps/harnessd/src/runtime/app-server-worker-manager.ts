@@ -1,0 +1,532 @@
+import { randomUUID } from "node:crypto";
+import { constants as osConstants } from "node:os";
+
+import { validateJsonValue, type JsonValue } from "@codex-harness/protocol";
+
+import {
+  createModelCatalogSnapshot,
+  type ModelCatalogPageInput,
+  type ModelCatalogSnapshot,
+} from "../domain/model-catalog.js";
+import {
+  AppServerWorker,
+  type AppServerWorkerCloseResult,
+  type AppServerWorkerConfig,
+  type AppServerWorkerContainment,
+  type AppServerWorkerState,
+} from "./app-server-worker.js";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const MAX_PROVIDER_CHARACTERS = 256;
+const MAX_CURSOR_CHARACTERS = 4_096;
+const MAX_CATALOG_PAGES = 128;
+const MAX_CATALOG_MODELS = 10_000;
+const MAX_CATALOG_RESPONSE_BYTES = 64 * 1024 * 1024;
+const MODEL_LIST_PAGE_SIZE = 1_000;
+
+export type AppServerWorkerManagerState =
+  "starting" | "ready" | "refreshing" | "closing" | "closed";
+
+export type AppServerWorkerManagerErrorCode =
+  | "catalog_refresh_failed"
+  | "closed"
+  | "invalid_configuration"
+  | "refresh_unavailable"
+  | "worker_start_failed";
+
+const ERROR_MESSAGES: Readonly<Record<AppServerWorkerManagerErrorCode, string>> = Object.freeze({
+  catalog_refresh_failed: "The Codex model catalog refresh failed.",
+  closed: "The Codex App Server worker manager is closed.",
+  invalid_configuration: "The Codex App Server worker manager configuration is invalid.",
+  refresh_unavailable: "The Codex model catalog cannot be refreshed in the current state.",
+  worker_start_failed: "The Codex App Server worker failed to start.",
+});
+
+export class AppServerWorkerManagerError extends Error {
+  readonly code: AppServerWorkerManagerErrorCode;
+
+  constructor(code: AppServerWorkerManagerErrorCode) {
+    super(ERROR_MESSAGES[code]);
+    this.name = "AppServerWorkerManagerError";
+    this.code = code;
+  }
+}
+
+export type AppServerWorkerManagerConfig = Readonly<{
+  provider: string;
+  worker: AppServerWorkerConfig;
+}>;
+
+export type AppServerWorkerManagerCloseReason =
+  "catalog_refresh_failed" | "requested" | "worker_failure";
+
+export type AppServerWorkerManagerCloseResult = Readonly<{
+  reason: AppServerWorkerManagerCloseReason;
+  workerSessionId: string;
+  containment: AppServerWorkerContainment;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stderrObserved: boolean;
+}>;
+
+export type ManagedAppServerWorker = Readonly<{
+  state: AppServerWorkerState;
+  listModels(params: unknown): Promise<JsonValue>;
+  close(): Promise<AppServerWorkerCloseResult>;
+  closed: Promise<AppServerWorkerCloseResult>;
+}>;
+
+/** @internal Test seam. Production callers must omit this argument. */
+export type AppServerWorkerManagerDependencies = Readonly<{
+  startWorker(config: AppServerWorkerConfig): Promise<ManagedAppServerWorker>;
+  newId(): string;
+  now(): number;
+}>;
+
+const PRODUCTION_DEPENDENCIES: AppServerWorkerManagerDependencies = Object.freeze({
+  startWorker: async (config) => await AppServerWorker.start(config),
+  newId: () => randomUUID(),
+  now: () => Date.now(),
+});
+
+export class AppServerWorkerManager {
+  readonly #provider: string;
+  readonly #worker: ManagedAppServerWorker;
+  readonly #dependencies: AppServerWorkerManagerDependencies;
+  readonly #workerSessionId: string;
+  readonly closed: Promise<AppServerWorkerManagerCloseResult>;
+  #resolveClosed!: (result: AppServerWorkerManagerCloseResult) => void;
+  #state: AppServerWorkerManagerState = "starting";
+  #catalog: ModelCatalogSnapshot | undefined;
+  #lastWorkerClose: AppServerWorkerCloseResult | undefined;
+  #closePromise: Promise<AppServerWorkerManagerCloseResult> | undefined;
+
+  private constructor(
+    provider: string,
+    worker: ManagedAppServerWorker,
+    dependencies: AppServerWorkerManagerDependencies,
+    workerSessionId: string,
+  ) {
+    this.#provider = provider;
+    this.#worker = worker;
+    this.#dependencies = dependencies;
+    this.#workerSessionId = workerSessionId;
+    this.closed = new Promise((resolve) => {
+      this.#resolveClosed = resolve;
+    });
+    void worker.closed.then(
+      (result) => {
+        const normalized = normalizeWorkerCloseResult(result);
+        this.#lastWorkerClose = normalized;
+        if (this.#state === "closing" || this.#state === "closed") {
+          return;
+        }
+        const reason =
+          this.#state === "starting" || this.#state === "refreshing"
+            ? "catalog_refresh_failed"
+            : "worker_failure";
+        void this.#beginClose(reason, normalized);
+      },
+      () => {
+        if (this.#state === "closing" || this.#state === "closed") {
+          return;
+        }
+        const reason =
+          this.#state === "starting" || this.#state === "refreshing"
+            ? "catalog_refresh_failed"
+            : "worker_failure";
+        void this.#beginClose(reason);
+      },
+    );
+  }
+
+  static async start(
+    config: AppServerWorkerManagerConfig,
+    dependencies: AppServerWorkerManagerDependencies = PRODUCTION_DEPENDENCIES,
+  ): Promise<AppServerWorkerManager> {
+    let provider: string;
+    let workerConfig: AppServerWorkerConfig;
+    let normalizedDependencies: AppServerWorkerManagerDependencies;
+    let workerSessionId: string;
+    try {
+      provider = normalizeProvider(config?.provider);
+      workerConfig = config.worker;
+      normalizedDependencies = normalizeDependencies(dependencies);
+      workerSessionId = requireUuid(normalizedDependencies.newId());
+    } catch {
+      throw new AppServerWorkerManagerError("invalid_configuration");
+    }
+
+    let worker: ManagedAppServerWorker;
+    try {
+      worker = await normalizedDependencies.startWorker(workerConfig);
+    } catch {
+      throw new AppServerWorkerManagerError("worker_start_failed");
+    }
+    let workerReady: boolean;
+    try {
+      workerReady = isManagedWorker(worker) && worker.state === "ready";
+    } catch {
+      workerReady = false;
+    }
+    if (!workerReady) {
+      await closeInvalidWorker(worker);
+      throw new AppServerWorkerManagerError("worker_start_failed");
+    }
+
+    const manager = new AppServerWorkerManager(
+      provider,
+      worker,
+      normalizedDependencies,
+      workerSessionId,
+    );
+    try {
+      const snapshot = await manager.#collectCatalog();
+      manager.#installCatalog(snapshot, "starting");
+      return manager;
+    } catch {
+      await manager.#beginClose("catalog_refresh_failed");
+      throw new AppServerWorkerManagerError("catalog_refresh_failed");
+    }
+  }
+
+  get state(): AppServerWorkerManagerState {
+    return this.#state;
+  }
+
+  get provider(): string {
+    return this.#provider;
+  }
+
+  get workerSessionId(): string {
+    return this.#workerSessionId;
+  }
+
+  get catalog(): ModelCatalogSnapshot | null {
+    return this.#state === "ready" ? (this.#catalog ?? null) : null;
+  }
+
+  isCatalogCurrent(candidate: unknown): candidate is ModelCatalogSnapshot {
+    return (
+      this.#state === "ready" &&
+      candidate === this.#catalog &&
+      this.#catalog?.workerSessionId === this.#workerSessionId
+    );
+  }
+
+  async refreshCatalog(): Promise<ModelCatalogSnapshot> {
+    if (this.#state !== "ready") {
+      throw new AppServerWorkerManagerError(
+        this.#state === "closing" || this.#state === "closed" ? "closed" : "refresh_unavailable",
+      );
+    }
+    this.#state = "refreshing";
+    this.#catalog = undefined;
+    try {
+      const snapshot = await this.#collectCatalog();
+      this.#installCatalog(snapshot, "refreshing");
+      return snapshot;
+    } catch {
+      await this.#beginClose("catalog_refresh_failed");
+      throw new AppServerWorkerManagerError("catalog_refresh_failed");
+    }
+  }
+
+  async close(): Promise<AppServerWorkerManagerCloseResult> {
+    return await this.#beginClose("requested");
+  }
+
+  async #collectCatalog(): Promise<ModelCatalogSnapshot> {
+    const pages: ModelCatalogPageInput[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    let modelCount = 0;
+    let responseBytes = 0;
+
+    for (let pageNumber = 0; pageNumber < MAX_CATALOG_PAGES; pageNumber += 1) {
+      this.#requireCatalogCollectionState();
+      const response = await this.#worker.listModels({
+        cursor,
+        includeHidden: true,
+        limit: MODEL_LIST_PAGE_SIZE,
+      });
+      this.#requireCatalogCollectionState();
+      const metadata = readPageMetadata(response);
+      modelCount += metadata.modelCount;
+      responseBytes += metadata.responseBytes;
+      if (modelCount > MAX_CATALOG_MODELS || responseBytes > MAX_CATALOG_RESPONSE_BYTES) {
+        throw new AppServerWorkerManagerError("catalog_refresh_failed");
+      }
+      pages.push(
+        Object.freeze({
+          requestCursor: cursor,
+          includeHidden: true,
+          response,
+        }),
+      );
+      if (metadata.nextCursor === null) {
+        const snapshotId = requireUuid(this.#dependencies.newId());
+        const observedAtMs = requireObservedAt(this.#dependencies.now());
+        return createModelCatalogSnapshot({
+          schemaVersion: 1,
+          snapshotId,
+          workerSessionId: this.#workerSessionId,
+          provider: this.#provider,
+          observedAtMs,
+          pages,
+        });
+      }
+      if (seenCursors.has(metadata.nextCursor)) {
+        throw new AppServerWorkerManagerError("catalog_refresh_failed");
+      }
+      seenCursors.add(metadata.nextCursor);
+      cursor = metadata.nextCursor;
+    }
+    throw new AppServerWorkerManagerError("catalog_refresh_failed");
+  }
+
+  #requireCatalogCollectionState(): void {
+    if (
+      (this.#state !== "starting" && this.#state !== "refreshing") ||
+      this.#worker.state !== "ready" ||
+      this.#closePromise !== undefined
+    ) {
+      throw new AppServerWorkerManagerError("catalog_refresh_failed");
+    }
+  }
+
+  #installCatalog(snapshot: ModelCatalogSnapshot, expectedState: "refreshing" | "starting"): void {
+    if (
+      this.#state !== expectedState ||
+      this.#worker.state !== "ready" ||
+      this.#closePromise !== undefined ||
+      snapshot.workerSessionId !== this.#workerSessionId
+    ) {
+      throw new AppServerWorkerManagerError("catalog_refresh_failed");
+    }
+    this.#catalog = snapshot;
+    this.#state = "ready";
+  }
+
+  #beginClose(
+    reason: AppServerWorkerManagerCloseReason,
+    observedWorkerClose?: AppServerWorkerCloseResult,
+  ): Promise<AppServerWorkerManagerCloseResult> {
+    const existing = this.#closePromise;
+    if (existing !== undefined) {
+      return existing;
+    }
+    const closing = this.#closeManager(reason, observedWorkerClose);
+    this.#closePromise = closing;
+    return closing;
+  }
+
+  async #closeManager(
+    reason: AppServerWorkerManagerCloseReason,
+    observedWorkerClose?: AppServerWorkerCloseResult,
+  ): Promise<AppServerWorkerManagerCloseResult> {
+    this.#state = "closing";
+    this.#catalog = undefined;
+
+    let workerClose = normalizeWorkerCloseResult(observedWorkerClose) ?? this.#lastWorkerClose;
+    if (workerClose === undefined) {
+      try {
+        workerClose = normalizeWorkerCloseResult(await this.#worker.close());
+      } catch {
+        workerClose = this.#lastWorkerClose;
+      }
+    }
+
+    const result = Object.freeze({
+      reason,
+      workerSessionId: this.#workerSessionId,
+      containment: workerClose?.containment ?? "containment_unknown",
+      exitCode: workerClose?.exitCode ?? null,
+      signal: workerClose?.signal ?? null,
+      stderrObserved: workerClose?.stderrObserved ?? false,
+    });
+    this.#state = "closed";
+    this.#resolveClosed(result);
+    return result;
+  }
+}
+
+function normalizeProvider(input: unknown): string {
+  if (
+    typeof input !== "string" ||
+    input.length < 1 ||
+    input.length > MAX_PROVIDER_CHARACTERS ||
+    input.trim() !== input ||
+    containsControlCharacter(input)
+  ) {
+    throw new AppServerWorkerManagerError("invalid_configuration");
+  }
+  return input;
+}
+
+function normalizeDependencies(input: unknown): AppServerWorkerManagerDependencies {
+  try {
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      typeof (input as AppServerWorkerManagerDependencies).startWorker !== "function" ||
+      typeof (input as AppServerWorkerManagerDependencies).newId !== "function" ||
+      typeof (input as AppServerWorkerManagerDependencies).now !== "function"
+    ) {
+      throw new AppServerWorkerManagerError("invalid_configuration");
+    }
+    return input as AppServerWorkerManagerDependencies;
+  } catch {
+    throw new AppServerWorkerManagerError("invalid_configuration");
+  }
+}
+
+function requireUuid(input: unknown): string {
+  if (typeof input !== "string" || !UUID_PATTERN.test(input)) {
+    throw new AppServerWorkerManagerError("invalid_configuration");
+  }
+  return input;
+}
+
+function requireObservedAt(input: unknown): number {
+  if (typeof input !== "number" || !Number.isSafeInteger(input) || input < 0) {
+    throw new AppServerWorkerManagerError("catalog_refresh_failed");
+  }
+  return input;
+}
+
+function readPageMetadata(response: unknown): Readonly<{
+  nextCursor: string | null;
+  modelCount: number;
+  responseBytes: number;
+}> {
+  if (!validateJsonValue(response).ok || !isRecord(response)) {
+    throw new AppServerWorkerManagerError("catalog_refresh_failed");
+  }
+  if (!Array.isArray(response.data) || response.data.length > MAX_CATALOG_MODELS) {
+    throw new AppServerWorkerManagerError("catalog_refresh_failed");
+  }
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(response);
+  } catch {
+    throw new AppServerWorkerManagerError("catalog_refresh_failed");
+  }
+  if (serialized === undefined) {
+    throw new AppServerWorkerManagerError("catalog_refresh_failed");
+  }
+  const cursor = response.nextCursor;
+  if (cursor === null) {
+    return Object.freeze({
+      nextCursor: null,
+      modelCount: response.data.length,
+      responseBytes: Buffer.byteLength(serialized, "utf8"),
+    });
+  }
+  if (
+    typeof cursor !== "string" ||
+    cursor.length < 1 ||
+    cursor.length > MAX_CURSOR_CHARACTERS ||
+    containsControlCharacter(cursor)
+  ) {
+    throw new AppServerWorkerManagerError("catalog_refresh_failed");
+  }
+  return Object.freeze({
+    nextCursor: cursor,
+    modelCount: response.data.length,
+    responseBytes: Buffer.byteLength(serialized, "utf8"),
+  });
+}
+
+function normalizeWorkerCloseResult(input: unknown): AppServerWorkerCloseResult | undefined {
+  if (!isRecord(input)) {
+    return undefined;
+  }
+  try {
+    const reason = input.reason;
+    const containment = input.containment;
+    const exitCode = input.exitCode;
+    const signal = input.signal;
+    const stderrObserved = input.stderrObserved;
+    if (
+      !WORKER_CLOSE_REASONS.has(reason) ||
+      !WORKER_CONTAINMENTS.has(containment) ||
+      (exitCode !== null && !Number.isSafeInteger(exitCode)) ||
+      (signal !== null &&
+        (typeof signal !== "string" || !Object.hasOwn(osConstants.signals, signal))) ||
+      typeof stderrObserved !== "boolean"
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      reason: reason as AppServerWorkerCloseResult["reason"],
+      containment: containment as AppServerWorkerContainment,
+      exitCode: exitCode as number | null,
+      signal: signal as NodeJS.Signals | null,
+      stderrObserved,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+const WORKER_CLOSE_REASONS = new Set<unknown>([
+  "event_handler_failure",
+  "protocol_failure",
+  "request_timeout",
+  "requested",
+  "unsupported_server_request",
+  "worker_exited",
+]);
+
+const WORKER_CONTAINMENTS = new Set<unknown>([
+  "already_exited",
+  "containment_unknown",
+  "graceful",
+  "sigkill",
+  "sigterm",
+]);
+
+function isManagedWorker(input: unknown): input is ManagedAppServerWorker {
+  if (!isRecord(input)) {
+    return false;
+  }
+  try {
+    const closed = input.closed;
+    return (
+      typeof input.state === "string" &&
+      typeof input.listModels === "function" &&
+      typeof input.close === "function" &&
+      typeof closed === "object" &&
+      closed !== null &&
+      typeof (closed as Promise<unknown>).then === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function closeInvalidWorker(worker: unknown): Promise<void> {
+  try {
+    if (!isRecord(worker) || typeof worker.close !== "function") {
+      return;
+    }
+    await (worker.close as () => Promise<unknown>).call(worker);
+  } catch {
+    // A failed test seam or invalid worker cannot provide stronger containment evidence here.
+  }
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input);
+}
+
+function containsControlCharacter(input: string): boolean {
+  for (let index = 0; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
