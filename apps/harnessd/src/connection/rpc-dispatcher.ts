@@ -15,6 +15,8 @@ export type RpcDispatchContext = Readonly<{
   closing: boolean;
   readAccountStatus: () => unknown;
   readModelCatalogPage: (params: JsonValue) => unknown;
+  readRoutingConfiguration: () => unknown;
+  setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
 
 export type RpcDispatchResult = Readonly<{
@@ -49,6 +51,20 @@ function unavailable(id: string, message: string): RpcDispatchResult {
     shutdownRequested: false,
     shutdownReason: undefined,
   };
+}
+
+export class RpcProviderError extends Error {
+  readonly code: "conflict" | "unavailable";
+
+  constructor(code: "conflict" | "unavailable") {
+    super(
+      code === "conflict"
+        ? "The RPC provider reported a conflict."
+        : "The RPC provider is unavailable.",
+    );
+    this.name = "RpcProviderError";
+    this.code = code;
+  }
 }
 
 export function dispatchRpcRequest(
@@ -120,6 +136,51 @@ export function dispatchRpcRequest(
             shutdownReason: undefined,
           }
         : unavailable(request.id, "The model catalog is unavailable.");
+    }
+
+    if (request.method === "routing.configuration.get") {
+      let candidate: unknown;
+      try {
+        candidate = context.readRoutingConfiguration();
+      } catch {
+        return unavailable(request.id, "The routing configuration is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("routing.configuration.get", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The routing configuration is unavailable.");
+    }
+
+    if (request.method === "routing.configuration.set") {
+      let candidate: unknown;
+      try {
+        candidate = context.setRoutingConfiguration(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(
+              request.id,
+              RPC_ERROR_CODES.conflict,
+              "The routing configuration changed.",
+            ),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The routing configuration is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("routing.configuration.set", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The routing configuration is unavailable.");
     }
 
     if (request.method === "system.health") {

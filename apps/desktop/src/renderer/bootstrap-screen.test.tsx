@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { BootstrapScreen } from "./bootstrap-screen.js";
+import { BootstrapScreen, createRoutingDraftInputUpdate } from "./bootstrap-screen.js";
 
 const CATALOG = Object.freeze({
   provider: "openai",
@@ -23,7 +23,55 @@ const CATALOG = Object.freeze({
   hasMore: false,
 });
 
+const UNCONFIGURED_ROUTING = Object.freeze({
+  configured: false,
+  profileVersion: 0,
+  configurationRevisionId: null,
+  tiers: null,
+  availability: null,
+});
+
+const CONFIGURED_ROUTING = Object.freeze({
+  configured: true,
+  profileVersion: 1,
+  configurationRevisionId: "00000000-0000-4000-8000-000000000881",
+  tiers: Object.freeze({
+    fast: Object.freeze({ provider: "openai", model: "gpt-fast", reasoningEffort: "low" }),
+    standard: Object.freeze({
+      provider: "openai",
+      model: "gpt-standard",
+      reasoningEffort: "medium",
+    }),
+    deep: Object.freeze({ provider: "openai", model: "gpt-standard", reasoningEffort: "high" }),
+  }),
+  availability: Object.freeze({
+    fast: "observed_available" as const,
+    standard: "observed_available" as const,
+    deep: "observed_available" as const,
+  }),
+});
+
 describe("desktop bootstrap screen", () => {
+  it("captures routing input before React runs the state updater", () => {
+    const draft = Object.freeze({
+      fast: Object.freeze({ model: "", reasoningEffort: "" }),
+      standard: Object.freeze({ model: "", reasoningEffort: "" }),
+      deep: Object.freeze({ model: "", reasoningEffort: "" }),
+    });
+    const modelInput = { value: "gpt-fast" };
+    const effortInput = { value: "low" };
+
+    const updateModel = createRoutingDraftInputUpdate("fast", "model", modelInput);
+    const updateEffort = createRoutingDraftInputUpdate("fast", "reasoningEffort", effortInput);
+    modelInput.value = "changed-after-handler";
+    effortInput.value = "changed-after-handler";
+
+    const updated = updateEffort(updateModel(draft));
+    expect(updated.fast).toEqual({ model: "gpt-fast", reasoningEffort: "low" });
+    expect(updated.standard).toBe(draft.standard);
+    expect(updated.deep).toBe(draft.deep);
+  });
+
   it.each([
     ["starting", "正在建立受控运行时"],
     ["stopping", "正在关闭受控进程"],
@@ -51,6 +99,7 @@ describe("desktop bootstrap screen", () => {
             phase: "ready",
             account: { status, credentialKind, planType },
             catalog: CATALOG,
+            routing: UNCONFIGURED_ROUTING,
           }}
         />,
       );
@@ -83,6 +132,7 @@ describe("desktop bootstrap screen", () => {
           phase: "ready",
           account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
           catalog: { ...CATALOG, totalVisibleModels: 5, hasMore: true },
+          routing: CONFIGURED_ROUTING,
         }}
       />,
     );
@@ -97,6 +147,12 @@ describe("desktop bootstrap screen", () => {
     expect(markup).not.toContain("nextCursor");
     expect(markup).not.toContain("snapshotId");
     expect(markup).not.toContain("workerSessionId");
+    expect(markup).toContain('data-routing-configured="true"');
+    expect(markup).toContain('data-routing-revision="1"');
+    expect(markup).toContain('data-routing-tier="fast"');
+    expect(markup).toContain('data-routing-availability="observed_available"');
+    expect(markup).toContain("保存路由配置");
+    expect(markup).toContain("EXECUTION LOCKED");
   });
 
   it("renders a stable empty observation when Codex reports no visible model", () => {
@@ -106,12 +162,16 @@ describe("desktop bootstrap screen", () => {
           phase: "ready",
           account: { status: "not_required", credentialKind: null, planType: null },
           catalog: { provider: "openai", totalVisibleModels: 0, models: [], hasMore: false },
+          routing: UNCONFIGURED_ROUTING,
         }}
       />,
     );
 
     expect(markup).toContain("当前 Codex 会话没有报告可见模型");
     expect(markup).toContain('data-model-catalog-count="0"');
+    expect(markup).toContain('data-routing-configured="false"');
+    expect(markup).toContain("尚未校验");
+    expect(markup).toContain("disabled");
   });
 
   it("renders only the stable failure code", () => {

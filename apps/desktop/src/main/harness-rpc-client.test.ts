@@ -173,6 +173,25 @@ function modelCatalogPage(): JsonValue {
   };
 }
 
+function routingConfiguration(): JsonValue {
+  return {
+    schemaVersion: 1,
+    configured: true,
+    profileVersion: 1,
+    configurationRevisionId: "00000000-0000-4000-8000-000000000851",
+    tiers: {
+      fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+      standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+      deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+    },
+    availability: {
+      fast: "observed_available",
+      standard: "observed_available",
+      deep: "observed_available",
+    },
+  };
+}
+
 async function closeServer(server: Server): Promise<void> {
   if (!server.listening) {
     return;
@@ -344,6 +363,40 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
     expect(error).toMatchObject({ code: "protocol_violation" });
     expect(JSON.stringify(error)).not.toContain("private-snapshot");
     expect(client.state).toBe("closed");
+  });
+
+  it("reads and updates a strictly validated routing configuration", async () => {
+    const observedMethods: string[] = [];
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      observedMethods.push(String(record(value).method));
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result: routingConfiguration(),
+      });
+    });
+    const client = await createClient(endpoint);
+    const configuration = record(routingConfiguration());
+    const params = {
+      commandId: configuration.configurationRevisionId as string,
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: configuration.tiers as {
+        fast: { provider: string; model: string; reasoningEffort: string };
+        standard: { provider: string; model: string; reasoningEffort: string };
+        deep: { provider: string; model: string; reasoningEffort: string };
+      },
+    };
+
+    await expect(client.routingConfiguration()).resolves.toEqual(routingConfiguration());
+    await expect(client.setRoutingConfiguration(params)).resolves.toEqual(routingConfiguration());
+    expect(observedMethods).toEqual(["routing.configuration.get", "routing.configuration.set"]);
   });
 
   it("captures the event sequence barrier at the exact account response position", async () => {

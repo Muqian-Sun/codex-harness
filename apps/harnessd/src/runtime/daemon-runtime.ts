@@ -6,6 +6,7 @@ import {
   ConnectionSession,
   type ConnectionSessionAction,
 } from "../connection/connection-session.js";
+import { RpcProviderError } from "../connection/rpc-dispatcher.js";
 import {
   AppServerWorkerManager,
   type AppServerWorkerManagerCloseResult,
@@ -22,6 +23,7 @@ import {
   type UnixEndpointIdentity,
 } from "./local-endpoint.js";
 import type { DaemonStateStore } from "./daemon-state-store.js";
+import type { ModelRoutingConfigurationService } from "./model-routing-configuration-service.js";
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -85,6 +87,7 @@ export class DaemonRuntime {
   readonly #drainTimeoutMs: number;
   readonly #workerManager: AppServerWorkerManager | undefined;
   readonly #stateStore: DaemonStateStore | undefined;
+  readonly #routingConfigurationService: ModelRoutingConfigurationService | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
@@ -111,7 +114,11 @@ export class DaemonRuntime {
         "startupCapability" | "serverVersion" | "handshakeTimeoutMs" | "drainTimeoutMs"
       >
     > &
-      Readonly<{ stateStore?: DaemonStateStore; workerManager?: AppServerWorkerManager }>,
+      Readonly<{
+        routingConfigurationService?: ModelRoutingConfigurationService;
+        stateStore?: DaemonStateStore;
+        workerManager?: AppServerWorkerManager;
+      }>,
   ) {
     this.#endpoint = endpoint;
     this.#startupCapability = config.startupCapability;
@@ -120,6 +127,7 @@ export class DaemonRuntime {
     this.#drainTimeoutMs = config.drainTimeoutMs;
     this.#workerManager = config.workerManager;
     this.#stateStore = config.stateStore;
+    this.#routingConfigurationService = config.routingConfigurationService;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
@@ -165,14 +173,32 @@ export class DaemonRuntime {
       throw new DaemonRuntimeStartError("invalid_configuration");
     }
 
-    const runtime = new DaemonRuntime(endpoint, {
-      startupCapability: config.startupCapability,
-      serverVersion: config.serverVersion,
-      handshakeTimeoutMs: config.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
-      drainTimeoutMs: config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
-      ...(config.workerManager === undefined ? {} : { workerManager: config.workerManager }),
-      ...(config.stateStore === undefined ? {} : { stateStore: config.stateStore }),
-    });
+    let runtime: DaemonRuntime;
+    try {
+      const routingConfigurationService =
+        config.workerManager === undefined || config.stateStore === undefined
+          ? undefined
+          : new (
+              await import("./model-routing-configuration-service.js")
+            ).ModelRoutingConfigurationService(config.stateStore, config.workerManager);
+      runtime = new DaemonRuntime(endpoint, {
+        startupCapability: config.startupCapability,
+        serverVersion: config.serverVersion,
+        handshakeTimeoutMs: config.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
+        drainTimeoutMs: config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
+        ...(config.workerManager === undefined ? {} : { workerManager: config.workerManager }),
+        ...(config.stateStore === undefined ? {} : { stateStore: config.stateStore }),
+        ...(routingConfigurationService === undefined ? {} : { routingConfigurationService }),
+      });
+    } catch {
+      await Promise.all([
+        closeProvidedWorkerManager(config.workerManager),
+        closeProvidedStateStore(config.stateStore),
+      ]);
+      throw new DaemonRuntimeStartError(
+        config.workerManager === undefined ? "invalid_configuration" : "worker_unavailable",
+      );
+    }
     await runtime.#listen();
     return runtime;
   }
@@ -269,6 +295,8 @@ export class DaemonRuntime {
       serverVersion: this.#serverVersion,
       readAccountStatus: () => this.#readCurrentAccountStatus(),
       readModelCatalogPage: (params) => this.#readCurrentModelCatalogPage(params),
+      readRoutingConfiguration: () => this.#readRoutingConfiguration(),
+      setRoutingConfiguration: (params) => this.#setRoutingConfiguration(params),
     });
     this.#activeSocket = socket;
     this.#activeSession = session;
@@ -365,6 +393,32 @@ export class DaemonRuntime {
       return null;
     }
     return manager.readCatalogPage(params);
+  }
+
+  #readRoutingConfiguration(): unknown {
+    const service = this.#routingConfigurationService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.read();
+    } catch {
+      throw new RpcProviderError("unavailable");
+    }
+  }
+
+  #setRoutingConfiguration(params: unknown): unknown {
+    const service = this.#routingConfigurationService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.set(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(
+        isRoutingConfigurationConflict(error) ? "conflict" : "unavailable",
+      );
+    }
   }
 
   #publishAccountStatusChanged(snapshot: unknown): void {
@@ -498,6 +552,15 @@ export class DaemonRuntime {
       return false;
     }
   }
+}
+
+function isRoutingConfigurationConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "ModelRoutingConfigurationServiceError" &&
+    "code" in error &&
+    error.code === "conflict"
+  );
 }
 
 async function closeProvidedWorkerManager(

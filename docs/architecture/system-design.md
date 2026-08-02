@@ -148,6 +148,10 @@ Harness 只使用逻辑档位：
 
 模型路由配置以稳定 profile ID 形成独立事件流，当前投影保存 profile version、活动配置和创建/更新时间。首次配置必须从 version 0 提交 revision 1；后续配置同时校验期望 profile version、前一 revision ID、严格加一的新 revision number 和不回退的事件时间。配置 revision ID 同时作为 event ID，完整相同重试幂等，stale fence、跳号或冲突内容整体回滚。路由 profile repository 接受 daemon 统一拥有的事件库并要求对应投影已经注册，不自行打开或关闭 SQLite；它本身不决定 Project 绑定、模型目录或 RouteDecision。
 
+桌面 V1 使用 daemon 内部固定且不对 renderer 暴露的默认 routing profile，提供严格的 `routing.configuration.get` 与 `routing.configuration.set`。首次读取返回显式未配置状态；写入必须一次提交完整的 `fast`、`standard`、`deep` 三档映射，并携带当前 profile version、前一 configuration revision 和 main 生成的 UUID command ID。daemon 在新写入前要求三个 provider 精确等于当前 worker 目录 provider、模型存在于当前完整目录且不是 hidden、reasoning effort 被该模型明确报告支持；任一条件不满足、目录不再 current 或 fence 过期都保守失败，不按模型名猜测能力、不选择近似模型，也不回退到其他档位。历史 command ID 的完整重试先读取原事件时间，再复用 repository 的内容幂等校验，因此不会因重试生成不同事件；同一 ID 的不同内容保持冲突。
+
+已保存配置的读取会按当前目录重新计算每档 `observed_available`、`provider_unobserved`、`model_unavailable` 或 `reasoning_effort_unsupported`，但只向桌面公开 profile version、configuration revision、完整三档映射和这些状态，不公开固定 profile ID、事件时间、模型内部 ID、hidden、snapshot 或 worker session。配置从当前目录消失时仍可观察原持久映射及不可用原因，不能据此执行；本能力没有 Project binding、Task 分类、RouteDecision、权限或执行授权。
+
 Project 通过独立的单调 binding version 引用一个活动路由 profile。首次绑定必须从 version 0 和空 previous profile 开始；改绑同时校验当前 binding version、前一 profile、目标 profile 的当前 version/config revision 以及不早于目标 profile 生效时间的事件时间，禁止对当前同一 profile 产生无意义的新绑定。绑定事件保存写入时观察到的 profile version 与 configuration revision 作为审计快照，但 profile 后续配置更新会自动成为该 Project 的当前配置，不要求重新绑定。历史 event ID 的完全一致重试先于当前 profile 和绑定检查，因此在 profile 更新或 Project 改绑后仍返回原历史结果；内容或 metadata 变化保持冲突。当前投影只保存每个 Project 的最新绑定，完整历史保留在事件日志。该 repository 复用统一 EventStore 并要求 profile 与 binding 投影均已注册；既有 binding 事件不因新增 Project registry 而改写，后续 coordinator 必须同时证明注册 Project、当前 Task 归属和活动 binding，不能只凭 binding 启动执行。
 
 Project registry 以不可变注册事件建立 project version 1 的当前记录，并用独立 workspace owner 投影阻止完全相同的规范工作目录描述符被多个 Project 注册。工作目录明确保存 `macos`、`windows` 或 `linux` 平台与规范绝对路径，并固定标记为 identity 尚未验证；当前校验只有跨平台词法规范、长度和危险 Windows namespace 拒绝，绝不把字符串相同解释为 dev/inode、Windows file ID、符号链接、大小写或 Git 仓库 identity 相同。Project 修改、路径迁移和物理目录复核仍需后续独立能力。
@@ -207,7 +211,7 @@ Markdown 可作为面向用户的导出、快照或审阅格式，但不是调�
 
 投影使用注册时固定的名称、版本、事件选键函数和同步 reducer。新增事件、所有已注册投影状态和各自 checkpoint 必须在同一写事务内提交；任一 reducer 失败或返回非法结果时整体回滚。投影输入是递归冻结的事件与当前 JSON 状态，输出只允许 `keep`、`set` 或 `delete`，并经过与事件相同的有界 JSON 和 canonical 序列化检查；单个事件跨全部投影还共享 key 数和状态字节预算，防止放大写入。打开数据库时先以只读方式验证既有 migration 前缀、对应版本 schema、事件连续性和投影结构，再逐级迁移并处理恢复：缺失 checkpoint 全量回放、同版本落后 checkpoint 增量追赶、版本变化清空对应状态并全量重建，checkpoint 超前或状态来源序号越界则保守失败。未注册投影保留但不执行。产品 daemon 的 state store 现在统一注册 Task 计划、路由 profile、Project profile binding、Project registry、workspace owner、Task/Project 双向归属和影子 RouteDecision 共八个当前投影；任一投影无法恢复都会在创建 endpoint 前以稳定启动故障保守失败。Run、审批和证据投影尚未定义，后续加入时必须在独立 PR 中更新这份唯一注册表和恢复验证。
 
-领域 repository 不得各自拥有同一数据库的独立 writer。Task 计划领域提供注入式 `TaskPlanRepository`，构造时先验证固定 Task 投影已注册，不拥有或关闭 EventStore；原有 `TaskPlanStore.open()` 只作为向后兼容的独立 owning wrapper，继续维持既有事件、投影和 `close()` 契约。Project registry、Task 归属、路由 profile、Project binding 和 RouteDecision repository 同样采用注入式事件库。产品 `DaemonStateStore` 是 EventStore 的唯一生命周期所有者：启动时完成全部已注册投影恢复并验证 repository 契约，监听期间保持 writer 独占，daemon 排空后执行 checkpoint 和关闭。编译产物与桌面冒烟必须证明首次创建、再次启动恢复、稳定数据库保留，以及退出后不残留 WAL/SHM sidecar；这只证明持久化所有权和恢复门禁已接入，不代表尚未公开的业务写 RPC 已经可用。
+领域 repository 不得各自拥有同一数据库的独立 writer。Task 计划领域提供注入式 `TaskPlanRepository`，构造时先验证固定 Task 投影已注册，不拥有或关闭 EventStore；原有 `TaskPlanStore.open()` 只作为向后兼容的独立 owning wrapper，继续维持既有事件、投影和 `close()` 契约。Project registry、Task 归属、路由 profile、Project binding 和 RouteDecision repository 同样采用注入式事件库。产品 `DaemonStateStore` 是 EventStore 的唯一生命周期所有者：启动时完成全部已注册投影恢复并验证 repository 契约，监听期间保持 writer 独占，daemon 排空后执行 checkpoint 和关闭。编译产物与桌面冒烟必须证明首次创建、路由配置写入、再次启动恢复、稳定数据库保留，以及退出后不残留 WAL/SHM sidecar。当前唯一公开的业务写 RPC 是受模型目录与乐观并发门禁约束的完整三级路由配置；Task、计划、Project、Run、审批和证据仍没有桌面写入口。
 
 影子 RouteDecision repository 同样使用注入式事件库，并要求路由 profile 与 decision 两个投影在写入前均已注册。事件只保存结构化特征和路由快照，不默认保存完整用户提示词；Task 范围查询只读取复合投影键。历史 event ID 精确查询先于当前 profile 检查，使配置更新后的完整重试仍保持幂等，同时不允许用历史配置创建新的 decision。
 
@@ -238,7 +242,7 @@ V1 初始出站白名单只包含只读 `account/read`、`model/list`、`thread/
 
 daemon 内部的首个受控 App Server worker 在创建子进程前使用同一绝对 Codex executable 执行有界 `--version` 检查，并要求精确匹配 Schema manifest 固定的 `codex-cli 0.146.0-alpha.9.2`；通过后只以无 shell 的固定参数 `app-server --listen stdio:// --strict-config` 启动，继承 daemon 所在的 Electron kill domain。worker 分离并持续排空 stderr，但不向公开错误或事件暴露其内容；stdout 使用 16 MiB 上限、fatal UTF-8 和严格 adapter 做增量 JSONL 解析，完成一次 `initialize`/`initialized` 后才进入 ready。当前公开请求面刻意只包含只读 `model/list` 与强制不刷新 token 的 `account/read`，没有通用 method 入口；任意 server request、坏帧、截断、未知/重复响应、消费回调失败或请求超时都会关闭整个 worker，超时请求不自动重放。正常关闭先结束 stdin，随后只对精确 child PID 依次升级 `SIGTERM`、`SIGKILL` 并报告无法证明退出的 `containment_unknown`；由于尚未开放 turn，细粒度 worker 后代排空继续后置，外层 daemon 进程组仍是最终包含边界。
 
-`DaemonRuntime` 可以显式接管一个已经 ready 且持有当前目录的 worker manager 和一个已经完成恢复的 state store。接管后，任意 daemon 排空都会同时关闭 manager，并在连接、endpoint 与 worker 收敛后关闭 state store；daemon 的 `closed` 只有这些边界全部结束后才完成。manager 非预期关闭会以 `worker_failure` 停止监听并排空连接，worker 无法证明包含时报告 `worker_shutdown_failed`，SQLite 无法安全关闭时报告 `state_shutdown_failed`。实际 daemon CLI 固定接收 supervisor 追加的绝对 Codex executable 与固定名 state database，在 startup capability 和 parent 存活首次验证后创建 V1 `openai` manager，再打开和恢复唯一 EventStore，只有两者均 ready/current 后才启动监听；parent 在任一有界启动步骤中丢失时，CLI 在当前步骤返回后复核并关闭已取得的资源，外层进程组 deadline 仍提供最终包含。worker/manager/state 启动错误只输出稳定 code，不回显路径、版本原文、stderr、模型、cursor、数据库内容或服务端 message。库层缺少 manager 或 state store 的最小 `DaemonRuntime` 入口只保留给隔离测试和未来显式组合；产品 CLI 不再把缺少任一产品依赖的 listener 当作 readiness。当前 manager 除只读、去敏的 `account.status` 和模型目录外不开放业务状态写入、thread/turn 或路由执行，在审批、工具 gate 和安全 turn coordinator 完成前不得开放执行。
+`DaemonRuntime` 可以显式接管一个已经 ready 且持有当前目录的 worker manager 和一个已经完成恢复的 state store。接管后，任意 daemon 排空都会同时关闭 manager，并在连接、endpoint 与 worker 收敛后关闭 state store；daemon 的 `closed` 只有这些边界全部结束后才完成。manager 非预期关闭会以 `worker_failure` 停止监听并排空连接，worker 无法证明包含时报告 `worker_shutdown_failed`，SQLite 无法安全关闭时报告 `state_shutdown_failed`。实际 daemon CLI 固定接收 supervisor 追加的绝对 Codex executable 与固定名 state database，在 startup capability 和 parent 存活首次验证后创建 V1 `openai` manager，再打开和恢复唯一 EventStore，只有两者均 ready/current 后才启动监听；parent 在任一有界启动步骤中丢失时，CLI 在当前步骤返回后复核并关闭已取得的资源，外层进程组 deadline 仍提供最终包含。worker/manager/state 启动错误只输出稳定 code，不回显路径、版本原文、stderr、模型、cursor、数据库内容或服务端 message。库层缺少 manager 或 state store 的最小 `DaemonRuntime` 入口只保留给隔离测试和未来显式组合；产品 CLI 不再把缺少任一产品依赖的 listener 当作 readiness。当前 manager 除只读、去敏的 `account.status`、模型目录和由 daemon 持久化的完整三级路由配置外，不开放其他业务状态写入、thread/turn 或路由执行。路由配置与模型权限是分离决策；在审批、工具 gate 和安全 turn coordinator 完成前不得开放执行。
 
 ## 12. Desktop 到 Harness 协议
 
@@ -261,7 +265,7 @@ Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，�
 - `JsonValue` 验证限制最大深度 64、访问节点和待处理工作各 100,000，并拒绝循环、访问器、类实例、非有限数和其他非 JSON 值。
 - `internal.error` 使用固定安全消息，只允许非敏感 correlation ID，禁止序列化堆栈、环境变量、请求参数、原始帧或凭据。
 
-初始应用方法为 `system.health`、`account.status`、`model.catalog_page` 和 `system.shutdown`，初始应用事件为 `account.status_changed`。`account.status` 只读取当前去敏账户快照，不刷新 token 也不改变认证状态；账户事件只在 manager 安装新权威快照后发布同一去敏结构。`model.catalog_page` 只读取当前 worker session 的可见模型目录，单页固定限制为 1–16 个模型；游标绑定目录 snapshot，只能在同一当前快照中继续，目录刷新后的旧游标保守失败。公开页只保留 provider、可见模型总数、模型名、默认/支持的 reasoning effort、输入模态和下一页游标，不返回 App Server 内部模型 ID、hidden 标志、snapshot、worker session、观察时间或原始元数据。它不写配置、不决定逻辑档位，也不授予执行权限。`system.shutdown` 只请求经过认证的优雅排空，不向 renderer 提供直接终止进程能力。
+当前应用方法为 `system.health`、`account.status`、`model.catalog_page`、`routing.configuration.get`、`routing.configuration.set` 和 `system.shutdown`，应用事件为 `account.status_changed`。`account.status` 只读取当前去敏账户快照，不刷新 token 也不改变认证状态；账户事件只在 manager 安装新权威快照后发布同一去敏结构。`model.catalog_page` 只读取当前 worker session 的可见模型目录，单页固定限制为 1–16 个模型；游标绑定目录 snapshot，只能在同一当前快照中继续，目录刷新后的旧游标保守失败。公开页只保留 provider、可见模型总数、模型名、默认/支持的 reasoning effort、输入模态和下一页游标，不返回 App Server 内部模型 ID、hidden 标志、snapshot、worker session、观察时间或原始元数据。`routing.configuration.get` 返回默认 profile 的最小持久状态和当前可用性，`routing.configuration.set` 接受完整三档配置、乐观并发 fence 与幂等 command ID；冲突只返回固定 `rpc.conflict`，状态或目录不可用只返回固定 `service.unavailable`。这些配置方法不决定任务档位，也不授予执行权限。`system.shutdown` 只请求经过认证的优雅排空，不向 renderer 提供直接终止进程能力。
 
 ## 13. Desktop 安全边界
 
@@ -272,11 +276,11 @@ Electron main 的 RPC 客户端只连接由其拥有的 daemon 本地端点，�
 - 文件选择、shell、剪贴板、通知和外部链接等系统能力由 main 单独审批。
 - Provider 凭据保存在操作系统钥匙串，只在 daemon 需要时通过受控通道使用，不返回 renderer。
 
-macOS 首个 application bootstrap 使用 Electron 43 与 React renderer。应用在 ready 前全局启用 renderer sandbox，通过固定 `app://harness/` 安全 origin 只加载本地构建资源，拒绝 permission request/check、任意导航、新窗口和 webview；响应与 HTML 同时设置严格 CSP。Preload 只暴露无参数的 readiness 快照读取和单向状态订阅，main 还要求 IPC sender 是当前受管窗口的精确 main frame。Renderer 只接收深冻结的 `starting`、`ready`、`failed`、`stopping` 状态及封闭故障码；`ready` 内的账户数据会随严格 daemon 事件更新，但仍只保留状态、凭据类别和 plan type。main 另外把第一目录页投影为 provider、可见总数、最多 12 个模型的名称/推理强度/输入模态以及 `hasMore`；分页游标、内部模型 ID、hidden、snapshot 和 worker session 均停留在受控进程内。Renderer 不接收路径、endpoint、观察时间、事件序号、原始错误或关闭能力。
+macOS 首个 application bootstrap 使用 Electron 43 与 React renderer。应用在 ready 前全局启用 renderer sandbox，通过固定 `app://harness/` 安全 origin 只加载本地构建资源，拒绝 permission request/check、任意导航、新窗口和 webview；响应与 HTML 同时设置严格 CSP。Preload 暴露无参数的 readiness 快照读取、单向状态订阅和一个严格的完整三级路由更新方法，main 还要求每个 IPC sender 是当前受管窗口的精确 main frame，并由 main 生成新的 command ID。Renderer 只接收深冻结的 `starting`、`ready`、`failed`、`stopping` 状态及封闭故障码；`ready` 内的账户数据会随严格 daemon 事件更新，但仍只保留状态、凭据类别和 plan type。main 另外把第一目录页投影为 provider、可见总数、最多 12 个模型的名称/推理强度/输入模态以及 `hasMore`，并投影默认 routing profile 的 version、revision、三档目标和四类可用性；分页游标、内部模型 ID、hidden、snapshot、worker session、固定 profile ID 和事件时间均停留在受控进程内。Renderer 不接收路径、endpoint、观察时间、事件序号、原始错误或关闭能力，也不能指定 command ID。
 
 Electron main 在应用生命周期内只创建一个 daemon supervisor。开发态必须通过显式环境变量提供绝对 Codex executable，不自动扫描、下载或猜测安装位置；打包态忽略该变量，只接受 `process.resourcesPath` 下固定的 `harnessd/cli.js` 和 `codex/codex`，正式资源复制、签名和公证完成前不得宣称打包模式可发布。daemon 子进程暂时使用当前 Electron executable 的 `ELECTRON_RUN_AS_NODE=1` 模式运行编译 CLI；该变量只加到受控 daemon 子进程，不进入 renderer。正式打包 PR 必须单独决定 Electron fuse 与 launcher 契约。
 
-桌面启动先显示 `starting`，只有 supervisor 已完成 daemon RPC hello，且 daemon 内部精确 Codex 版本、App Server 初始化、完整模型目录、去敏 account snapshot、SQLite schema 校验和全部已注册投影恢复均通过，main 再并行读取 `account.status` 与固定 12 项的首个 `model.catalog_page`，两者均通过严格投影后才显示 `ready`。RPC client 在账户响应所在输入流位置记录已观察事件序号屏障；controller 只允许屏障之后的缓存事件覆盖启动读取，避免响应与事件交错造成状态回退。ready 后连续账户事件实时更新账户卡且保留同一已观察目录摘要，语义相同的状态由 main 状态仓库去重；目录当前没有事件订阅、自动刷新或 renderer 主动分页。daemon 非预期关闭、未知事件、事件缺口或 stream 改变只显示稳定 `daemon_unavailable`，不自动重启或重放。macOS 关闭全部窗口保留单一应用/daemon，Dock activate 可以重建窗口；`before-quit` 必须等待 supervisor 排空、SQLite checkpoint/close 和进程包含验证，无法证明收敛时以失败状态退出。当前界面只证明底座 readiness，并展示最小账户观察和只读模型目录摘要；模型档位配置、thread/turn、任务、TODO/DAG、登录操作和路由执行继续关闭。
+桌面启动先显示 `starting`，只有 supervisor 已完成 daemon RPC hello，且 daemon 内部精确 Codex 版本、App Server 初始化、完整模型目录、去敏 account snapshot、SQLite schema 校验和全部已注册投影恢复均通过，main 再并行读取 `account.status`、固定 12 项的首个 `model.catalog_page` 与 `routing.configuration.get`，三者均通过严格投影后才显示 `ready`。RPC client 在账户响应所在输入流位置记录已观察事件序号屏障；controller 只允许屏障之后的缓存事件覆盖启动读取，避免响应与事件交错造成状态回退。ready 后连续账户事件实时更新账户卡且保留同一已观察目录和路由摘要，语义相同的状态由 main 状态仓库去重；目录当前没有事件订阅、自动刷新或 renderer 主动分页。路由控制台不预填或猜测未配置的三档目标；用户必须明确输入模型和 reasoning effort，提交成功后更新深冻结状态，冲突时重新读取当前配置并要求用户复核，其他失败不改变现有状态。daemon 非预期关闭、未知事件、事件缺口或 stream 改变只显示稳定 `daemon_unavailable`，不自动重启或重放。macOS 关闭全部窗口保留单一应用/daemon，Dock activate 可以重建窗口；`before-quit` 必须等待 supervisor 排空、SQLite checkpoint/close 和进程包含验证，无法证明收敛时以失败状态退出。当前界面已能观察并持久化完整三级模型映射，同时始终显示 `EXECUTION LOCKED`；thread/turn、任务、TODO/DAG、登录操作、自动任务分类、Project 绑定和路由执行继续关闭。
 
 ## 14. 审批、权限与证据
 
@@ -297,12 +301,12 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 1. 工作区、协议契约与 CI：已由 PR #1 完成。
 2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list` 与非刷新 `account/read`、单 worker manager、完整目录分页、去敏 account snapshot、两类 session freshness、`account/updated` 失效信号驱动的权威重读、严格 daemon 账户事件、事件序号屏障、daemon 排空绑定以及 Electron supervisor → daemon CLI 的真实启动接线已完成；macOS application bootstrap、开发态显式资源定位、只读 readiness UI、严格 `account.status` 与有界 `model.catalog_page` RPC、最小账户实时观察及首屏模型目录摘要已完成，登录流程、目录主动刷新/分页、正式安装资源复制/签名、thread/turn、审批和工具 gate 待后续 PR。
 3. daemon 生命周期与本地传输。
-4. SQLite 事件日志、恢复原语和产品 daemon 唯一持久状态所有权：已完成当前八个领域投影的统一注册、启动恢复门禁、稳定 state root 与关闭门禁；业务写 RPC、Run、审批和证据投影待后续 PR。
+4. SQLite 事件日志、恢复原语和产品 daemon 唯一持久状态所有权：已完成当前八个领域投影的统一注册、启动恢复门禁、稳定 state root、关闭门禁和默认 routing profile 写入；其他业务写 RPC、Run、审批和证据投影待后续 PR。
 5. 任务与持久计划状态。
 6. 上下文压缩恢复。
-7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、worker session 目录 freshness、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划、工作区分析与运行目标四个 observer、品牌证据组合 coordinator 和 RouteDecision 审计已完成；其余运行时 manifest/权限计划/工作区分析/目标 inventory 新鲜度强制、evidence-to-feature 适配、执行前目录复核、daemon 路由 coordinator 和影子评估待后续 PR。
+7. 模型配置和影子路由：三档配置、确定性解析、配置 profile 持久化、默认桌面 profile 的严格读写 RPC 与当前目录校验、桌面三级映射控制台、重启恢复、Project active profile 绑定、Task → Project 权威归属、App Server 模型目录可用性检查、worker session 目录 freshness、带安全下限的影子分类、权威 Task 结构特征/freshness snapshot、进程内 route evidence 来源/覆盖契约、封闭操作清单、权限计划、工作区分析与运行目标四个 observer、品牌证据组合 coordinator 和 RouteDecision 审计已完成；其余运行时 manifest/权限计划/工作区分析/目标 inventory 新鲜度强制、evidence-to-feature 适配、Task 自动档位选择、Project 配置绑定、执行前目录复核、daemon 路由 coordinator 和影子评估待后续 PR。
 8. 串行调度。
-9. 安全 Electron 桌面壳与任务 UI：sandbox、固定本地 origin、白名单 preload、单例 daemon 生命周期、readiness 状态屏、最小账户实时观察和只读首屏模型目录已完成；模型档位配置、任务列表、详情、TODO/DAG、登录操作、交互写 RPC 和正式打包待后续 PR。
+9. 安全 Electron 桌面壳与任务 UI：sandbox、固定本地 origin、白名单 preload、单例 daemon 生命周期、readiness 状态屏、最小账户实时观察、只读首屏模型目录和受控三级模型配置写 IPC 已完成；任务列表、详情、TODO/DAG、登录操作、其他业务写 RPC 和正式打包待后续 PR。
 10. 审批、证据、运行恢复和打包门禁。
 11. 端到端验证、故障注入、安全检查和发布。
 

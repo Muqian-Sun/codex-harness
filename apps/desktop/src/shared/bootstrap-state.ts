@@ -47,12 +47,51 @@ export type DesktopModelCatalogSummary = Readonly<{
   hasMore: boolean;
 }>;
 
+export const DESKTOP_ROUTING_TIERS = Object.freeze(["fast", "standard", "deep"] as const);
+export const DESKTOP_ROUTING_AVAILABILITY_STATUSES = Object.freeze([
+  "model_unavailable",
+  "observed_available",
+  "provider_unobserved",
+  "reasoning_effort_unsupported",
+] as const);
+
+export type DesktopRoutingTier = (typeof DESKTOP_ROUTING_TIERS)[number];
+export type DesktopRoutingAvailabilityStatus =
+  (typeof DESKTOP_ROUTING_AVAILABILITY_STATUSES)[number];
+export type DesktopRoutingTierTarget = Readonly<{
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+}>;
+export type DesktopRoutingTierTargets = Readonly<
+  Record<DesktopRoutingTier, DesktopRoutingTierTarget>
+>;
+export type DesktopRoutingConfiguration = Readonly<{
+  configured: boolean;
+  profileVersion: number;
+  configurationRevisionId: string | null;
+  tiers: DesktopRoutingTierTargets | null;
+  availability: Readonly<Record<DesktopRoutingTier, DesktopRoutingAvailabilityStatus>> | null;
+}>;
+export type DesktopRoutingConfigurationUpdate = Readonly<{
+  expectedProfileVersion: number;
+  previousConfigurationRevisionId: string | null;
+  tiers: DesktopRoutingTierTargets;
+}>;
+export type DesktopRoutingConfigurationMutationResult =
+  | Readonly<{
+      status: "saved" | "conflict";
+      routing: DesktopRoutingConfiguration;
+    }>
+  | Readonly<{ status: "unavailable" }>;
+
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
   | Readonly<{
       phase: "ready";
       account: DesktopAccountStatus;
       catalog: DesktopModelCatalogSummary;
+      routing: DesktopRoutingConfiguration;
     }>
   | Readonly<{ phase: "failed"; code: DesktopBootstrapFailureCode }>
   | Readonly<{ phase: "stopping" }>;
@@ -60,6 +99,8 @@ export type DesktopBootstrapState =
 const failureCodes = new Set<string>(DESKTOP_BOOTSTRAP_FAILURE_CODES);
 const planTypes = new Set<string>(DESKTOP_ACCOUNT_PLAN_TYPES);
 const modelInputModalities = new Set<string>(["audio", "image", "text"]);
+const routingAvailabilityStatuses = new Set<string>(DESKTOP_ROUTING_AVAILABILITY_STATUSES);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_PROVIDER_CHARACTERS = 256;
 const MAX_MODEL_CHARACTERS = 4_096;
 const MAX_REASONING_EFFORT_CHARACTERS = 128;
@@ -74,18 +115,20 @@ export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapSta
   const keys = Object.keys(record);
   if (record.phase === "ready") {
     if (
-      keys.length !== 3 ||
+      keys.length !== 4 ||
       !keys.includes("phase") ||
       !keys.includes("account") ||
-      !keys.includes("catalog")
+      !keys.includes("catalog") ||
+      !keys.includes("routing")
     ) {
       return undefined;
     }
     const account = decodeDesktopAccountStatus(record.account, true);
     const catalog = decodeDesktopModelCatalogSummary(record.catalog);
-    return account === undefined || catalog === undefined
+    const routing = decodeDesktopRoutingConfiguration(record.routing, false);
+    return account === undefined || catalog === undefined || routing === undefined
       ? undefined
-      : Object.freeze({ phase: "ready", account, catalog });
+      : Object.freeze({ phase: "ready", account, catalog, routing });
   }
   if (record.phase === "failed") {
     if (
@@ -131,13 +174,63 @@ export function projectDesktopModelCatalogSummary(input: unknown): DesktopModelC
 export function readyBootstrapState(
   accountInput: unknown,
   catalogInput: unknown,
+  routingInput: unknown,
 ): DesktopBootstrapState {
   const account = decodeDesktopAccountStatus(accountInput, false);
   const catalog = decodeDesktopModelCatalogSummary(catalogInput);
-  if (account === undefined || catalog === undefined) {
+  const routing = decodeDesktopRoutingConfiguration(routingInput, false);
+  if (account === undefined || catalog === undefined || routing === undefined) {
     throw new BootstrapStateTransitionError();
   }
-  return Object.freeze({ phase: "ready", account, catalog });
+  return Object.freeze({ phase: "ready", account, catalog, routing });
+}
+
+export function projectDesktopRoutingConfiguration(input: unknown): DesktopRoutingConfiguration {
+  const routing = decodeDesktopRoutingConfiguration(input, true);
+  if (routing === undefined) {
+    throw new BootstrapStateTransitionError();
+  }
+  return routing;
+}
+
+export function decodeDesktopRoutingConfigurationUpdate(
+  input: unknown,
+): DesktopRoutingConfigurationUpdate | undefined {
+  const record = exactRecord(input, [
+    "expectedProfileVersion",
+    "previousConfigurationRevisionId",
+    "tiers",
+  ]);
+  if (record === undefined) {
+    return undefined;
+  }
+  const expectedProfileVersion = record.expectedProfileVersion;
+  const previousConfigurationRevisionId = record.previousConfigurationRevisionId;
+  const tiers = decodeRoutingTierTargets(record.tiers);
+  if (
+    !isNonNegativeSafeInteger(expectedProfileVersion) ||
+    (previousConfigurationRevisionId !== null && !isUuid(previousConfigurationRevisionId)) ||
+    (expectedProfileVersion === 0) !== (previousConfigurationRevisionId === null) ||
+    tiers === undefined
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ expectedProfileVersion, previousConfigurationRevisionId, tiers });
+}
+
+export function decodeDesktopRoutingConfigurationMutationResult(
+  input: unknown,
+): DesktopRoutingConfigurationMutationResult | undefined {
+  const unavailable = exactRecord(input, ["status"]);
+  if (unavailable !== undefined && unavailable.status === "unavailable") {
+    return Object.freeze({ status: "unavailable" });
+  }
+  const record = exactRecord(input, ["routing", "status"]);
+  if (record === undefined || (record.status !== "saved" && record.status !== "conflict")) {
+    return undefined;
+  }
+  const routing = decodeDesktopRoutingConfiguration(record.routing, false);
+  return routing === undefined ? undefined : Object.freeze({ status: record.status, routing });
 }
 
 export function initialBootstrapState(): DesktopBootstrapState {
@@ -240,10 +333,144 @@ function sameState(current: DesktopBootstrapState, candidate: DesktopBootstrapSt
       current.account.status === candidate.account.status &&
       current.account.credentialKind === candidate.account.credentialKind &&
       current.account.planType === candidate.account.planType &&
-      modelCatalogSummariesEqual(current.catalog, candidate.catalog)
+      modelCatalogSummariesEqual(current.catalog, candidate.catalog) &&
+      routingConfigurationsEqual(current.routing, candidate.routing)
     );
   }
   return true;
+}
+
+function decodeDesktopRoutingConfiguration(
+  input: unknown,
+  includesSchemaVersion: boolean,
+): DesktopRoutingConfiguration | undefined {
+  const expectedKeys = includesSchemaVersion
+    ? [
+        "availability",
+        "configurationRevisionId",
+        "configured",
+        "profileVersion",
+        "schemaVersion",
+        "tiers",
+      ]
+    : ["availability", "configurationRevisionId", "configured", "profileVersion", "tiers"];
+  const record = exactRecord(input, expectedKeys);
+  if (record === undefined || (includesSchemaVersion && record.schemaVersion !== 1)) {
+    return undefined;
+  }
+  const configured = record.configured;
+  const profileVersion = record.profileVersion;
+  const configurationRevisionId = record.configurationRevisionId;
+  const tiers = record.tiers === null ? null : decodeRoutingTierTargets(record.tiers);
+  const availability =
+    record.availability === null ? null : decodeRoutingAvailability(record.availability);
+  const configuredShape =
+    configured === true &&
+    isPositiveSafeInteger(profileVersion) &&
+    isUuid(configurationRevisionId) &&
+    tiers !== null &&
+    tiers !== undefined &&
+    availability !== null &&
+    availability !== undefined;
+  const unconfiguredShape =
+    configured === false &&
+    profileVersion === 0 &&
+    configurationRevisionId === null &&
+    tiers === null &&
+    availability === null;
+  if (!configuredShape && !unconfiguredShape) {
+    return undefined;
+  }
+  return Object.freeze({
+    configured: configured as boolean,
+    profileVersion: profileVersion as number,
+    configurationRevisionId: configurationRevisionId as string | null,
+    tiers: tiers ?? null,
+    availability: availability ?? null,
+  });
+}
+
+function exactRecord(
+  input: unknown,
+  expectedKeys: readonly string[],
+): Record<string, unknown> | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expected = [...expectedKeys].sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index])
+    ? record
+    : undefined;
+}
+
+function isUuid(input: unknown): input is string {
+  return typeof input === "string" && UUID_PATTERN.test(input);
+}
+
+function isNonNegativeSafeInteger(input: unknown): input is number {
+  return Number.isSafeInteger(input) && (input as number) >= 0;
+}
+
+function isPositiveSafeInteger(input: unknown): input is number {
+  return Number.isSafeInteger(input) && (input as number) >= 1;
+}
+
+function decodeRoutingTierTargets(input: unknown): DesktopRoutingTierTargets | undefined {
+  const record = exactRecord(input, ["deep", "fast", "standard"]);
+  if (record === undefined) {
+    return undefined;
+  }
+  const fast = decodeRoutingTierTarget(record.fast);
+  const standard = decodeRoutingTierTarget(record.standard);
+  const deep = decodeRoutingTierTarget(record.deep);
+  return fast === undefined || standard === undefined || deep === undefined
+    ? undefined
+    : Object.freeze({ fast, standard, deep });
+}
+
+function decodeRoutingTierTarget(input: unknown): DesktopRoutingTierTarget | undefined {
+  const record = exactRecord(input, ["model", "provider", "reasoningEffort"]);
+  if (
+    record === undefined ||
+    !validBoundedText(record.provider, MAX_PROVIDER_CHARACTERS) ||
+    !validBoundedText(record.model, MAX_MODEL_CHARACTERS) ||
+    !validBoundedText(record.reasoningEffort, MAX_REASONING_EFFORT_CHARACTERS)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    provider: record.provider,
+    model: record.model,
+    reasoningEffort: record.reasoningEffort,
+  });
+}
+
+function decodeRoutingAvailability(
+  input: unknown,
+): Readonly<Record<DesktopRoutingTier, DesktopRoutingAvailabilityStatus>> | undefined {
+  const record = exactRecord(input, ["deep", "fast", "standard"]);
+  if (
+    record === undefined ||
+    !DESKTOP_ROUTING_TIERS.every(
+      (tier) => typeof record[tier] === "string" && routingAvailabilityStatuses.has(record[tier]),
+    )
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    fast: record.fast as DesktopRoutingAvailabilityStatus,
+    standard: record.standard as DesktopRoutingAvailabilityStatus,
+    deep: record.deep as DesktopRoutingAvailabilityStatus,
+  });
+}
+
+function routingConfigurationsEqual(
+  left: DesktopRoutingConfiguration,
+  right: DesktopRoutingConfiguration,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function projectModelCatalogPage(input: unknown): DesktopModelCatalogSummary | undefined {

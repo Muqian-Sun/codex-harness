@@ -5,8 +5,11 @@ import {
   BootstrapStateTransitionError,
   advanceDesktopBootstrapState,
   decodeDesktopBootstrapState,
+  decodeDesktopRoutingConfigurationMutationResult,
+  decodeDesktopRoutingConfigurationUpdate,
   failedBootstrapState,
   projectDesktopModelCatalogSummary,
+  projectDesktopRoutingConfiguration,
   readyBootstrapState,
 } from "./bootstrap-state.js";
 
@@ -30,6 +33,26 @@ const CATALOG = Object.freeze({
   hasMore: false,
 });
 
+const ROUTING = Object.freeze({
+  configured: true,
+  profileVersion: 1,
+  configurationRevisionId: "00000000-0000-4000-8000-000000000861",
+  tiers: Object.freeze({
+    fast: Object.freeze({ provider: "openai", model: "gpt-fast", reasoningEffort: "low" }),
+    standard: Object.freeze({
+      provider: "openai",
+      model: "gpt-standard",
+      reasoningEffort: "medium",
+    }),
+    deep: Object.freeze({ provider: "openai", model: "gpt-standard", reasoningEffort: "high" }),
+  }),
+  availability: Object.freeze({
+    fast: "observed_available" as const,
+    standard: "observed_available" as const,
+    deep: "observed_available" as const,
+  }),
+});
+
 const READY = Object.freeze({
   phase: "ready" as const,
   account: Object.freeze({
@@ -38,6 +61,7 @@ const READY = Object.freeze({
     planType: "plus" as const,
   }),
   catalog: CATALOG,
+  routing: ROUTING,
 });
 
 describe("desktop bootstrap state", () => {
@@ -54,6 +78,9 @@ describe("desktop bootstrap state", () => {
     expect(Object.isFrozen(ready?.phase === "ready" ? ready.catalog.models[0] : undefined)).toBe(
       true,
     );
+    expect(Object.isFrozen(ready?.phase === "ready" ? ready.routing.tiers?.fast : undefined)).toBe(
+      true,
+    );
     expect(Object.isFrozen(failed)).toBe(true);
     expect(
       decodeDesktopBootstrapState({
@@ -66,6 +93,7 @@ describe("desktop bootstrap state", () => {
         phase: "ready",
         account: { ...READY.account, email: "private@example.com" },
         catalog: READY.catalog,
+        routing: READY.routing,
       }),
     ).toBe(undefined);
     expect(
@@ -73,6 +101,7 @@ describe("desktop bootstrap state", () => {
         phase: "ready",
         account: READY.account,
         catalog: { ...READY.catalog, nextCursor: "private-cursor" },
+        routing: READY.routing,
       }),
     ).toBe(undefined);
     expect(decodeDesktopBootstrapState({ phase: "failed", code: "raw_error" })).toBe(undefined);
@@ -94,7 +123,8 @@ describe("desktop bootstrap state", () => {
       models: CATALOG.models,
       nextCursor: null,
     });
-    const state = readyBootstrapState(account, catalog);
+    const routing = projectDesktopRoutingConfiguration({ schemaVersion: 1, ...ROUTING });
+    const state = readyBootstrapState(account, catalog, routing);
 
     expect(state).toEqual(READY);
     expect(JSON.stringify(state)).not.toContain("snapshotId");
@@ -102,6 +132,41 @@ describe("desktop bootstrap state", () => {
     expect(JSON.stringify(state)).not.toContain("nextCursor");
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.phase === "ready" ? state.account : undefined)).toBe(true);
+    expect(JSON.stringify(state)).not.toContain("schemaVersion");
+  });
+
+  it("strictly projects routing state and validates renderer mutation boundaries", () => {
+    const projected = projectDesktopRoutingConfiguration({ schemaVersion: 1, ...ROUTING });
+    const update = {
+      expectedProfileVersion: projected.profileVersion,
+      previousConfigurationRevisionId: projected.configurationRevisionId,
+      tiers: projected.tiers,
+    };
+
+    expect(projected).toEqual(ROUTING);
+    expect(decodeDesktopRoutingConfigurationUpdate(update)).toEqual(update);
+    expect(
+      decodeDesktopRoutingConfigurationMutationResult({ status: "saved", routing: projected }),
+    ).toEqual({ status: "saved", routing: projected });
+    expect(decodeDesktopRoutingConfigurationMutationResult({ status: "unavailable" })).toEqual({
+      status: "unavailable",
+    });
+    expect(
+      decodeDesktopRoutingConfigurationUpdate({ ...update, expectedProfileVersion: 0 }),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopRoutingConfigurationMutationResult({
+        status: "saved",
+        routing: { ...projected, privateRevision: "secret" },
+      }),
+    ).toBeUndefined();
+    expect(() =>
+      projectDesktopRoutingConfiguration({
+        schemaVersion: 1,
+        ...ROUTING,
+        availability: { ...ROUTING.availability, deep: "future" },
+      }),
+    ).toThrow(BootstrapStateTransitionError);
   });
 
   it("projects only the bounded visible catalog summary and rejects inconsistent pages", () => {

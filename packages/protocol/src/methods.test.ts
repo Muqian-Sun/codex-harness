@@ -170,6 +170,125 @@ describe("method contracts", () => {
     expect(decodeResponseResult("system.shutdown", { accepted: true }).ok).toBe(true);
   });
 
+  it("strictly validates persistent routing configuration reads and writes", () => {
+    const revisionId = "00000000-0000-4000-8000-000000000851";
+    const previousRevisionId = "00000000-0000-4000-8000-000000000852";
+    const tiers = {
+      fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+      standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+      deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+    } as const;
+    const availability = {
+      fast: "observed_available",
+      standard: "model_unavailable",
+      deep: "reasoning_effort_unsupported",
+    } as const;
+
+    expect(decodeRequestParams("routing.configuration.get", {}).ok).toBe(true);
+    expect(decodeRequestParams("routing.configuration.get", { extra: true }).ok).toBe(false);
+    expect(
+      decodeRequestParams("routing.configuration.set", {
+        commandId: revisionId,
+        expectedProfileVersion: 0,
+        previousConfigurationRevisionId: null,
+        tiers,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeRequestParams("routing.configuration.set", {
+        commandId: revisionId,
+        expectedProfileVersion: 1,
+        previousConfigurationRevisionId: previousRevisionId,
+        tiers,
+      }).ok,
+    ).toBe(true);
+
+    for (const invalid of [
+      {
+        commandId: revisionId,
+        expectedProfileVersion: 1,
+        previousConfigurationRevisionId: null,
+        tiers,
+      },
+      {
+        commandId: previousRevisionId,
+        expectedProfileVersion: 1,
+        previousConfigurationRevisionId: previousRevisionId,
+        tiers,
+      },
+      {
+        commandId: revisionId,
+        expectedProfileVersion: 0,
+        previousConfigurationRevisionId: null,
+        tiers: { ...tiers, fast: { ...tiers.fast, extra: true } },
+      },
+      {
+        commandId: revisionId,
+        expectedProfileVersion: 0,
+        previousConfigurationRevisionId: null,
+        tiers: { fast: tiers.fast, standard: tiers.standard },
+      },
+      {
+        commandId: revisionId,
+        expectedProfileVersion: 0,
+        previousConfigurationRevisionId: null,
+        tiers: { ...tiers, fast: { ...tiers.fast, model: " fast" } },
+      },
+    ]) {
+      expect(decodeRequestParams("routing.configuration.set", invalid).ok).toBe(false);
+    }
+
+    expect(
+      decodeResponseResult("routing.configuration.get", {
+        schemaVersion: 1,
+        configured: false,
+        profileVersion: 0,
+        configurationRevisionId: null,
+        tiers: null,
+        availability: null,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeResponseResult("routing.configuration.set", {
+        schemaVersion: 1,
+        configured: true,
+        profileVersion: 2,
+        configurationRevisionId: revisionId,
+        tiers,
+        availability,
+      }).ok,
+    ).toBe(true);
+
+    for (const invalid of [
+      {
+        schemaVersion: 1,
+        configured: false,
+        profileVersion: 1,
+        configurationRevisionId: revisionId,
+        tiers,
+        availability,
+      },
+      {
+        schemaVersion: 1,
+        configured: true,
+        profileVersion: 1,
+        configurationRevisionId: null,
+        tiers,
+        availability,
+      },
+      {
+        schemaVersion: 1,
+        configured: true,
+        profileVersion: 1,
+        configurationRevisionId: revisionId,
+        tiers,
+        availability: { ...availability, deep: "future" },
+      },
+    ]) {
+      expect(decodeResponseResult("routing.configuration.get", invalid).ok).toBe(false);
+    }
+  });
+
   it("rejects unknown methods and method-specific mismatches", () => {
     expect(decodeRequestParams("unknown.method", {}).ok).toBe(false);
     expect(decodeResponseResult("system.health", { status: "bad" }).ok).toBe(false);

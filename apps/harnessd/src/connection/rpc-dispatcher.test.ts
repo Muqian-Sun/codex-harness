@@ -6,7 +6,7 @@ import {
 } from "@codex-harness/protocol";
 import { describe, expect, it, vi } from "vitest";
 
-import { dispatchRpcRequest, type RpcDispatchContext } from "./rpc-dispatcher.js";
+import { RpcProviderError, dispatchRpcRequest, type RpcDispatchContext } from "./rpc-dispatcher.js";
 
 const ACCOUNT_STATUS = Object.freeze({
   schemaVersion: 1,
@@ -33,6 +33,15 @@ const MODEL_CATALOG_PAGE = Object.freeze({
   nextCursor: null,
 });
 
+const ROUTING_CONFIGURATION = Object.freeze({
+  schemaVersion: 1,
+  configured: false,
+  profileVersion: 0,
+  configurationRevisionId: null,
+  tiers: null,
+  availability: null,
+});
+
 function request(method: string, params: unknown = {}): RpcRequest {
   return {
     kind: "request",
@@ -54,6 +63,8 @@ function context(
     closing: false,
     readAccountStatus,
     readModelCatalogPage,
+    readRoutingConfiguration: () => ROUTING_CONFIGURATION,
+    setRoutingConfiguration: () => ROUTING_CONFIGURATION,
   };
 }
 
@@ -159,5 +170,108 @@ describe("RPC dispatcher model catalog", () => {
       error: { code: RPC_ERROR_CODES.invalidParams },
     });
     expect(readModelCatalogPage).not.toHaveBeenCalled();
+  });
+});
+
+describe("RPC dispatcher routing configuration", () => {
+  it("serves validated reads and passes validated writes to the provider", () => {
+    const readRoutingConfiguration = vi.fn(() => ROUTING_CONFIGURATION);
+    const configured = {
+      schemaVersion: 1,
+      configured: true,
+      profileVersion: 1,
+      configurationRevisionId: "00000000-0000-4000-8000-000000000851",
+      tiers: {
+        fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+        standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+        deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+      },
+      availability: {
+        fast: "observed_available",
+        standard: "observed_available",
+        deep: "observed_available",
+      },
+    } as const;
+    const setRoutingConfiguration = vi.fn(() => configured);
+    const routingContext = {
+      ...context(() => ACCOUNT_STATUS),
+      readRoutingConfiguration,
+      setRoutingConfiguration,
+    };
+
+    expect(
+      dispatchRpcRequest(request("routing.configuration.get"), routingContext).envelope,
+    ).toMatchObject({ kind: "response", result: ROUTING_CONFIGURATION });
+    const params = {
+      commandId: configured.configurationRevisionId,
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: configured.tiers,
+    };
+    expect(
+      dispatchRpcRequest(request("routing.configuration.set", params), routingContext).envelope,
+    ).toMatchObject({ kind: "response", result: configured });
+    expect(setRoutingConfiguration).toHaveBeenCalledWith(params);
+  });
+
+  it("maps stale writes to a fixed conflict and all other provider failures to unavailable", () => {
+    const base = context(() => ACCOUNT_STATUS);
+    const params = {
+      commandId: "00000000-0000-4000-8000-000000000851",
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: {
+        fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+        standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+        deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+      },
+    };
+    const conflict = dispatchRpcRequest(request("routing.configuration.set", params), {
+      ...base,
+      setRoutingConfiguration: () => {
+        throw new RpcProviderError("conflict");
+      },
+    });
+    expect(conflict.envelope).toMatchObject({
+      kind: "error",
+      error: { code: RPC_ERROR_CODES.conflict, message: "The routing configuration changed." },
+    });
+
+    for (const routingContext of [
+      { ...base, readRoutingConfiguration: () => ({ private: "detail" }) },
+      {
+        ...base,
+        setRoutingConfiguration: () => {
+          throw new Error("private detail");
+        },
+      },
+    ]) {
+      const method =
+        routingContext.readRoutingConfiguration === base.readRoutingConfiguration
+          ? "routing.configuration.set"
+          : "routing.configuration.get";
+      const dispatched = dispatchRpcRequest(
+        request(method, method.endsWith("set") ? params : {}),
+        routingContext,
+      );
+      expect(dispatched.envelope).toMatchObject({
+        kind: "error",
+        error: { code: RPC_ERROR_CODES.unavailable },
+      });
+      expect(JSON.stringify(dispatched)).not.toContain("private");
+    }
+  });
+
+  it("rejects malformed writes before consulting the provider", () => {
+    const setRoutingConfiguration = vi.fn(() => ROUTING_CONFIGURATION);
+    const dispatched = dispatchRpcRequest(
+      request("routing.configuration.set", { expectedProfileVersion: 0 }),
+      { ...context(() => ACCOUNT_STATUS), setRoutingConfiguration },
+    );
+    expect(dispatched.envelope).toMatchObject({
+      kind: "error",
+      error: { code: RPC_ERROR_CODES.invalidParams },
+    });
+    expect(setRoutingConfiguration).not.toHaveBeenCalled();
   });
 });

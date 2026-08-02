@@ -67,6 +67,35 @@ export async function smokeDaemonRuntime() {
     ) {
       throw new Error("The supervised daemon public model catalog response was invalid.");
     }
+    const unconfiguredRouting = await supervisor.readRoutingConfiguration();
+    if (
+      unconfiguredRouting.configured ||
+      unconfiguredRouting.profileVersion !== 0 ||
+      unconfiguredRouting.configurationRevisionId !== null
+    ) {
+      throw new Error("The supervised daemon initial routing configuration was invalid.");
+    }
+    const routingRevisionId = "00000000-0000-4000-8000-000000000941";
+    const savedRouting = await supervisor.setRoutingConfiguration({
+      commandId: routingRevisionId,
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: {
+        fast: { provider: "openai", model: "smoke-a", reasoningEffort: "low" },
+        standard: { provider: "openai", model: "smoke-b", reasoningEffort: "medium" },
+        deep: { provider: "openai", model: "smoke-b", reasoningEffort: "medium" },
+      },
+    });
+    if (
+      !savedRouting.configured ||
+      savedRouting.profileVersion !== 1 ||
+      savedRouting.configurationRevisionId !== routingRevisionId ||
+      Object.values(savedRouting.availability ?? {}).some(
+        (status) => status !== "observed_available",
+      )
+    ) {
+      throw new Error("The supervised daemon did not persist a valid routing configuration.");
+    }
     const accountEvent = await Promise.race([
       accountEventPromise,
       delay(5_000).then(() => {
@@ -101,6 +130,7 @@ export async function smokeDaemonRuntime() {
       codexExecutable,
       runtimeRoot,
       stateDatabasePath,
+      routingRevisionId,
     );
     const recoveredStateIdentity = await verifyStateDatabase(stateRoot);
     if (
@@ -126,6 +156,7 @@ async function smokeSupervisorRpcLoss(
   codexExecutable,
   runtimeRoot,
   stateDatabasePath,
+  routingRevisionId,
 ) {
   const supervisor = await DaemonProcessSupervisor.start({
     command: process.execPath,
@@ -135,6 +166,15 @@ async function smokeSupervisorRpcLoss(
     stateDatabasePath,
     clientVersion: "0.0.0",
   });
+  const recoveredRouting = await supervisor.readRoutingConfiguration();
+  if (
+    recoveredRouting.profileVersion !== 1 ||
+    recoveredRouting.configurationRevisionId !== routingRevisionId ||
+    recoveredRouting.tiers?.fast.model !== "smoke-a" ||
+    recoveredRouting.tiers?.deep.model !== "smoke-b"
+  ) {
+    throw new Error("The supervised daemon did not recover its routing configuration.");
+  }
   supervisor.client.close();
   const closed = await supervisor.closed;
   if (

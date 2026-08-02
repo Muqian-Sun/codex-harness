@@ -57,6 +57,54 @@ const CATALOG_SUMMARY = Object.freeze({
   hasMore: false,
 });
 
+const ROUTING_CONFIGURATION = Object.freeze({
+  schemaVersion: 1 as const,
+  configured: false,
+  profileVersion: 0,
+  configurationRevisionId: null,
+  tiers: null,
+  availability: null,
+});
+
+const ROUTING_SUMMARY = Object.freeze({
+  configured: false,
+  profileVersion: 0,
+  configurationRevisionId: null,
+  tiers: null,
+  availability: null,
+});
+
+const CONFIGURED_ROUTING = Object.freeze({
+  schemaVersion: 1 as const,
+  configured: true,
+  profileVersion: 1,
+  configurationRevisionId: "00000000-0000-4000-8000-000000000871",
+  tiers: Object.freeze({
+    fast: Object.freeze({ provider: "openai", model: "gpt-fast", reasoningEffort: "low" }),
+    standard: Object.freeze({
+      provider: "openai",
+      model: "gpt-standard",
+      reasoningEffort: "medium",
+    }),
+    deep: Object.freeze({ provider: "openai", model: "gpt-standard", reasoningEffort: "high" }),
+  }),
+  availability: Object.freeze({
+    fast: "observed_available" as const,
+    standard: "observed_available" as const,
+    deep: "observed_available" as const,
+  }),
+});
+
+function routingMethods(): Pick<
+  DesktopSupervisorHandle,
+  "readRoutingConfiguration" | "setRoutingConfiguration"
+> {
+  return {
+    readRoutingConfiguration: vi.fn(async () => ROUTING_CONFIGURATION),
+    setRoutingConfiguration: vi.fn(async () => ROUTING_CONFIGURATION),
+  };
+}
+
 function accountObservation(
   account = ACCOUNT_STATUS,
   observedThroughSequence = 0,
@@ -96,6 +144,7 @@ describe("desktop application controller", () => {
       closed: closed.promise,
       readAccountStatusObservation: vi.fn(async () => accountObservation()),
       readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+      ...routingMethods(),
       stop: vi.fn(async () => closeResult("graceful")),
     };
     const createSupervisor = vi.fn(async () => supervisor);
@@ -107,16 +156,87 @@ describe("desktop application controller", () => {
       cursor: null,
       limit: 12,
     });
+    expect(supervisor.readRoutingConfiguration).toHaveBeenCalledTimes(1);
     expect(stateStore.current).toEqual({
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
       catalog: CATALOG_SUMMARY,
+      routing: ROUTING_SUMMARY,
     });
 
     closed.resolve(closeResult("graceful"));
     await closed.promise;
     await Promise.resolve();
     expect(stateStore.current).toEqual({ phase: "failed", code: "daemon_unavailable" });
+  });
+
+  it("saves a routing update through a main-owned command identifier", async () => {
+    const stateStore = new BootstrapStateStore();
+    const setRoutingConfiguration = vi.fn(async () => CONFIGURED_ROUTING);
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readRoutingConfiguration: vi.fn(async () => ROUTING_CONFIGURATION),
+        setRoutingConfiguration,
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    const result = await controller.setRoutingConfiguration({
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: CONFIGURED_ROUTING.tiers,
+    });
+    expect(result).toMatchObject({ status: "saved", routing: { profileVersion: 1 } });
+    expect(setRoutingConfiguration).toHaveBeenCalledWith({
+      commandId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: CONFIGURED_ROUTING.tiers,
+    });
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      routing: { profileVersion: 1, configured: true },
+    });
+    expect(JSON.stringify(result)).not.toContain("schemaVersion");
+  });
+
+  it("refreshes current routing after an optimistic write conflict", async () => {
+    const stateStore = new BootstrapStateStore();
+    const readRoutingConfiguration = vi
+      .fn()
+      .mockResolvedValueOnce(ROUTING_CONFIGURATION)
+      .mockResolvedValueOnce(CONFIGURED_ROUTING);
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readRoutingConfiguration,
+        setRoutingConfiguration: vi.fn(async () => {
+          throw new HarnessRpcClientError("rpc_error", "rpc.conflict");
+        }),
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    const result = await controller.setRoutingConfiguration({
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      tiers: CONFIGURED_ROUTING.tiers,
+    });
+    expect(result).toMatchObject({ status: "conflict", routing: { profileVersion: 1 } });
+    expect(readRoutingConfiguration).toHaveBeenCalledTimes(2);
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      routing: { profileVersion: 1 },
+    });
   });
 
   it("waits for an in-flight start before stopping and never publishes transient readiness", async () => {
@@ -135,6 +255,7 @@ describe("desktop application controller", () => {
       closed: new Promise(() => undefined),
       readAccountStatusObservation: vi.fn(async () => accountObservation()),
       readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+      ...routingMethods(),
       stop,
     });
 
@@ -154,6 +275,7 @@ describe("desktop application controller", () => {
         closed: new Promise(() => undefined),
         readAccountStatusObservation: async () => await accountStatus.promise,
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...routingMethods(),
         stop,
       }),
     });
@@ -178,6 +300,7 @@ describe("desktop application controller", () => {
         closed: new Promise(() => undefined),
         readAccountStatusObservation: vi.fn(async () => accountObservation()),
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...routingMethods(),
         stop: async () => closeResult("containment_unknown"),
       }),
     });
@@ -197,6 +320,7 @@ describe("desktop application controller", () => {
           throw new HarnessRpcClientError("rpc_error", "service.unavailable");
         }),
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...routingMethods(),
         stop,
       }),
     });
@@ -217,6 +341,7 @@ describe("desktop application controller", () => {
         readModelCatalogPage: vi.fn(async () => {
           throw new HarnessRpcClientError("rpc_error", "service.unavailable");
         }),
+        ...routingMethods(),
         stop,
       }),
     });
@@ -236,6 +361,7 @@ describe("desktop application controller", () => {
           closed: new Promise(() => undefined),
           readAccountStatusObservation: async () => accountObservation(ACCOUNT_STATUS, 1),
           readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+          ...routingMethods(),
           stop: async () => closeResult("graceful"),
         };
       },
@@ -247,6 +373,7 @@ describe("desktop application controller", () => {
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
       catalog: CATALOG_SUMMARY,
+      routing: ROUTING_SUMMARY,
     });
   });
 
@@ -261,6 +388,7 @@ describe("desktop application controller", () => {
           return accountObservation(ACCOUNT_STATUS, 1);
         },
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...routingMethods(),
         stop: async () => closeResult("graceful"),
       }),
     });
@@ -271,6 +399,7 @@ describe("desktop application controller", () => {
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
       catalog: CATALOG_SUMMARY,
+      routing: ROUTING_SUMMARY,
     });
   });
 
@@ -286,6 +415,7 @@ describe("desktop application controller", () => {
           closed: new Promise(() => undefined),
           readAccountStatusObservation: async () => accountObservation(),
           readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+          ...routingMethods(),
           stop: async () => closeResult("graceful"),
         };
       },
@@ -297,6 +427,7 @@ describe("desktop application controller", () => {
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
       catalog: CATALOG_SUMMARY,
+      routing: ROUTING_SUMMARY,
     });
 
     await controller.stop();
