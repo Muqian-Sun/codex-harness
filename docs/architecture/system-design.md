@@ -76,7 +76,7 @@ V1 使用现有两个监督角色处理单一监督者故障：
 
 macOS 首发的 daemon 运行时只接受位于当前用户私有目录中的绝对 Unix socket 路径，拒绝复用已存在端点，监听后将 socket 权限固定为 `0600`。启动 capability 必须从 FD 3 有界读取且在启动前完成规范校验；FD 4 的 EOF、错误或异常关闭触发一次保守排空。运行时按 `starting`、`listening`、`quiescing`、`closed` 转换，停止监听后先冲刷已排队响应，再在超时后销毁连接；库层不得直接退出进程。Electron main 的 spawn、独立进程组和升级终止策略在该 daemon 运行时之上实现。
 
-macOS 的 Electron main 监督层在当前用户私有 runtime root 下创建随机 `0700` 目录，以独立 POSIX 进程组启动 daemon，固定 FD 3/FD 4 管道布局，并在 RPC hello 前验证 socket 所有者、`0600` 权限及 dev/inode。正常停止先请求 RPC 排空并关闭 watchdog 写端；宽限期后只对启动时记录的负 PGID 依次发送 `SIGTERM`、`SIGKILL`。daemon leader 意外退出不等价于进程域已清空，监督层仍检查同组后代；无法证明进程组消失时结果必须是 `containment_unknown`。endpoint 只在身份未变化时删除，随机目录只在为空且身份未变化时删除。监督层不自动重启或重放请求，也不把底层 stderr、环境或启动 capability 暴露给上层。
+macOS 的 Electron main 监督层在当前用户私有 runtime root 下创建随机 `0700` 目录，以独立 POSIX 进程组启动 daemon，固定 FD 3/FD 4 管道布局，并在 RPC hello 前验证 socket 所有者、`0600` 权限及 dev/inode。监督层必须显式接收并在 spawn 前验证一个绝对、可执行的 Codex CLI 路径；调用方参数不能覆盖 supervisor 拥有的 endpoint 或 Codex executable，实际 argv 只追加固定 `--endpoint` 与 `--codex-executable` 值，startup capability 仍只经 FD 3 传递。daemon 只有在精确 Codex 版本、App Server 初始化和完整模型目录均成功后才监听，因此 supervisor 默认 readiness deadline 为 30 秒，以覆盖 worker 默认 25 秒最坏启动窗口；调用方仍可在 60 秒上限内显式收紧。正常停止先请求 RPC 排空并关闭 watchdog 写端；宽限期后只对启动时记录的负 PGID 依次发送 `SIGTERM`、`SIGKILL`。daemon leader 意外退出不等价于进程域已清空，监督层仍检查同组后代；无法证明进程组消失时结果必须是 `containment_unknown`。endpoint 只在身份未变化时删除，随机目录只在为空且身份未变化时删除。监督层不自动发现或下载 Codex、不自动重启或重放请求，也不把底层 stderr、环境、路径或启动 capability 暴露给上层。
 
 ## 6. 领域模型
 
@@ -236,7 +236,7 @@ V1 初始出站白名单只包含 `model/list`、`thread/start`、`thread/resume
 
 daemon 内部的首个受控 App Server worker 在创建子进程前使用同一绝对 Codex executable 执行有界 `--version` 检查，并要求精确匹配 Schema manifest 固定的 `codex-cli 0.146.0-alpha.9.2`；通过后只以无 shell 的固定参数 `app-server --listen stdio:// --strict-config` 启动，继承 daemon 所在的 Electron kill domain。worker 分离并持续排空 stderr，但不向公开错误或事件暴露其内容；stdout 使用 16 MiB 上限、fatal UTF-8 和严格 adapter 做增量 JSONL 解析，完成一次 `initialize`/`initialized` 后才进入 ready。当前公开请求面刻意只包含只读 `model/list`，没有通用 method 入口；任意 server request、坏帧、截断、未知/重复响应、消费回调失败或请求超时都会关闭整个 worker，超时请求不自动重放。正常关闭先结束 stdin，随后只对精确 child PID 依次升级 `SIGTERM`、`SIGKILL` 并报告无法证明退出的 `containment_unknown`；由于尚未开放 turn，细粒度 worker 后代排空继续后置，外层 daemon 进程组仍是最终包含边界。
 
-`DaemonRuntime` 可以显式接管一个已经 ready 且持有当前目录的 worker manager。接管后，任意 daemon 排空都会同时关闭 manager，daemon 的 `closed` 只有在端点清理和 worker 关闭均结束后才完成；manager 非预期关闭会以 `worker_failure` 停止监听并排空连接，worker 无法证明包含时报告 `worker_shutdown_failed`。该绑定不隐式寻找 Codex executable，也不改变无 manager 的最小 daemon 行为；Electron main 到 daemon CLI 的 executable 配置传递仍属后续 PR。当前 manager 不接入 SQLite、desktop RPC 或路由执行，在审批、工具 gate 和安全 turn coordinator 完成前不得开放 thread/turn。
+`DaemonRuntime` 可以显式接管一个已经 ready 且持有当前目录的 worker manager。接管后，任意 daemon 排空都会同时关闭 manager，daemon 的 `closed` 只有在端点清理和 worker 关闭均结束后才完成；manager 非预期关闭会以 `worker_failure` 停止监听并排空连接，worker 无法证明包含时报告 `worker_shutdown_failed`。实际 daemon CLI 固定接收 supervisor 追加的绝对 Codex executable，在 startup capability 和 parent 存活首次验证后创建 V1 `openai` manager，并在 manager ready/current 后才启动监听；parent 在 manager 的有界启动期间丢失时，CLI 在当前步骤返回后复核并关闭 manager，外层进程组 deadline 仍提供最终包含。worker/manager 启动错误只输出稳定 code，不回显路径、版本原文、stderr、模型、cursor 或服务端 message。库层无 manager 的最小 `DaemonRuntime` 入口只保留给隔离测试和未来显式组合；产品 CLI 不再把“无 worker listener”当作 readiness。当前 manager 不接入 SQLite、desktop RPC 或路由执行，在审批、工具 gate 和安全 turn coordinator 完成前不得开放 thread/turn。
 
 ## 12. Desktop 到 Harness 协议
 
@@ -287,7 +287,7 @@ Renderer、Electron main、Harness daemon 和每个 App Server worker 的日志�
 运行时能力在依赖具备前保持关闭：
 
 1. 工作区、协议契约与 CI：已由 PR #1 完成。
-2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list`、单 worker manager、完整目录分页、session freshness 和 daemon 排空绑定已完成；Electron/CLI 启动接线、认证状态、thread/turn、审批和工具 gate 待后续 PR。
+2. Codex App Server 适配器与受控 worker：固定 Schema/版本、严格 adapter、真实进程版本校验、stdio 初始化、只读 `model/list`、单 worker manager、完整目录分页、session freshness、daemon 排空绑定以及 Electron supervisor → daemon CLI 的真实启动接线已完成；application bootstrap/安装资源定位、认证状态、thread/turn、审批和工具 gate 待后续 PR。
 3. daemon 生命周期与本地传输。
 4. SQLite 事件日志和恢复原语。
 5. 任务与持久计划状态。
