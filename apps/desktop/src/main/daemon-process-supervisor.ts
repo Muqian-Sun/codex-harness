@@ -2,7 +2,7 @@ import { constants as fsConstants } from "node:fs";
 import { access, chmod, lstat, mkdtemp, rmdir, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Writable } from "node:stream";
 
@@ -76,6 +76,7 @@ export type DaemonProcessSupervisorConfig = Readonly<{
   codexExecutable: string;
   args: readonly string[];
   runtimeRoot: string;
+  stateDatabasePath: string;
   clientVersion: string;
   electronRunAsNode?: boolean;
   startupTimeoutMs?: number;
@@ -110,6 +111,7 @@ type NormalizedConfig = Readonly<{
   codexExecutable: string;
   args: readonly string[];
   runtimeRoot: string;
+  stateDatabasePath: string;
   clientVersion: string;
   electronRunAsNode: boolean;
   startupTimeoutMs: number;
@@ -129,6 +131,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
     const codexExecutable = config.codexExecutable;
     const args = [...config.args];
     const runtimeRoot = config.runtimeRoot;
+    const stateDatabasePath = config.stateDatabasePath;
     const clientVersion = config.clientVersion;
     const electronRunAsNode = config.electronRunAsNode ?? false;
     const startupTimeoutMs = config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
@@ -146,6 +149,10 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
       typeof runtimeRoot !== "string" ||
       !isAbsolute(runtimeRoot) ||
       runtimeRoot.includes("\0") ||
+      typeof stateDatabasePath !== "string" ||
+      !isAbsolute(stateDatabasePath) ||
+      stateDatabasePath.includes("\0") ||
+      basename(stateDatabasePath) !== "harness.db" ||
       !ProductVersionSchema.safeParse(clientVersion).success ||
       (config.electronRunAsNode !== undefined && typeof config.electronRunAsNode !== "boolean") ||
       args.length > MAX_ARGUMENT_COUNT ||
@@ -175,6 +182,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
       codexExecutable,
       args: Object.freeze(args),
       runtimeRoot,
+      stateDatabasePath,
       clientVersion,
       electronRunAsNode,
       startupTimeoutMs,
@@ -196,7 +204,9 @@ function isReservedDaemonArgument(argument: string): boolean {
     argument === "--endpoint" ||
     argument.startsWith("--endpoint=") ||
     argument === "--codex-executable" ||
-    argument.startsWith("--codex-executable=")
+    argument.startsWith("--codex-executable=") ||
+    argument === "--state-database" ||
+    argument.startsWith("--state-database=")
   );
 }
 
@@ -267,7 +277,10 @@ export class DaemonProcessSupervisor {
       throw new DaemonProcessSupervisorError("unsupported_platform");
     }
     const normalized = normalizeConfig(config);
-    await validateRuntimeRoot(normalized.runtimeRoot);
+    await Promise.all([
+      validatePrivateDirectory(normalized.runtimeRoot),
+      validatePrivateDirectory(dirname(normalized.stateDatabasePath)),
+    ]);
     try {
       await Promise.all([
         access(normalized.command, fsConstants.X_OK),
@@ -296,6 +309,8 @@ export class DaemonProcessSupervisor {
           endpoint,
           "--codex-executable",
           normalized.codexExecutable,
+          "--state-database",
+          normalized.stateDatabasePath,
         ],
         {
           cwd: runtimeDirectory,
@@ -587,9 +602,9 @@ export class DaemonProcessSupervisor {
   }
 }
 
-async function validateRuntimeRoot(runtimeRoot: string): Promise<void> {
+async function validatePrivateDirectory(directory: string): Promise<void> {
   try {
-    const metadata = await lstat(runtimeRoot);
+    const metadata = await lstat(directory);
     const getuid = process.getuid;
     if (
       !metadata.isDirectory() ||

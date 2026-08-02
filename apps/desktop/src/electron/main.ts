@@ -26,6 +26,7 @@ import { DesktopApplicationController } from "./application-controller.js";
 import { LOCAL_RESOURCE_SCHEME, createLocalResourceHandler } from "./local-resource-protocol.js";
 import {
   ensurePrivateDesktopRuntimeRoot,
+  ensurePrivateDesktopStateDatabasePath,
   resolveDesktopRuntimeResources,
 } from "./runtime-resources.js";
 import {
@@ -110,12 +111,17 @@ async function runDesktopApplication(): Promise<void> {
           ? { developmentCodexExecutable }
           : {}),
       });
-      const runtimeRoot = await ensurePrivateDesktopRuntimeRoot(app.getPath("userData"));
+      const userDataPath = app.getPath("userData");
+      const [runtimeRoot, stateDatabasePath] = await Promise.all([
+        ensurePrivateDesktopRuntimeRoot(userDataPath),
+        ensurePrivateDesktopStateDatabasePath(userDataPath),
+      ]);
       return await DaemonProcessSupervisor.start({
         command: resources.command,
         codexExecutable: resources.codexExecutable,
         args: [resources.daemonEntry],
         runtimeRoot,
+        stateDatabasePath,
         clientVersion: desktopBootstrapMetadata.version,
         electronRunAsNode: true,
         onAccountStatusChanged,

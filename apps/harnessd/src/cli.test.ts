@@ -6,18 +6,22 @@ import { DaemonCliError, parseDaemonArguments } from "./cli.js";
 
 describe("harnessd command arguments", () => {
   const codexExecutable = resolve("fake-codex");
+  const stateDatabasePath = resolve("state", "harness.db");
 
-  it("accepts exactly one explicit endpoint and absolute Codex executable", () => {
+  it("accepts exactly one explicit endpoint, Codex executable, and state database", () => {
     expect(
       parseDaemonArguments([
         "--endpoint",
         "/private/runtime/harnessd.sock",
         "--codex-executable",
         codexExecutable,
+        "--state-database",
+        stateDatabasePath,
       ]),
     ).toEqual({
       endpoint: "/private/runtime/harnessd.sock",
       codexExecutable,
+      stateDatabasePath,
     });
   });
 
@@ -33,12 +37,37 @@ describe("harnessd command arguments", () => {
       ["--endpoint", "/tmp/harnessd.sock", "--codex-executable", ""],
       ["--endpoint", "/tmp/has\0sentinel-secret", "--codex-executable", codexExecutable],
       ["--endpoint", "/tmp/harnessd.sock", "--codex-executable", `${codexExecutable}\0x`],
+      [
+        "--endpoint",
+        "/tmp/harnessd.sock",
+        "--codex-executable",
+        codexExecutable,
+        "--state-database",
+      ],
+      [
+        "--endpoint",
+        "/tmp/harnessd.sock",
+        "--codex-executable",
+        codexExecutable,
+        "--state-database",
+        "relative/harness.db",
+      ],
+      [
+        "--endpoint",
+        "/tmp/harnessd.sock",
+        "--codex-executable",
+        codexExecutable,
+        "--state-database",
+        resolve("state", "other.db"),
+      ],
       ["--codex-executable", codexExecutable, "--endpoint", "/tmp/harnessd.sock"],
       [
         "--endpoint",
         "/tmp/harnessd.sock",
         "--codex-executable",
         codexExecutable,
+        "--state-database",
+        stateDatabasePath,
         "--codex-executable",
         codexExecutable,
       ],

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { closeSync, createReadStream } from "node:fs";
-import { isAbsolute } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -9,6 +9,7 @@ import {
   AppServerWorkerManagerError,
 } from "./runtime/app-server-worker-manager.js";
 import { DaemonRuntime, DaemonRuntimeStartError } from "./runtime/daemon-runtime.js";
+import type { DaemonStateStore, DaemonStateStoreError } from "./runtime/daemon-state-store.js";
 import { LocalEndpointError } from "./runtime/local-endpoint.js";
 import { monitorParentWatchdog, type ParentLossReason } from "./runtime/parent-watchdog.js";
 import {
@@ -16,6 +17,8 @@ import {
   readStartupCapability,
 } from "./runtime/startup-capability.js";
 import { HARNESS_DAEMON_VERSION } from "./version.js";
+
+type DaemonStateStoreErrorConstructor = typeof DaemonStateStoreError;
 
 export class DaemonCliError extends Error {
   readonly code: "invalid_arguments" | "parent_unavailable";
@@ -34,30 +37,42 @@ export class DaemonCliError extends Error {
 export function parseDaemonArguments(args: readonly string[]): Readonly<{
   endpoint: string;
   codexExecutable: string;
+  stateDatabasePath: string;
 }> {
   if (
-    args.length !== 4 ||
+    args.length !== 6 ||
     args[0] !== "--endpoint" ||
     !args[1] ||
     args[1].includes("\0") ||
     args[2] !== "--codex-executable" ||
     !args[3] ||
     args[3].includes("\0") ||
-    !isAbsolute(args[3])
+    !isAbsolute(args[3]) ||
+    args[4] !== "--state-database" ||
+    !args[5] ||
+    args[5].includes("\0") ||
+    !isAbsolute(args[5]) ||
+    basename(args[5]) !== "harness.db"
   ) {
     throw new DaemonCliError("invalid_arguments");
   }
-  return Object.freeze({ endpoint: args[1], codexExecutable: args[3] });
+  return Object.freeze({
+    endpoint: args[1],
+    codexExecutable: args[3],
+    stateDatabasePath: args[5],
+  });
 }
 
 export async function main(args: readonly string[] = process.argv.slice(2)): Promise<void> {
   let disposeWatchdog: (() => void) | undefined;
   let runtime: DaemonRuntime | undefined;
   let workerManager: AppServerWorkerManager | undefined;
+  let stateStore: DaemonStateStore | undefined;
+  let stateStoreErrorClass: DaemonStateStoreErrorConstructor | undefined;
   const signalHandlers = new Map<NodeJS.Signals, () => void>();
 
   try {
-    const { endpoint, codexExecutable } = parseDaemonArguments(args);
+    const { endpoint, codexExecutable, stateDatabasePath } = parseDaemonArguments(args);
     const capabilityInput = createReadStream("", { fd: 3, autoClose: true });
     const parentWatchdog = createReadStream("", { fd: 4, autoClose: true });
     let parentLoss: ParentLossReason | undefined;
@@ -86,10 +101,18 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       throw new DaemonCliError("parent_unavailable");
     }
 
+    const stateModule = await import("./runtime/daemon-state-store.js");
+    stateStoreErrorClass = stateModule.DaemonStateStoreError;
+    stateStore = await stateModule.DaemonStateStore.open({ databasePath: stateDatabasePath });
+    if (parentLoss !== undefined) {
+      throw new DaemonCliError("parent_unavailable");
+    }
+
     runtime = await DaemonRuntime.start({
       endpoint,
       startupCapability,
       serverVersion: HARNESS_DAEMON_VERSION,
+      stateStore,
       workerManager,
     });
     if (parentLoss !== undefined) {
@@ -110,7 +133,9 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       process.exitCode = 1;
     }
   } catch (error: unknown) {
-    process.stderr.write(`harnessd startup failed (${publicFailureCode(error)}).\n`);
+    process.stderr.write(
+      `harnessd startup failed (${publicFailureCode(error, stateStoreErrorClass)}).\n`,
+    );
     process.exitCode = 1;
   } finally {
     for (const [signal, handler] of signalHandlers) {
@@ -121,6 +146,14 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       await runtime.closed;
     }
     await workerManager?.close();
+    try {
+      stateStore?.close();
+    } catch {
+      if (process.exitCode !== 1) {
+        process.stderr.write("harnessd runtime failed (state_shutdown_failed).\n");
+        process.exitCode = 1;
+      }
+    }
     disposeWatchdog?.();
     closeInheritedDescriptor(4);
   }
@@ -134,11 +167,15 @@ function closeInheritedDescriptor(descriptor: number): void {
   }
 }
 
-function publicFailureCode(error: unknown): string {
+function publicFailureCode(
+  error: unknown,
+  stateStoreErrorClass?: DaemonStateStoreErrorConstructor,
+): string {
   if (
     error instanceof DaemonCliError ||
     error instanceof AppServerWorkerManagerError ||
     error instanceof DaemonRuntimeStartError ||
+    (stateStoreErrorClass !== undefined && error instanceof stateStoreErrorClass) ||
     error instanceof LocalEndpointError ||
     error instanceof StartupCapabilityInputError
   ) {

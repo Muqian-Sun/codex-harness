@@ -21,6 +21,7 @@ import {
   type UnixEndpointClosePreparation,
   type UnixEndpointIdentity,
 } from "./local-endpoint.js";
+import type { DaemonStateStore } from "./daemon-state-store.js";
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -41,7 +42,11 @@ export type DaemonRuntimeCloseResult = Readonly<{
   endpointCleanup:
     "missing" | "not_applicable" | "removed" | "replacement_preserved" | "unsafe_to_remove";
   errorCode?:
-    "endpoint_cleanup_failed" | "server_error" | "worker_failure" | "worker_shutdown_failed";
+    | "endpoint_cleanup_failed"
+    | "server_error"
+    | "state_shutdown_failed"
+    | "worker_failure"
+    | "worker_shutdown_failed";
 }>;
 
 export type DaemonRuntimeConfig = Readonly<{
@@ -52,6 +57,7 @@ export type DaemonRuntimeConfig = Readonly<{
   handshakeTimeoutMs?: number;
   drainTimeoutMs?: number;
   workerManager?: AppServerWorkerManager;
+  stateStore?: DaemonStateStore;
 }>;
 
 export class DaemonRuntimeStartError extends Error {
@@ -78,6 +84,7 @@ export class DaemonRuntime {
   readonly #handshakeTimeoutMs: number;
   readonly #drainTimeoutMs: number;
   readonly #workerManager: AppServerWorkerManager | undefined;
+  readonly #stateStore: DaemonStateStore | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
@@ -104,7 +111,7 @@ export class DaemonRuntime {
         "startupCapability" | "serverVersion" | "handshakeTimeoutMs" | "drainTimeoutMs"
       >
     > &
-      Readonly<{ workerManager?: AppServerWorkerManager }>,
+      Readonly<{ stateStore?: DaemonStateStore; workerManager?: AppServerWorkerManager }>,
   ) {
     this.#endpoint = endpoint;
     this.#startupCapability = config.startupCapability;
@@ -112,6 +119,7 @@ export class DaemonRuntime {
     this.#handshakeTimeoutMs = config.handshakeTimeoutMs;
     this.#drainTimeoutMs = config.drainTimeoutMs;
     this.#workerManager = config.workerManager;
+    this.#stateStore = config.stateStore;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
@@ -133,9 +141,13 @@ export class DaemonRuntime {
       !ProductVersionSchema.safeParse(config.serverVersion).success ||
       !validTimeout(config.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS) ||
       !validTimeout(config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS) ||
-      !validReadyWorkerManager(config.workerManager)
+      !validReadyWorkerManager(config.workerManager) ||
+      !(await validReadyStateStore(config.stateStore))
     ) {
-      await closeProvidedWorkerManager(config.workerManager);
+      await Promise.all([
+        closeProvidedWorkerManager(config.workerManager),
+        closeProvidedStateStore(config.stateStore),
+      ]);
       throw new DaemonRuntimeStartError("invalid_configuration");
     }
 
@@ -143,7 +155,10 @@ export class DaemonRuntime {
     try {
       endpoint = await validateLocalEndpoint(config.endpoint, config.platform);
     } catch (error: unknown) {
-      await closeProvidedWorkerManager(config.workerManager);
+      await Promise.all([
+        closeProvidedWorkerManager(config.workerManager),
+        closeProvidedStateStore(config.stateStore),
+      ]);
       if (error instanceof LocalEndpointError) {
         throw error;
       }
@@ -156,6 +171,7 @@ export class DaemonRuntime {
       handshakeTimeoutMs: config.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
       drainTimeoutMs: config.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS,
       ...(config.workerManager === undefined ? {} : { workerManager: config.workerManager }),
+      ...(config.stateStore === undefined ? {} : { stateStore: config.stateStore }),
     });
     await runtime.#listen();
     return runtime;
@@ -232,7 +248,7 @@ export class DaemonRuntime {
         await this.#closeListenerSafely();
         await this.closed;
       } else {
-        await this.#closeWorkerManager();
+        await Promise.all([this.#closeWorkerManager(), this.#closeStateStore()]);
       }
       if (error instanceof DaemonRuntimeStartError || error instanceof LocalEndpointError) {
         throw error;
@@ -449,6 +465,7 @@ export class DaemonRuntime {
     const workerShutdownFailed =
       this.#workerManager !== undefined &&
       (workerClose === null || workerClose.containment === "containment_unknown");
+    const stateShutdownFailed = !this.#closeStateStore();
     this.#state = "closed";
     this.#resolveClosed(
       Object.freeze({
@@ -462,9 +479,24 @@ export class DaemonRuntime {
               ? { errorCode: "worker_failure" as const }
               : workerShutdownFailed
                 ? { errorCode: "worker_shutdown_failed" as const }
-                : {}),
+                : stateShutdownFailed
+                  ? { errorCode: "state_shutdown_failed" as const }
+                  : {}),
       }),
     );
+  }
+
+  #closeStateStore(): boolean {
+    const stateStore = this.#stateStore;
+    if (stateStore === undefined) {
+      return true;
+    }
+    try {
+      stateStore.close();
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -478,6 +510,21 @@ async function closeProvidedWorkerManager(
     await manager.close();
   } catch {
     // Invalid daemon startup cannot retain ownership of a live worker manager.
+  }
+}
+
+async function closeProvidedStateStore(store: DaemonStateStore | undefined): Promise<void> {
+  if (store === undefined) {
+    return;
+  }
+  try {
+    const { DaemonStateStore } = await import("./daemon-state-store.js");
+    if (!(store instanceof DaemonStateStore)) {
+      return;
+    }
+    store.close();
+  } catch {
+    // Invalid daemon startup cannot retain ownership of an open state store.
   }
 }
 
@@ -498,6 +545,22 @@ function validReadyWorkerManager(manager: AppServerWorkerManager | undefined): b
       accountStatus !== null &&
       manager.isAccountStatusCurrent(accountStatus)
     );
+  } catch {
+    return false;
+  }
+}
+
+async function validReadyStateStore(store: DaemonStateStore | undefined): Promise<boolean> {
+  if (store === undefined) {
+    return true;
+  }
+  try {
+    const { DaemonStateStore } = await import("./daemon-state-store.js");
+    if (!(store instanceof DaemonStateStore) || store.state !== "ready") {
+      return false;
+    }
+    store.inspect();
+    return true;
   } catch {
     return false;
   }

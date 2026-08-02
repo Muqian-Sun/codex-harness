@@ -76,10 +76,21 @@ export async function resolveDesktopRuntimeResources(
 }
 
 export async function ensurePrivateDesktopRuntimeRoot(userDataPath: string): Promise<string> {
+  return await ensurePrivateDesktopDirectory(userDataPath, "runtime");
+}
+
+export async function ensurePrivateDesktopStateDatabasePath(userDataPath: string): Promise<string> {
+  return join(await ensurePrivateDesktopDirectory(userDataPath, "state"), "harness.db");
+}
+
+async function ensurePrivateDesktopDirectory(
+  userDataPath: string,
+  directoryName: "runtime" | "state",
+): Promise<string> {
   if (!validAbsolutePath(userDataPath)) {
     throw new DesktopRuntimeRootError();
   }
-  const runtimeRoot = join(userDataPath, "runtime");
+  const runtimeRoot = join(userDataPath, directoryName);
   try {
     await mkdir(runtimeRoot, { mode: 0o700 });
   } catch (error: unknown) {
