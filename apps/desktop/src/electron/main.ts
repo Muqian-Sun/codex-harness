@@ -297,24 +297,31 @@ function installSmokeObservation(
           `(() => {
             const routingMode = ${JSON.stringify(routingMode)};
             const matrix = document.querySelector("[data-routing-configured]");
-            if (routingMode === "configure" && matrix?.dataset.routingConfigured === "false" && !window.__codexHarnessRoutingSmokeStarted) {
-              window.__codexHarnessRoutingSmokeStarted = true;
+            if (routingMode === "configure" && matrix?.dataset.routingConfigured === "false" && !window.__codexHarnessRoutingSmokeSubmitted) {
               const values = {
                 fast: { model: "smoke-a", reasoningEffort: "low" },
                 standard: { model: "smoke-b", reasoningEffort: "medium" },
                 deep: { model: "smoke-b", reasoningEffort: "medium" }
               };
+              let valuesStable = true;
               for (const [tier, target] of Object.entries(values)) {
                 for (const [field, value] of Object.entries(target)) {
                   const input = document.querySelector('[data-routing-tier="' + tier + '"][data-routing-field="' + field + '"]');
-                  if (input instanceof HTMLInputElement) {
+                  if (!(input instanceof HTMLInputElement)) {
+                    valuesStable = false;
+                  } else if (input.value !== value) {
+                    valuesStable = false;
                     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
                     setter?.call(input, value);
                     input.dispatchEvent(new Event("input", { bubbles: true }));
                   }
                 }
               }
-              setTimeout(() => document.querySelector("[data-routing-save]")?.click(), 0);
+              const save = document.querySelector("[data-routing-save]");
+              if (valuesStable && save instanceof HTMLButtonElement && !save.disabled) {
+                window.__codexHarnessRoutingSmokeSubmitted = true;
+                save.click();
+              }
             }
             const text = document.body?.textContent ?? "";
             return {
