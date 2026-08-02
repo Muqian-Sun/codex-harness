@@ -18,6 +18,8 @@ import {
   validateJsonValue,
   type JsonValue,
   type HarnessAccountStatusResult as ProtocolAccountStatusResult,
+  type HarnessModelCatalogPageParams as ProtocolModelCatalogPageParams,
+  type HarnessModelCatalogPageResult as ProtocolModelCatalogPageResult,
   type RpcEvent,
   type RpcMethodName,
 } from "@codex-harness/protocol";
@@ -92,6 +94,8 @@ export type HarnessHealthResult = Readonly<{
 
 export type HarnessShutdownResult = Readonly<{ accepted: true }>;
 export type HarnessAccountStatusResult = Readonly<ProtocolAccountStatusResult>;
+export type HarnessModelCatalogPageParams = Readonly<ProtocolModelCatalogPageParams>;
+export type HarnessModelCatalogPageResult = Readonly<ProtocolModelCatalogPageResult>;
 export type HarnessAccountStatusObservation = Readonly<{
   account: HarnessAccountStatusResult;
   observedThroughSequence: number;
@@ -271,6 +275,15 @@ export class HarnessRpcClient {
       account: observation.value as HarnessAccountStatusResult,
       observedThroughSequence: observation.observedThroughSequence,
     });
+  }
+
+  async modelCatalogPage(
+    params: HarnessModelCatalogPageParams,
+  ): Promise<HarnessModelCatalogPageResult> {
+    return (await this.request(
+      "model.catalog_page",
+      params as JsonValue,
+    )) as unknown as HarnessModelCatalogPageResult;
   }
 
   async requestShutdown(reason?: string): Promise<HarnessShutdownResult> {

@@ -5,6 +5,15 @@ import { NamespacedTokenSchema, NonNegativeSafeIntegerSchema, StreamIdSchema } f
 import { protocolFailure, protocolSuccess, type ProtocolResult } from "./result.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const MODEL_CATALOG_CURSOR_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[A-Za-z0-9_-]+$/;
+const MAX_PROVIDER_CHARACTERS = 256;
+const MAX_MODEL_CHARACTERS = 4_096;
+const MAX_REASONING_EFFORT_CHARACTERS = 128;
+const MAX_MODEL_CATALOG_CURSOR_CHARACTERS = 2_048;
+
+export const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
+export const MAX_MODEL_REASONING_EFFORTS = 64;
 
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
@@ -75,6 +84,113 @@ export const AccountStatusResultSchema = z
 
 export type HarnessAccountStatusResult = z.infer<typeof AccountStatusResultSchema>;
 
+export const MODEL_INPUT_MODALITIES = Object.freeze(["audio", "image", "text"] as const);
+export type HarnessModelInputModality = (typeof MODEL_INPUT_MODALITIES)[number];
+
+export const ModelCatalogPageParamsSchema = z
+  .object({
+    cursor: z
+      .string()
+      .min(1)
+      .max(MAX_MODEL_CATALOG_CURSOR_CHARACTERS)
+      .regex(MODEL_CATALOG_CURSOR_PATTERN)
+      .nullable(),
+    limit: z.number().int().min(1).max(MAX_MODEL_CATALOG_PAGE_SIZE),
+  })
+  .strict();
+
+const PublicModelCatalogEntrySchema = z
+  .object({
+    model: z.string().min(1).max(MAX_MODEL_CHARACTERS),
+    defaultReasoningEffort: z.string().min(1).max(MAX_REASONING_EFFORT_CHARACTERS),
+    supportedReasoningEfforts: z
+      .array(z.string().min(1).max(MAX_REASONING_EFFORT_CHARACTERS))
+      .min(1)
+      .max(MAX_MODEL_REASONING_EFFORTS),
+    inputModalities: z.array(z.enum(MODEL_INPUT_MODALITIES)).min(1).max(3),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.supportedReasoningEfforts).size !== value.supportedReasoningEfforts.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["supportedReasoningEfforts"],
+        message: "Reasoning efforts must be unique",
+      });
+    }
+    if (!value.supportedReasoningEfforts.includes(value.defaultReasoningEffort)) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultReasoningEffort"],
+        message: "Default reasoning effort must be supported",
+      });
+    }
+    if (new Set(value.inputModalities).size !== value.inputModalities.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["inputModalities"],
+        message: "Input modalities must be unique",
+      });
+    }
+  });
+
+export const ModelCatalogPageResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    provider: z.string().min(1).max(MAX_PROVIDER_CHARACTERS),
+    totalVisibleModels: NonNegativeSafeIntegerSchema.max(10_000),
+    models: z.array(PublicModelCatalogEntrySchema).max(MAX_MODEL_CATALOG_PAGE_SIZE),
+    nextCursor: z
+      .string()
+      .min(1)
+      .max(MAX_MODEL_CATALOG_CURSOR_CHARACTERS)
+      .regex(MODEL_CATALOG_CURSOR_PATTERN)
+      .nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.models.length > value.totalVisibleModels) {
+      context.addIssue({
+        code: "custom",
+        path: ["models"],
+        message: "Page cannot exceed the visible model count",
+      });
+    }
+    if (value.nextCursor !== null && value.models.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["nextCursor"],
+        message: "An empty page cannot have a next cursor",
+      });
+    }
+    const modelNames = value.models.map((model) => model.model);
+    if (new Set(modelNames).size !== modelNames.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["models"],
+        message: "Page model names must be unique",
+      });
+    }
+  });
+
+export type HarnessModelCatalogPageParams = Readonly<{
+  cursor: string | null;
+  limit: number;
+}>;
+export type HarnessPublicModelCatalogEntry = Readonly<{
+  model: string;
+  defaultReasoningEffort: string;
+  supportedReasoningEfforts: readonly string[];
+  inputModalities: readonly HarnessModelInputModality[];
+}>;
+export type HarnessModelCatalogPageResult = Readonly<{
+  schemaVersion: 1;
+  provider: string;
+  totalVisibleModels: number;
+  models: readonly HarnessPublicModelCatalogEntry[];
+  nextCursor: string | null;
+}>;
+
 export const EVENT_CONTRACTS = Object.freeze({
   "account.status_changed": AccountStatusResultSchema,
 });
@@ -85,6 +201,10 @@ export const METHOD_CONTRACTS = Object.freeze({
   "account.status": Object.freeze({
     params: AccountStatusParamsSchema,
     result: AccountStatusResultSchema,
+  }),
+  "model.catalog_page": Object.freeze({
+    params: ModelCatalogPageParamsSchema,
+    result: ModelCatalogPageResultSchema,
   }),
   "system.health": Object.freeze({
     params: SystemHealthParamsSchema,

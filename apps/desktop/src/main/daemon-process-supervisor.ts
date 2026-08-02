@@ -14,6 +14,8 @@ import {
   type HarnessAccountStatusChangedEvent,
   type HarnessAccountStatusObservation,
   type HarnessAccountStatusResult,
+  type HarnessModelCatalogPageParams,
+  type HarnessModelCatalogPageResult,
   type HarnessRpcClientConfig,
 } from "./harness-rpc-client.js";
 import {
@@ -436,6 +438,12 @@ export class DaemonProcessSupervisor {
 
   async readAccountStatusObservation(): Promise<HarnessAccountStatusObservation> {
     return await this.client.accountStatusObservation();
+  }
+
+  async readModelCatalogPage(
+    params: HarnessModelCatalogPageParams,
+  ): Promise<HarnessModelCatalogPageResult> {
+    return await this.client.modelCatalogPage(params);
   }
 
   async stop(): Promise<DaemonProcessSupervisorCloseResult> {

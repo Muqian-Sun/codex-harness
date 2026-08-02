@@ -44,6 +44,22 @@ export async function smokeAppServerWorkerManager() {
     ) {
       throw new Error("The compiled worker manager initial snapshots were invalid.");
     }
+    const firstPublicPage = manager.readCatalogPage({ cursor: null, limit: 1 });
+    const secondPublicPage = manager.readCatalogPage({
+      cursor: firstPublicPage.nextCursor,
+      limit: 1,
+    });
+    if (
+      firstPublicPage.provider !== "openai" ||
+      firstPublicPage.totalVisibleModels !== 2 ||
+      firstPublicPage.models[0]?.model !== "smoke-a" ||
+      firstPublicPage.nextCursor === null ||
+      secondPublicPage.models[0]?.model !== "smoke-b" ||
+      secondPublicPage.nextCursor !== null ||
+      JSON.stringify([firstPublicPage, secondPublicPage]).includes("id-smoke")
+    ) {
+      throw new Error("The compiled worker manager public catalog pages were invalid.");
+    }
     const refreshed = await manager.refreshCatalog();
     if (
       manager.state !== "ready" ||

@@ -30,6 +30,7 @@ const ACCOUNT_STATUS = Object.freeze({
 function createSession(options?: {
   uptimeMs?: () => number;
   readAccountStatus?: () => unknown;
+  readModelCatalogPage?: (params: JsonValue) => unknown;
 }): ConnectionSession {
   return new ConnectionSession({
     startupCapability: STARTUP_CAPABILITY,
@@ -39,6 +40,9 @@ function createSession(options?: {
     ...(options?.readAccountStatus === undefined
       ? {}
       : { readAccountStatus: options.readAccountStatus }),
+    ...(options?.readModelCatalogPage === undefined
+      ? {}
+      : { readModelCatalogPage: options.readModelCatalogPage }),
   });
 }
 
@@ -174,6 +178,45 @@ describe("daemon connection session", () => {
         planType: null,
       },
     });
+    expect(session.state).toBe("authenticated");
+  });
+
+  it("serves a validated bounded model catalog page only after authentication", () => {
+    const observedParams: JsonValue[] = [];
+    const session = createSession({
+      readModelCatalogPage: (params) => {
+        observedParams.push(params);
+        return {
+          schemaVersion: 1,
+          provider: "openai",
+          totalVisibleModels: 1,
+          models: [
+            {
+              model: "gpt-model",
+              defaultReasoningEffort: "medium",
+              supportedReasoningEfforts: ["medium"],
+              inputModalities: ["text"],
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+    });
+    authenticate(session);
+
+    const params = { cursor: null, limit: 12 } as const;
+    const actions = session.receive(frame(rpc("catalog-1", "model.catalog_page", params)));
+    expect(sentValues(actions)[0]).toMatchObject({
+      kind: "response",
+      id: "catalog-1",
+      result: {
+        provider: "openai",
+        totalVisibleModels: 1,
+        models: [{ model: "gpt-model" }],
+        nextCursor: null,
+      },
+    });
+    expect(observedParams).toEqual([params]);
     expect(session.state).toBe("authenticated");
   });
 

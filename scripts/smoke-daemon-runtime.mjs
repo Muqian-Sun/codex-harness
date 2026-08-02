@@ -50,6 +50,18 @@ export async function smokeDaemonRuntime() {
     ) {
       throw new Error("The supervised daemon account status response was invalid.");
     }
+    const catalog = await supervisor.readModelCatalogPage({ cursor: null, limit: 12 });
+    if (
+      catalog.provider !== "openai" ||
+      catalog.totalVisibleModels !== 2 ||
+      catalog.models.map((model) => model.model).join(",") !== "smoke-a,smoke-b" ||
+      catalog.nextCursor !== null ||
+      JSON.stringify(catalog).includes("id-smoke") ||
+      JSON.stringify(catalog).includes("snapshotId") ||
+      JSON.stringify(catalog).includes("workerSessionId")
+    ) {
+      throw new Error("The supervised daemon public model catalog response was invalid.");
+    }
     const accountEvent = await Promise.race([
       accountEventPromise,
       delay(5_000).then(() => {

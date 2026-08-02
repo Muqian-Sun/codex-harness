@@ -29,6 +29,34 @@ const UPDATED_ACCOUNT_STATUS = Object.freeze({
   planType: "pro" as const,
 });
 
+const MODEL_CATALOG_PAGE = Object.freeze({
+  schemaVersion: 1 as const,
+  provider: "openai",
+  totalVisibleModels: 2,
+  models: Object.freeze([
+    Object.freeze({
+      model: "gpt-standard",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high"]),
+      inputModalities: Object.freeze(["text", "image"] as const),
+    }),
+    Object.freeze({
+      model: "gpt-fast",
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: Object.freeze(["low"]),
+      inputModalities: Object.freeze(["text"] as const),
+    }),
+  ]),
+  nextCursor: null,
+});
+
+const CATALOG_SUMMARY = Object.freeze({
+  provider: "openai",
+  totalVisibleModels: 2,
+  models: MODEL_CATALOG_PAGE.models,
+  hasMore: false,
+});
+
 function accountObservation(
   account = ACCOUNT_STATUS,
   observedThroughSequence = 0,
@@ -67,6 +95,7 @@ describe("desktop application controller", () => {
     const supervisor: DesktopSupervisorHandle = {
       closed: closed.promise,
       readAccountStatusObservation: vi.fn(async () => accountObservation()),
+      readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
       stop: vi.fn(async () => closeResult("graceful")),
     };
     const createSupervisor = vi.fn(async () => supervisor);
@@ -74,9 +103,14 @@ describe("desktop application controller", () => {
 
     await Promise.all([controller.start(), controller.start()]);
     expect(createSupervisor).toHaveBeenCalledTimes(1);
+    expect(supervisor.readModelCatalogPage).toHaveBeenCalledExactlyOnceWith({
+      cursor: null,
+      limit: 12,
+    });
     expect(stateStore.current).toEqual({
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
+      catalog: CATALOG_SUMMARY,
     });
 
     closed.resolve(closeResult("graceful"));
@@ -100,6 +134,7 @@ describe("desktop application controller", () => {
     supervisorReady.resolve({
       closed: new Promise(() => undefined),
       readAccountStatusObservation: vi.fn(async () => accountObservation()),
+      readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
       stop,
     });
 
@@ -118,6 +153,7 @@ describe("desktop application controller", () => {
       createSupervisor: async () => ({
         closed: new Promise(() => undefined),
         readAccountStatusObservation: async () => await accountStatus.promise,
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         stop,
       }),
     });
@@ -141,6 +177,7 @@ describe("desktop application controller", () => {
       createSupervisor: async () => ({
         closed: new Promise(() => undefined),
         readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         stop: async () => closeResult("containment_unknown"),
       }),
     });
@@ -157,6 +194,27 @@ describe("desktop application controller", () => {
       createSupervisor: async () => ({
         closed: new Promise(() => undefined),
         readAccountStatusObservation: vi.fn(async () => {
+          throw new HarnessRpcClientError("rpc_error", "service.unavailable");
+        }),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        stop,
+      }),
+    });
+
+    await controller.start();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stateStore.current).toEqual({ phase: "failed", code: "daemon_startup_failed" });
+  });
+
+  it("stops the supervisor and never publishes ready when the model catalog fails", async () => {
+    const stateStore = new BootstrapStateStore();
+    const stop = vi.fn(async () => closeResult("graceful"));
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => {
           throw new HarnessRpcClientError("rpc_error", "service.unavailable");
         }),
         stop,
@@ -177,6 +235,7 @@ describe("desktop application controller", () => {
         return {
           closed: new Promise(() => undefined),
           readAccountStatusObservation: async () => accountObservation(ACCOUNT_STATUS, 1),
+          readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
           stop: async () => closeResult("graceful"),
         };
       },
@@ -187,6 +246,7 @@ describe("desktop application controller", () => {
     expect(stateStore.current).toEqual({
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
+      catalog: CATALOG_SUMMARY,
     });
   });
 
@@ -200,6 +260,7 @@ describe("desktop application controller", () => {
           onAccountStatusChanged(Object.freeze({ sequence: 2, account: UPDATED_ACCOUNT_STATUS }));
           return accountObservation(ACCOUNT_STATUS, 1);
         },
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         stop: async () => closeResult("graceful"),
       }),
     });
@@ -209,6 +270,7 @@ describe("desktop application controller", () => {
     expect(stateStore.current).toEqual({
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
+      catalog: CATALOG_SUMMARY,
     });
   });
 
@@ -223,6 +285,7 @@ describe("desktop application controller", () => {
         return {
           closed: new Promise(() => undefined),
           readAccountStatusObservation: async () => accountObservation(),
+          readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
           stop: async () => closeResult("graceful"),
         };
       },
@@ -233,6 +296,7 @@ describe("desktop application controller", () => {
     expect(stateStore.current).toEqual({
       phase: "ready",
       account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
+      catalog: CATALOG_SUMMARY,
     });
 
     await controller.stop();

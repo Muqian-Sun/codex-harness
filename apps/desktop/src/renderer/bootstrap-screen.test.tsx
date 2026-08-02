@@ -3,6 +3,26 @@ import { describe, expect, it } from "vitest";
 
 import { BootstrapScreen } from "./bootstrap-screen.js";
 
+const CATALOG = Object.freeze({
+  provider: "openai",
+  totalVisibleModels: 2,
+  models: Object.freeze([
+    Object.freeze({
+      model: "gpt-standard",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high"]),
+      inputModalities: Object.freeze(["text", "image"] as const),
+    }),
+    Object.freeze({
+      model: "gpt-fast",
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: Object.freeze(["low"]),
+      inputModalities: Object.freeze(["text"] as const),
+    }),
+  ]),
+  hasMore: false,
+});
+
 describe("desktop bootstrap screen", () => {
   it.each([
     ["starting", "正在建立受控运行时"],
@@ -27,7 +47,11 @@ describe("desktop bootstrap screen", () => {
     (status, credentialKind, planType, statusLabel, credentialLabel, planLabel) => {
       const markup = renderToStaticMarkup(
         <BootstrapScreen
-          state={{ phase: "ready", account: { status, credentialKind, planType } }}
+          state={{
+            phase: "ready",
+            account: { status, credentialKind, planType },
+            catalog: CATALOG,
+          }}
         />,
       );
 
@@ -51,6 +75,44 @@ describe("desktop bootstrap screen", () => {
       expect(markup).not.toContain("workerSessionId");
     },
   );
+
+  it("renders the observed model roster without claiming configuration or leaking cursors", () => {
+    const markup = renderToStaticMarkup(
+      <BootstrapScreen
+        state={{
+          phase: "ready",
+          account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
+          catalog: { ...CATALOG, totalVisibleModels: 5, hasMore: true },
+        }}
+      />,
+    );
+
+    expect(markup).toContain('data-model-catalog-provider="openai"');
+    expect(markup).toContain('data-model-catalog-count="5"');
+    expect(markup).toContain('data-model-name="gpt-standard"');
+    expect(markup).toContain("medium");
+    expect(markup).toContain("Image");
+    expect(markup).toContain("OBSERVED · READ ONLY");
+    expect(markup).toContain("另有 3 个可见模型未在首屏展开");
+    expect(markup).not.toContain("nextCursor");
+    expect(markup).not.toContain("snapshotId");
+    expect(markup).not.toContain("workerSessionId");
+  });
+
+  it("renders a stable empty observation when Codex reports no visible model", () => {
+    const markup = renderToStaticMarkup(
+      <BootstrapScreen
+        state={{
+          phase: "ready",
+          account: { status: "not_required", credentialKind: null, planType: null },
+          catalog: { provider: "openai", totalVisibleModels: 0, models: [], hasMore: false },
+        }}
+      />,
+    );
+
+    expect(markup).toContain("当前 Codex 会话没有报告可见模型");
+    expect(markup).toContain('data-model-catalog-count="0"');
+  });
 
   it("renders only the stable failure code", () => {
     const markup = renderToStaticMarkup(

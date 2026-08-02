@@ -268,6 +268,14 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       error: { code: "service.unavailable" },
     });
 
+    const catalogPromise = readFrame(socket);
+    sendFrame(socket, rpc("catalog-1", "model.catalog_page", { cursor: null, limit: 12 }));
+    await expect(catalogPromise).resolves.toMatchObject({
+      kind: "error",
+      id: "catalog-1",
+      error: { code: "service.unavailable" },
+    });
+
     const closePromise = once(socket, "close");
     const shutdownResponsePromise = readFrame(socket);
     sendFrame(socket, rpc("shutdown-1", "system.shutdown", { reason: "user.requested" }));
@@ -392,6 +400,40 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
         planType: null,
       },
     });
+  });
+
+  it("serves a bounded visible-only page from the current managed model catalog", async () => {
+    const worker = new RuntimeFakeWorker();
+    const workerManager = await createWorkerManager(worker);
+    const { endpoint } = await createRuntime({ workerManager });
+    const socket = await connect(endpoint);
+    await authenticate(socket);
+
+    const responsePromise = readFrame(socket);
+    sendFrame(socket, rpc("catalog-current", "model.catalog_page", { cursor: null, limit: 12 }));
+    const response = await responsePromise;
+    expect(parseServerRpcEnvelope(response).ok).toBe(true);
+    expect(response).toMatchObject({
+      kind: "response",
+      id: "catalog-current",
+      result: {
+        schemaVersion: 1,
+        provider: "openai",
+        totalVisibleModels: 1,
+        models: [
+          {
+            model: "runtime",
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: ["medium"],
+            inputModalities: ["text"],
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+    expect(JSON.stringify(response)).not.toContain("id-runtime");
+    expect(JSON.stringify(response)).not.toContain(SNAPSHOT_ID);
+    expect(JSON.stringify(response)).not.toContain(WORKER_SESSION_ID);
   });
 
   it("publishes a strictly sequenced account event after the manager installs a new snapshot", async () => {

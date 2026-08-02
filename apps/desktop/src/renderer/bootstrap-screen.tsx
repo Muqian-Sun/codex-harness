@@ -2,6 +2,7 @@ import type {
   DesktopAccountPlanType,
   DesktopAccountStatus,
   DesktopBootstrapState,
+  DesktopModelCatalogSummary,
 } from "../shared/bootstrap-state.js";
 
 const credentialLabels = Object.freeze({
@@ -26,6 +27,12 @@ const planLabels: Readonly<Record<DesktopAccountPlanType, string>> = Object.free
   unknown: "方案未知",
 });
 
+const modalityLabels = Object.freeze({
+  audio: "Audio",
+  image: "Image",
+  text: "Text",
+});
+
 const phasePresentation = Object.freeze({
   starting: Object.freeze({
     eyebrow: "CONTROL PLANE / BOOTSTRAP",
@@ -37,7 +44,7 @@ const phasePresentation = Object.freeze({
   ready: Object.freeze({
     eyebrow: "CONTROL PLANE / READY",
     title: "Harness 已就绪",
-    summary: "daemon、Codex App Server、完整模型目录与去敏账户观察已通过启动门禁。",
+    summary: "daemon、Codex App Server、首批可见模型与去敏账户观察已通过启动门禁。",
     label: "本地在线",
     detail: "受控进程链已连接",
   }),
@@ -104,14 +111,78 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
         ) : (
           <BoundaryCard />
         )}
+
+        {state.phase === "ready" ? <ModelCatalogSummary catalog={state.catalog} /> : null}
       </section>
 
       <footer className="footer-note">
-        <span>任务、TODO / DAG 与智能路由将在对应安全门禁完成后开放。</span>
+        <span>模型目录仅供观察；配置、任务、TODO / DAG 与智能路由仍由后续安全门禁控制。</span>
         <span className="footer-rule" aria-hidden="true" />
         <span>LOCAL ONLY</span>
       </footer>
     </main>
+  );
+}
+
+function ModelCatalogSummary({ catalog }: Readonly<{ catalog: DesktopModelCatalogSummary }>) {
+  const undisplayed = catalog.totalVisibleModels - catalog.models.length;
+  return (
+    <section
+      className="model-catalog"
+      aria-label="当前可见模型观察"
+      data-model-catalog-provider={catalog.provider}
+      data-model-catalog-count={String(catalog.totalVisibleModels)}
+    >
+      <header className="catalog-header">
+        <div>
+          <p className="card-index">03 / MODEL ROSTER</p>
+          <h2>可见模型目录</h2>
+        </div>
+        <div className="catalog-summary">
+          <span>{catalog.provider}</span>
+          <strong>{catalog.totalVisibleModels.toString().padStart(2, "0")}</strong>
+          <small>OBSERVED · READ ONLY</small>
+        </div>
+      </header>
+
+      {catalog.models.length === 0 ? (
+        <p className="catalog-empty">当前 Codex 会话没有报告可见模型。</p>
+      ) : (
+        <ol className="model-list">
+          {catalog.models.map((model, index) => (
+            <li key={model.model} data-model-name={model.model}>
+              <div className="model-identity">
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <strong>{model.model}</strong>
+              </div>
+              <div className="model-detail">
+                <span className="detail-label">默认推理</span>
+                <strong>{model.defaultReasoningEffort}</strong>
+              </div>
+              <div className="model-tags" aria-label="支持的推理强度">
+                {model.supportedReasoningEfforts.map((effort) => (
+                  <span key={effort} className="model-tag">
+                    {effort}
+                  </span>
+                ))}
+              </div>
+              <div className="model-tags modalities" aria-label="输入模态">
+                {model.inputModalities.map((modality) => (
+                  <span key={modality} className="model-tag">
+                    {modalityLabels[modality]}
+                  </span>
+                ))}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      <footer className="catalog-note">
+        <span>EXECUTION LOCKED</span>
+        {catalog.hasMore ? <span>另有 {undisplayed} 个可见模型未在首屏展开</span> : null}
+      </footer>
+    </section>
   );
 }
 
