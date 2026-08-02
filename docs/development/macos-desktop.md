@@ -53,7 +53,7 @@ CODEX_HARNESS_CODEX_EXECUTABLE=/absolute/path/to/codex pnpm desktop:start
 
 应用不会在失败后自动重启、自动重放或切换到其他 Codex executable。
 
-账户卡是启动时的一次性观察，不是实时认证监视。当前没有 account notification、登录、退出或 token 刷新入口；会话中账户变化要到后续的通知链路完成后才能安全地实时更新。
+账户卡仍是启动时的一次性观察，不是实时认证监视。daemon 内部 worker manager 已把合法 `account/updated` 当作失效信号并通过固定 `account/read` 重建权威去敏快照，但该变化尚未通过 daemon 事件推送到桌面。当前也没有登录、退出或 token 刷新入口；会话中账户变化要到后续的 daemon → desktop 通知链路完成后才能安全地实时显示。
 
 ## Electron 首次安装与代理
 

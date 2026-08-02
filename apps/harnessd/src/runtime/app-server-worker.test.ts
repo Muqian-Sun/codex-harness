@@ -17,6 +17,7 @@ type FakeBehavior = Readonly<{
   versionOversize?: boolean;
   deleteAfterVersion?: boolean;
   appMode?:
+    | "account_event"
     | "duplicate_response"
     | "early_exit"
     | "event"
@@ -180,6 +181,8 @@ if (args.length === 1 && args[0] === "--version") {
       initialized = true;
       if (behavior.appMode === "server_request") {
         send({ id: 700, method: "item/commandExecution/requestApproval", params: { threadId: "t", turnId: "u" } });
+      } else if (behavior.appMode === "account_event") {
+        send({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro", accessToken: "must-not-survive" } });
       } else if (behavior.appMode === "event") {
         send({ method: "warning", params: { message: "internal warning" } });
       } else if (behavior.appMode === "unknown_response") {
@@ -485,6 +488,23 @@ describe("Codex App Server worker", () => {
     await expect(failing.worker.closed).resolves.toMatchObject({
       reason: "event_handler_failure",
     });
+  });
+
+  it("forwards account updates only as payload-free invalidation events", async () => {
+    const events: unknown[] = [];
+    const observed = await startFakeWorker(
+      { appMode: "account_event" },
+      {
+        onEvent: (event) => {
+          events.push(event);
+        },
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual([{ type: "account_updated" }]);
+    expect(JSON.stringify(events)).not.toContain("must-not-survive");
+    expect(observed.worker.state).toBe("ready");
   });
 
   it("escalates an uncooperative worker from SIGTERM to SIGKILL", async () => {

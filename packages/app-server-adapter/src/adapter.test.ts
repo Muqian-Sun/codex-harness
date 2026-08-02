@@ -175,6 +175,41 @@ describe("App Server protocol adapter", () => {
     });
   });
 
+  it("emits a payload-free account invalidation signal", () => {
+    const adapter = initializedAdapter();
+    const result = adapter.accept({
+      kind: "notification",
+      method: "account/updated",
+      params: {
+        authMode: "chatgpt",
+        planType: "pro",
+        email: "private@example.com",
+        accessToken: "must-not-survive",
+      },
+    });
+
+    expect(result).toEqual({ ok: true, value: { type: "account_updated" } });
+    expect(result.ok && Object.isFrozen(result.value)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private@example.com");
+    expect(JSON.stringify(result)).not.toContain("must-not-survive");
+  });
+
+  it("closes on malformed known account notifications with fixed errors", () => {
+    const adapter = initializedAdapter();
+    const result = adapter.accept({
+      kind: "notification",
+      method: "account/updated",
+      params: { authMode: "private-future-auth-mode" },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "invalid_message", message: "The App Server message is invalid." },
+    });
+    expect(JSON.stringify(result)).not.toContain("private-future-auth-mode");
+    expect(adapter.state).toBe("closed");
+  });
+
   it("closes on malformed known lifecycle notifications with fixed errors", () => {
     const adapter = initializedAdapter();
     const result = adapter.accept({

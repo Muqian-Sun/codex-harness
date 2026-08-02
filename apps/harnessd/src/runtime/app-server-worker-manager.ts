@@ -17,6 +17,7 @@ import {
   type AppServerWorkerCloseResult,
   type AppServerWorkerConfig,
   type AppServerWorkerContainment,
+  type AppServerWorkerEvent,
   type AppServerWorkerState,
 } from "./app-server-worker.js";
 
@@ -107,6 +108,8 @@ export class AppServerWorkerManager {
   #startupStage: "account" | "catalog" = "catalog";
   #catalog: ModelCatalogSnapshot | undefined;
   #accountStatus: AccountStatusSnapshot | undefined;
+  #accountUpdatePending = false;
+  #accountUpdateRefresh: Promise<void> | undefined;
   #lastWorkerClose: AppServerWorkerCloseResult | undefined;
   #closePromise: Promise<AppServerWorkerManagerCloseResult> | undefined;
 
@@ -160,9 +163,29 @@ export class AppServerWorkerManager {
       throw new AppServerWorkerManagerError("invalid_configuration");
     }
 
+    const managerReference: { current: AppServerWorkerManager | undefined } = {
+      current: undefined,
+    };
+    let accountUpdateBeforeManager = false;
     let worker: ManagedAppServerWorker;
     try {
-      worker = await normalizedDependencies.startWorker(workerConfig);
+      const externalOnEvent = workerConfig.onEvent;
+      const managedWorkerConfig: AppServerWorkerConfig = Object.freeze({
+        ...workerConfig,
+        onEvent: async (event: AppServerWorkerEvent) => {
+          if (event.type === "account_updated") {
+            const currentManager = managerReference.current;
+            if (currentManager === undefined) {
+              accountUpdateBeforeManager = true;
+              return;
+            }
+            await currentManager.#observeAccountUpdated();
+            return;
+          }
+          await externalOnEvent?.(event);
+        },
+      });
+      worker = await normalizedDependencies.startWorker(managedWorkerConfig);
     } catch {
       throw new AppServerWorkerManagerError("worker_start_failed");
     }
@@ -183,6 +206,10 @@ export class AppServerWorkerManager {
       normalizedDependencies,
       workerSessionId,
     );
+    managerReference.current = manager;
+    if (accountUpdateBeforeManager) {
+      manager.#accountUpdatePending = true;
+    }
     let catalog: ModelCatalogSnapshot;
     try {
       catalog = await manager.#collectCatalog();
@@ -195,6 +222,7 @@ export class AppServerWorkerManager {
     try {
       accountStatus = await manager.#collectAccountStatus();
       manager.#installStartupSnapshots(catalog, accountStatus);
+      await manager.#settlePendingAccountUpdates();
       return manager;
     } catch {
       await manager.#beginClose("account_snapshot_failed");
@@ -246,14 +274,16 @@ export class AppServerWorkerManager {
     }
     this.#state = "refreshing";
     this.#catalog = undefined;
+    let snapshot: ModelCatalogSnapshot;
     try {
-      const snapshot = await this.#collectCatalog();
+      snapshot = await this.#collectCatalog();
       this.#installCatalog(snapshot, "refreshing");
-      return snapshot;
     } catch {
       await this.#beginClose("catalog_refresh_failed");
       throw new AppServerWorkerManagerError("catalog_refresh_failed");
     }
+    await this.#settlePendingAccountUpdates();
+    return snapshot;
   }
 
   async refreshAccountStatus(): Promise<AccountStatusSnapshot> {
@@ -262,16 +292,14 @@ export class AppServerWorkerManager {
         this.#state === "closing" || this.#state === "closed" ? "closed" : "refresh_unavailable",
       );
     }
-    this.#state = "refreshing_account";
-    this.#accountStatus = undefined;
-    try {
-      const snapshot = await this.#collectAccountStatus();
-      this.#installAccountStatus(snapshot);
-      return snapshot;
-    } catch {
+    await this.#refreshAccountStatusOnce();
+    await this.#settlePendingAccountUpdates();
+    const current = this.#accountStatus;
+    if (current === undefined || !this.isAccountStatusCurrent(current)) {
       await this.#beginClose("account_snapshot_failed");
       throw new AppServerWorkerManagerError("account_snapshot_failed");
     }
+    return current;
   }
 
   async close(): Promise<AppServerWorkerManagerCloseResult> {
@@ -338,6 +366,65 @@ export class AppServerWorkerManager {
       observedAtMs: this.#dependencies.now(),
       response,
     });
+  }
+
+  async #observeAccountUpdated(): Promise<void> {
+    if (this.#state === "closing" || this.#state === "closed") {
+      return;
+    }
+    this.#accountUpdatePending = true;
+    await this.#settlePendingAccountUpdates();
+  }
+
+  async #settlePendingAccountUpdates(): Promise<void> {
+    const existing = this.#accountUpdateRefresh;
+    if (existing !== undefined) {
+      await existing;
+      return;
+    }
+    if (this.#state !== "ready" || !this.#accountUpdatePending) {
+      return;
+    }
+    const refresh = this.#drainPendingAccountUpdates();
+    this.#accountUpdateRefresh = refresh;
+    void refresh.then(
+      () => {
+        if (this.#accountUpdateRefresh === refresh) {
+          this.#accountUpdateRefresh = undefined;
+        }
+      },
+      () => {
+        if (this.#accountUpdateRefresh === refresh) {
+          this.#accountUpdateRefresh = undefined;
+        }
+      },
+    );
+    await refresh;
+  }
+
+  async #drainPendingAccountUpdates(): Promise<void> {
+    while (this.#state === "ready" && this.#accountUpdatePending) {
+      this.#accountUpdatePending = false;
+      await this.#refreshAccountStatusOnce();
+    }
+  }
+
+  async #refreshAccountStatusOnce(): Promise<AccountStatusSnapshot> {
+    if (this.#state !== "ready") {
+      throw new AppServerWorkerManagerError(
+        this.#state === "closing" || this.#state === "closed" ? "closed" : "refresh_unavailable",
+      );
+    }
+    this.#state = "refreshing_account";
+    this.#accountStatus = undefined;
+    try {
+      const snapshot = await this.#collectAccountStatus();
+      this.#installAccountStatus(snapshot);
+      return snapshot;
+    } catch {
+      await this.#beginClose("account_snapshot_failed");
+      throw new AppServerWorkerManagerError("account_snapshot_failed");
+    }
   }
 
   #requireCatalogCollectionState(): void {

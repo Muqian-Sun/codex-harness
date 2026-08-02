@@ -38,11 +38,11 @@ export async function smokeAppServerWorkerManager() {
       !manager.isAccountStatusCurrent(account) ||
       account.status !== "authenticated" ||
       account.credentialKind !== "chatgpt" ||
-      account.planType !== "plus" ||
+      account.planType !== "pro" ||
       JSON.stringify(account).includes("private@example.com") ||
       first.models.map((model) => model.model).join(",") !== "smoke-a,smoke-b"
     ) {
-      throw new Error("The compiled worker manager initial catalog was invalid.");
+      throw new Error("The compiled worker manager initial snapshots were invalid.");
     }
     const refreshed = await manager.refreshCatalog();
     if (
@@ -114,6 +114,7 @@ if (args.length === 1 && args[0] === "--version") {
     supportedReasoningEfforts: [{ reasoningEffort: effort }],
     inputModalities: ["text"]
   });
+  let accountReadCount = 0;
   input.on("line", (line) => {
     const message = JSON.parse(line);
     if (message.method === "initialize") {
@@ -139,13 +140,24 @@ if (args.length === 1 && args[0] === "--version") {
             : { data: [], nextCursor: null }
       });
     } else if (message.method === "account/read" && initialized && message.params.refreshToken === false) {
+      accountReadCount += 1;
+      if (accountReadCount === 1) {
+        send({
+          method: "account/updated",
+          params: {
+            authMode: "chatgpt",
+            planType: "pro",
+            accessToken: "must-not-survive"
+          }
+        });
+      }
       send({
         id: message.id,
         result: {
           account: {
             type: "chatgpt",
             email: "private@example.com",
-            planType: "plus",
+            planType: accountReadCount === 1 ? "plus" : "pro",
             accessToken: "must-not-survive"
           },
           requiresOpenaiAuth: true,

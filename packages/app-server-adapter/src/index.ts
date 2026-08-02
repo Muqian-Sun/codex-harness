@@ -1,3 +1,4 @@
+export * from "./account-notification.js";
 export * from "./adapter.js";
 export * from "./lifecycle.js";
 export * from "./methods.js";
