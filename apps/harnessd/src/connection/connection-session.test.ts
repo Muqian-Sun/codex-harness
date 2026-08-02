@@ -17,6 +17,15 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const STARTUP_CAPABILITY = "A".repeat(43);
 const STREAM_ID = `${"B".repeat(21)}A`;
+const ACCOUNT_STATUS = Object.freeze({
+  schemaVersion: 1,
+  snapshotId: "00000000-0000-4000-8000-000000000831",
+  workerSessionId: "00000000-0000-4000-8000-000000000832",
+  observedAtMs: 1_750_000_000_001,
+  status: "authenticated",
+  credentialKind: "chatgpt",
+  planType: "pro",
+}) satisfies JsonValue;
 
 function createSession(options?: {
   uptimeMs?: () => number;
@@ -208,6 +217,47 @@ describe("daemon connection session", () => {
     expect(response).toMatchObject({
       result: { stream: { id: STREAM_ID, resyncRequired: true } },
     });
+  });
+
+  it("publishes only authenticated account events with a strictly increasing sequence", () => {
+    const session = createSession();
+    expect(session.publishEvent("account.status_changed", ACCOUNT_STATUS)).toEqual([]);
+    authenticate(session);
+
+    const first = sentValues(session.publishEvent("account.status_changed", ACCOUNT_STATUS))[0];
+    const second = sentValues(session.publishEvent("account.status_changed", ACCOUNT_STATUS))[0];
+
+    expect(first).toMatchObject({
+      kind: "event",
+      streamId: STREAM_ID,
+      sequence: 1,
+      method: "account.status_changed",
+      params: ACCOUNT_STATUS,
+    });
+    expect(second).toMatchObject({ sequence: 2 });
+    expect(parseServerRpcEnvelope(first).ok).toBe(true);
+    expect(session.state).toBe("authenticated");
+  });
+
+  it("fails closed instead of publishing an unknown or malformed trusted event", () => {
+    const unknown = createSession();
+    authenticate(unknown);
+    const unknownActions = unknown.publishEvent("future.event", ACCOUNT_STATUS);
+    expect(sentValues(unknownActions)[0]).toMatchObject({
+      kind: "error",
+      error: { code: RPC_ERROR_CODES.internalError },
+    });
+    expect(unknownActions.at(-1)).toEqual({ type: "close", reason: "internal_error" });
+    expect(unknown.state).toBe("closed");
+
+    const malformed = createSession();
+    authenticate(malformed);
+    const malformedActions = malformed.publishEvent("account.status_changed", {
+      ...ACCOUNT_STATUS,
+      email: "private@example.com",
+    });
+    expect(malformedActions.at(-1)).toEqual({ type: "close", reason: "internal_error" });
+    expect(JSON.stringify(sentValues(malformedActions))).not.toContain("private@example.com");
   });
 
   it("fails closed when version or required capability negotiation fails", () => {

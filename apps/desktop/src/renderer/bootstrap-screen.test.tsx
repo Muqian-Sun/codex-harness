@@ -44,6 +44,8 @@ describe("desktop bootstrap screen", () => {
       expect(markup).toContain(planLabel);
       expect(markup).toContain("Execution");
       expect(markup).toContain("Locked");
+      expect(markup).toContain("实时去敏观察");
+      expect(markup).toContain('aria-label="当前账户观察"');
       expect(markup).not.toContain("email");
       expect(markup).not.toContain("snapshotId");
       expect(markup).not.toContain("workerSessionId");

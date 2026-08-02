@@ -24,12 +24,17 @@ export async function smokeDaemonRuntime() {
     await writeFile(codexExecutable, fakeCodexSource(), { encoding: "utf8", mode: 0o700 });
     await chmod(codexExecutable, 0o700);
     const { DaemonProcessSupervisor } = await import("../apps/desktop/dist/main/index.js");
+    let resolveAccountEvent;
+    const accountEventPromise = new Promise((resolve) => {
+      resolveAccountEvent = resolve;
+    });
     supervisor = await DaemonProcessSupervisor.start({
       command: process.execPath,
       codexExecutable,
       args: [cliPath],
       runtimeRoot: directory,
       clientVersion: "0.0.0",
+      onAccountStatusChanged: resolveAccountEvent,
     });
     const health = await supervisor.client.health();
     if (health.status !== "ok") {
@@ -44,6 +49,23 @@ export async function smokeDaemonRuntime() {
       JSON.stringify(account).includes("must-not-survive")
     ) {
       throw new Error("The supervised daemon account status response was invalid.");
+    }
+    const accountEvent = await Promise.race([
+      accountEventPromise,
+      delay(5_000).then(() => {
+        throw new Error("The supervised daemon account event timed out.");
+      }),
+    ]);
+    if (
+      accountEvent.sequence !== 1 ||
+      accountEvent.account.status !== "authenticated" ||
+      accountEvent.account.credentialKind !== "chatgpt" ||
+      accountEvent.account.planType !== "pro" ||
+      accountEvent.account.snapshotId === account.snapshotId ||
+      JSON.stringify(accountEvent).includes("private@example.com") ||
+      JSON.stringify(accountEvent).includes("must-not-survive")
+    ) {
+      throw new Error("The supervised daemon account event was invalid.");
     }
     const stopped = await supervisor.stop();
     if (

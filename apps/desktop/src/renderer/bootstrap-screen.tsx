@@ -124,7 +124,7 @@ function AccountObservationCard({ account }: Readonly<{ account: DesktopAccountS
         : "无需认证";
   const description =
     account.status === "authenticated"
-      ? "Harness 已在本次受控启动中验证账户类别。这不代表任务或工具已获得执行权。"
+      ? "Harness 已通过受控链路验证当前账户类别，并会接收后续去敏更新。这不代表任务或工具已获得执行权。"
       : account.status === "authentication_required"
         ? "Codex 当前需要 OpenAI 认证。Harness 尚未开放登录流程或凭据输入。"
         : "当前 Codex 运行方式不需要 OpenAI 认证。这仍不会开放任务执行。";
@@ -133,7 +133,7 @@ function AccountObservationCard({ account }: Readonly<{ account: DesktopAccountS
   const planLabel = account.planType === null ? "不适用" : planLabels[account.planType];
 
   return (
-    <aside className="boundary-card account-card" aria-label="启动时账户观察">
+    <aside className="boundary-card account-card" aria-label="当前账户观察">
       <p className="card-index">02 / ACCOUNT</p>
       <h2>账户边界已观察</h2>
       <p>{description}</p>
@@ -155,7 +155,7 @@ function AccountObservationCard({ account }: Readonly<{ account: DesktopAccountS
           <dd>Locked</dd>
         </div>
       </dl>
-      <p className="observation-note">启动时观察 · 不是实时认证监视</p>
+      <p className="observation-note">实时去敏观察 · 不提供账户操作</p>
     </aside>
   );
 }

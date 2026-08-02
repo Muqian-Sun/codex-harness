@@ -7,6 +7,7 @@ import { BootstrapStateStore } from "../shared/bootstrap-state.js";
 import {
   DesktopApplicationController,
   mapBootstrapFailure,
+  type DesktopApplicationControllerConfig,
   type DesktopSupervisorHandle,
 } from "./application-controller.js";
 import { DesktopRuntimeResourceError } from "./runtime-resources.js";
@@ -20,6 +21,20 @@ const ACCOUNT_STATUS = Object.freeze({
   credentialKind: "chatgpt" as const,
   planType: "plus" as const,
 });
+
+const UPDATED_ACCOUNT_STATUS = Object.freeze({
+  ...ACCOUNT_STATUS,
+  snapshotId: "00000000-0000-4000-8000-000000000843",
+  observedAtMs: 1_750_000_000_002,
+  planType: "pro" as const,
+});
+
+function accountObservation(
+  account = ACCOUNT_STATUS,
+  observedThroughSequence = 0,
+): Awaited<ReturnType<DesktopSupervisorHandle["readAccountStatusObservation"]>> {
+  return Object.freeze({ account, observedThroughSequence });
+}
 
 function deferred<T>(): Readonly<{
   promise: Promise<T>;
@@ -51,7 +66,7 @@ describe("desktop application controller", () => {
     const closed = deferred<ReturnType<typeof closeResult>>();
     const supervisor: DesktopSupervisorHandle = {
       closed: closed.promise,
-      readAccountStatus: vi.fn(async () => ACCOUNT_STATUS),
+      readAccountStatusObservation: vi.fn(async () => accountObservation()),
       stop: vi.fn(async () => closeResult("graceful")),
     };
     const createSupervisor = vi.fn(async () => supervisor);
@@ -84,7 +99,7 @@ describe("desktop application controller", () => {
     expect(stateStore.current).toEqual({ phase: "stopping" });
     supervisorReady.resolve({
       closed: new Promise(() => undefined),
-      readAccountStatus: vi.fn(async () => ACCOUNT_STATUS),
+      readAccountStatusObservation: vi.fn(async () => accountObservation()),
       stop,
     });
 
@@ -96,13 +111,13 @@ describe("desktop application controller", () => {
 
   it("waits for an in-flight account read without publishing transient readiness", async () => {
     const stateStore = new BootstrapStateStore();
-    const accountStatus = deferred<typeof ACCOUNT_STATUS>();
+    const accountStatus = deferred<ReturnType<typeof accountObservation>>();
     const stop = vi.fn(async () => closeResult("graceful"));
     const controller = new DesktopApplicationController({
       stateStore,
       createSupervisor: async () => ({
         closed: new Promise(() => undefined),
-        readAccountStatus: async () => await accountStatus.promise,
+        readAccountStatusObservation: async () => await accountStatus.promise,
         stop,
       }),
     });
@@ -111,7 +126,7 @@ describe("desktop application controller", () => {
     await Promise.resolve();
     const stopping = controller.stop();
     expect(stateStore.current).toEqual({ phase: "stopping" });
-    accountStatus.resolve(ACCOUNT_STATUS);
+    accountStatus.resolve(accountObservation());
 
     await starting;
     await expect(stopping).resolves.toBe(0);
@@ -125,7 +140,7 @@ describe("desktop application controller", () => {
       stateStore,
       createSupervisor: async () => ({
         closed: new Promise(() => undefined),
-        readAccountStatus: vi.fn(async () => ACCOUNT_STATUS),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
         stop: async () => closeResult("containment_unknown"),
       }),
     });
@@ -141,7 +156,7 @@ describe("desktop application controller", () => {
       stateStore,
       createSupervisor: async () => ({
         closed: new Promise(() => undefined),
-        readAccountStatus: vi.fn(async () => {
+        readAccountStatusObservation: vi.fn(async () => {
           throw new HarnessRpcClientError("rpc_error", "service.unavailable");
         }),
         stop,
@@ -151,6 +166,78 @@ describe("desktop application controller", () => {
     await controller.start();
     expect(stop).toHaveBeenCalledTimes(1);
     expect(stateStore.current).toEqual({ phase: "failed", code: "daemon_startup_failed" });
+  });
+
+  it("uses the RPC snapshot when a cached startup event is already covered by its sequence barrier", async () => {
+    const stateStore = new BootstrapStateStore();
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async (onAccountStatusChanged) => {
+        onAccountStatusChanged(Object.freeze({ sequence: 1, account: UPDATED_ACCOUNT_STATUS }));
+        return {
+          closed: new Promise(() => undefined),
+          readAccountStatusObservation: async () => accountObservation(ACCOUNT_STATUS, 1),
+          stop: async () => closeResult("graceful"),
+        };
+      },
+    });
+
+    await controller.start();
+
+    expect(stateStore.current).toEqual({
+      phase: "ready",
+      account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
+    });
+  });
+
+  it("uses a startup event that follows the RPC response barrier", async () => {
+    const stateStore = new BootstrapStateStore();
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async (onAccountStatusChanged) => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: async () => {
+          onAccountStatusChanged(Object.freeze({ sequence: 2, account: UPDATED_ACCOUNT_STATUS }));
+          return accountObservation(ACCOUNT_STATUS, 1);
+        },
+        stop: async () => closeResult("graceful"),
+      }),
+    });
+
+    await controller.start();
+
+    expect(stateStore.current).toEqual({
+      phase: "ready",
+      account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
+    });
+  });
+
+  it("updates ready account state from later events and ignores updates while stopping", async () => {
+    const stateStore = new BootstrapStateStore();
+    let observeAccountStatusChanged:
+      Parameters<DesktopApplicationControllerConfig["createSupervisor"]>[0] | undefined;
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async (listener) => {
+        observeAccountStatusChanged = listener;
+        return {
+          closed: new Promise(() => undefined),
+          readAccountStatusObservation: async () => accountObservation(),
+          stop: async () => closeResult("graceful"),
+        };
+      },
+    });
+    await controller.start();
+
+    observeAccountStatusChanged?.(Object.freeze({ sequence: 1, account: UPDATED_ACCOUNT_STATUS }));
+    expect(stateStore.current).toEqual({
+      phase: "ready",
+      account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
+    });
+
+    await controller.stop();
+    observeAccountStatusChanged?.(Object.freeze({ sequence: 2, account: ACCOUNT_STATUS }));
+    expect(stateStore.current).toEqual({ phase: "stopping" });
   });
 
   it("maps only stable failure codes", async () => {

@@ -2,7 +2,10 @@ import {
   DaemonProcessSupervisorError,
   type DaemonProcessSupervisor,
 } from "../main/daemon-process-supervisor.js";
-import { HarnessRpcClientError } from "../main/harness-rpc-client.js";
+import {
+  HarnessRpcClientError,
+  type HarnessAccountStatusChangedEvent,
+} from "../main/harness-rpc-client.js";
 import {
   failedBootstrapState,
   readyBootstrapState,
@@ -13,17 +16,20 @@ import { DesktopRuntimeResourceError, DesktopRuntimeRootError } from "./runtime-
 
 export type DesktopSupervisorHandle = Pick<
   DaemonProcessSupervisor,
-  "closed" | "readAccountStatus" | "stop"
+  "closed" | "readAccountStatusObservation" | "stop"
 >;
 
 export type DesktopApplicationControllerConfig = Readonly<{
   stateStore: BootstrapStateStore;
-  createSupervisor: () => Promise<DesktopSupervisorHandle>;
+  createSupervisor: (
+    onAccountStatusChanged: (event: HarnessAccountStatusChangedEvent) => void,
+  ) => Promise<DesktopSupervisorHandle>;
 }>;
 
 export class DesktopApplicationController {
   readonly #stateStore: BootstrapStateStore;
-  readonly #createSupervisor: () => Promise<DesktopSupervisorHandle>;
+  readonly #createSupervisor: DesktopApplicationControllerConfig["createSupervisor"];
+  #pendingAccountStatusEvent: HarnessAccountStatusChangedEvent | undefined;
   #supervisor: DesktopSupervisorHandle | undefined;
   #startPromise: Promise<void> | undefined;
   #stopPromise: Promise<number> | undefined;
@@ -45,7 +51,9 @@ export class DesktopApplicationController {
 
   async #start(): Promise<void> {
     try {
-      const supervisor = await this.#createSupervisor();
+      const supervisor = await this.#createSupervisor((event) =>
+        this.#observeAccountStatusChanged(event),
+      );
       this.#supervisor = supervisor;
       void supervisor.closed.then(() => {
         if (this.#stateStore.current.phase === "ready") {
@@ -55,10 +63,16 @@ export class DesktopApplicationController {
       if (this.#isStopping()) {
         return;
       }
-      const accountStatus = await supervisor.readAccountStatus();
+      const observation = await supervisor.readAccountStatusObservation();
       if (this.#isStopping()) {
         return;
       }
+      const pending = this.#pendingAccountStatusEvent;
+      this.#pendingAccountStatusEvent = undefined;
+      const accountStatus =
+        pending !== undefined && pending.sequence > observation.observedThroughSequence
+          ? pending.account
+          : observation.account;
       this.#stateStore.transition(readyBootstrapState(accountStatus));
     } catch (error: unknown) {
       if (this.#stateStore.current.phase !== "stopping") {
@@ -91,6 +105,20 @@ export class DesktopApplicationController {
 
   #isStopping(): boolean {
     return this.#stateStore.current.phase === "stopping";
+  }
+
+  #observeAccountStatusChanged(event: HarnessAccountStatusChangedEvent): void {
+    const phase = this.#stateStore.current.phase;
+    if (phase === "starting") {
+      const pending = this.#pendingAccountStatusEvent;
+      if (pending === undefined || event.sequence > pending.sequence) {
+        this.#pendingAccountStatusEvent = event;
+      }
+      return;
+    }
+    if (phase === "ready") {
+      this.#stateStore.transition(readyBootstrapState(event.account));
+    }
   }
 }
 

@@ -11,6 +11,8 @@ import { ProductVersionSchema } from "@codex-harness/protocol";
 import {
   HarnessRpcClient,
   HarnessRpcClientError,
+  type HarnessAccountStatusChangedEvent,
+  type HarnessAccountStatusObservation,
   type HarnessAccountStatusResult,
   type HarnessRpcClientConfig,
 } from "./harness-rpc-client.js";
@@ -78,6 +80,7 @@ export type DaemonProcessSupervisorConfig = Readonly<{
   gracefulTimeoutMs?: number;
   sigtermTimeoutMs?: number;
   sigkillTimeoutMs?: number;
+  onAccountStatusChanged?: (event: HarnessAccountStatusChangedEvent) => void;
 }>;
 
 export type DaemonContainmentResult = "graceful" | "sigterm" | "sigkill" | "containment_unknown";
@@ -111,6 +114,7 @@ type NormalizedConfig = Readonly<{
   gracefulTimeoutMs: number;
   sigtermTimeoutMs: number;
   sigkillTimeoutMs: number;
+  onAccountStatusChanged: ((event: HarnessAccountStatusChangedEvent) => void) | undefined;
 }>;
 
 function validTimeout(value: number): boolean {
@@ -129,6 +133,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
     const gracefulTimeoutMs = config.gracefulTimeoutMs ?? DEFAULT_GRACEFUL_TIMEOUT_MS;
     const sigtermTimeoutMs = config.sigtermTimeoutMs ?? DEFAULT_SIGTERM_TIMEOUT_MS;
     const sigkillTimeoutMs = config.sigkillTimeoutMs ?? DEFAULT_SIGKILL_TIMEOUT_MS;
+    const onAccountStatusChanged = config.onAccountStatusChanged;
     if (
       typeof command !== "string" ||
       !isAbsolute(command) ||
@@ -148,7 +153,8 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
           argument.includes("\0") ||
           Buffer.byteLength(argument, "utf8") > MAX_ARGUMENT_BYTES,
       ) ||
-      args.some(isReservedDaemonArgument)
+      args.some(isReservedDaemonArgument) ||
+      (onAccountStatusChanged !== undefined && typeof onAccountStatusChanged !== "function")
     ) {
       throw new DaemonProcessSupervisorError("invalid_configuration");
     }
@@ -173,6 +179,7 @@ function normalizeConfig(config: DaemonProcessSupervisorConfig): NormalizedConfi
       gracefulTimeoutMs,
       sigtermTimeoutMs,
       sigkillTimeoutMs,
+      onAccountStatusChanged,
     });
   } catch (error: unknown) {
     if (error instanceof DaemonProcessSupervisorError) {
@@ -354,8 +361,22 @@ export class DaemonProcessSupervisor {
         connectTimeoutMs: normalized.startupTimeoutMs,
         handshakeTimeoutMs: normalized.startupTimeoutMs,
         requestTimeoutMs: normalized.gracefulTimeoutMs,
+        onEvent: (event) => {
+          if (event.method !== "account.status_changed") {
+            throw new HarnessRpcClientError("protocol_violation");
+          }
+          normalized.onAccountStatusChanged?.(
+            Object.freeze({
+              sequence: event.sequence,
+              account: event.params as HarnessAccountStatusResult,
+            }),
+          );
+        },
       };
       supervisor.#client = await HarnessRpcClient.connect(clientConfig);
+      if (supervisor.#client.state !== "ready") {
+        throw new DaemonProcessSupervisorError("rpc_handshake_failed");
+      }
       if (
         supervisor.#lastChildExit !== undefined ||
         supervisor.#childFailed ||
@@ -411,6 +432,10 @@ export class DaemonProcessSupervisor {
 
   async readAccountStatus(): Promise<HarnessAccountStatusResult> {
     return await this.client.accountStatus();
+  }
+
+  async readAccountStatusObservation(): Promise<HarnessAccountStatusObservation> {
+    return await this.client.accountStatusObservation();
   }
 
   async stop(): Promise<DaemonProcessSupervisorCloseResult> {
