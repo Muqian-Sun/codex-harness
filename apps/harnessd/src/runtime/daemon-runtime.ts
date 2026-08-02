@@ -235,6 +235,7 @@ export class DaemonRuntime {
     const session = new ConnectionSession({
       startupCapability: this.#startupCapability,
       serverVersion: this.#serverVersion,
+      readAccountStatus: () => this.#readCurrentAccountStatus(),
     });
     this.#activeSocket = socket;
     socket.setNoDelay(true);
@@ -310,6 +311,17 @@ export class DaemonRuntime {
       clearTimeout(this.#handshakeTimer);
       this.#handshakeTimer = undefined;
     }
+  }
+
+  #readCurrentAccountStatus(): unknown {
+    const manager = this.#workerManager;
+    if (manager === undefined || manager.state !== "ready") {
+      return null;
+    }
+    const accountStatus = manager.accountStatus;
+    return accountStatus !== null && manager.isAccountStatusCurrent(accountStatus)
+      ? accountStatus
+      : null;
   }
 
   #handleServerFailure(): void {
@@ -432,7 +444,14 @@ function validReadyWorkerManager(manager: AppServerWorkerManager | undefined): b
       return false;
     }
     const catalog = manager.catalog;
-    return manager.state === "ready" && catalog !== null && manager.isCatalogCurrent(catalog);
+    const accountStatus = manager.accountStatus;
+    return (
+      manager.state === "ready" &&
+      catalog !== null &&
+      manager.isCatalogCurrent(catalog) &&
+      accountStatus !== null &&
+      manager.isAccountStatusCurrent(accountStatus)
+    );
   } catch {
     return false;
   }

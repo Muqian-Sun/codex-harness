@@ -18,6 +18,7 @@ import {
 import { desktopBootstrapMetadata } from "../main/index.js";
 import {
   BootstrapStateStore,
+  DESKTOP_ACCOUNT_PLAN_TYPES,
   failedBootstrapState,
   type DesktopBootstrapState,
 } from "../shared/bootstrap-state.js";
@@ -43,6 +44,7 @@ const rendererRoot = fileURLToPath(new URL("../renderer", import.meta.url));
 const developmentDaemonEntry = fileURLToPath(
   new URL("../../../harnessd/dist/cli.js", import.meta.url),
 );
+const desktopAccountPlanTypes = new Set<string>(DESKTOP_ACCOUNT_PLAN_TYPES);
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -256,17 +258,44 @@ function installSmokeObservation(
     for (let attempt = 0; attempt < 100 && !finished; attempt += 1) {
       try {
         const rendered = (await window.webContents.executeJavaScript(
-          `({ phase: document.querySelector("[data-bootstrap-phase]")?.dataset.bootstrapPhase, code: document.querySelector("[data-bootstrap-code]")?.dataset.bootstrapCode })`,
+          `(() => {
+            const text = document.body?.textContent ?? "";
+            return {
+              phase: document.querySelector("[data-bootstrap-phase]")?.dataset.bootstrapPhase,
+              code: document.querySelector("[data-bootstrap-code]")?.dataset.bootstrapCode,
+              accountStatus: document.querySelector("[data-account-status]")?.dataset.accountStatus,
+              accountCredential: document.querySelector("[data-account-credential]")?.dataset.accountCredential,
+              accountPlan: document.querySelector("[data-account-plan]")?.dataset.accountPlan,
+              containsSensitiveText: ["private@example.com", "must-not-survive", "snapshotId", "workerSessionId"].some((value) => text.includes(value))
+            };
+          })()`,
           true,
-        )) as { phase?: unknown; code?: unknown };
+        )) as {
+          phase?: unknown;
+          code?: unknown;
+          accountStatus?: unknown;
+          accountCredential?: unknown;
+          accountPlan?: unknown;
+          containsSensitiveText?: unknown;
+        };
+        const accountObserved =
+          expected === "ready" &&
+          validRenderedAccountObservation(
+            rendered.accountStatus,
+            rendered.accountCredential,
+            rendered.accountPlan,
+          ) &&
+          rendered.containsSensitiveText === false;
         if (
           rendered.phase === expected &&
-          (expected !== "failed" || (typeof rendered.code === "string" && rendered.code.length > 0))
+          (expected !== "failed" ||
+            (typeof rendered.code === "string" && rendered.code.length > 0)) &&
+          (expected !== "ready" || accountObserved)
         ) {
           finished = true;
           clearTimeout(timeout);
           process.stdout.write(
-            `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }) })}\n`,
+            `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true } : {}) })}\n`,
           );
           app.quit();
           return;
@@ -283,6 +312,38 @@ function installSmokeObservation(
   window.webContents.once("did-finish-load", () => {
     void inspect(stateStore.current);
   });
+}
+
+function validRenderedAccountObservation(
+  status: unknown,
+  credential: unknown,
+  plan: unknown,
+): boolean {
+  if (
+    status !== "authenticated" &&
+    status !== "authentication_required" &&
+    status !== "not_required"
+  ) {
+    return false;
+  }
+  if (
+    credential !== "none" &&
+    credential !== "amazon_bedrock" &&
+    credential !== "api_key" &&
+    credential !== "chatgpt"
+  ) {
+    return false;
+  }
+  if (
+    typeof plan !== "string" ||
+    (plan !== "not_applicable" && !desktopAccountPlanTypes.has(plan))
+  ) {
+    return false;
+  }
+  return status === "authenticated"
+    ? credential !== "none" &&
+        (credential === "chatgpt" ? plan !== "not_applicable" : plan === "not_applicable")
+    : credential === "none" && plan === "not_applicable";
 }
 
 void runDesktopApplication().catch(() => {

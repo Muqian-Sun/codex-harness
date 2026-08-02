@@ -2,14 +2,19 @@ import {
   DaemonProcessSupervisorError,
   type DaemonProcessSupervisor,
 } from "../main/daemon-process-supervisor.js";
+import { HarnessRpcClientError } from "../main/harness-rpc-client.js";
 import {
   failedBootstrapState,
+  readyBootstrapState,
   type BootstrapStateStore,
   type DesktopBootstrapFailureCode,
 } from "../shared/bootstrap-state.js";
 import { DesktopRuntimeResourceError, DesktopRuntimeRootError } from "./runtime-resources.js";
 
-export type DesktopSupervisorHandle = Pick<DaemonProcessSupervisor, "closed" | "stop">;
+export type DesktopSupervisorHandle = Pick<
+  DaemonProcessSupervisor,
+  "closed" | "readAccountStatus" | "stop"
+>;
 
 export type DesktopApplicationControllerConfig = Readonly<{
   stateStore: BootstrapStateStore;
@@ -47,12 +52,21 @@ export class DesktopApplicationController {
           this.#stateStore.transition(failedBootstrapState("daemon_unavailable"));
         }
       });
-      if (this.#stateStore.current.phase === "stopping") {
+      if (this.#isStopping()) {
         return;
       }
-      this.#stateStore.transition(Object.freeze({ phase: "ready" }));
+      const accountStatus = await supervisor.readAccountStatus();
+      if (this.#isStopping()) {
+        return;
+      }
+      this.#stateStore.transition(readyBootstrapState(accountStatus));
     } catch (error: unknown) {
       if (this.#stateStore.current.phase !== "stopping") {
+        try {
+          await this.#supervisor?.stop();
+        } catch {
+          // Startup already failed; shutdown errors must not replace the stable startup code.
+        }
         this.#stateStore.transition(failedBootstrapState(mapBootstrapFailure(error)));
       }
     }
@@ -74,6 +88,10 @@ export class DesktopApplicationController {
       return 1;
     }
   }
+
+  #isStopping(): boolean {
+    return this.#stateStore.current.phase === "stopping";
+  }
 }
 
 export function mapBootstrapFailure(error: unknown): DesktopBootstrapFailureCode {
@@ -87,6 +105,9 @@ export function mapBootstrapFailure(error: unknown): DesktopBootstrapFailureCode
     if (error.code === "runtime_root_insecure") {
       return "runtime_root_insecure";
     }
+    return "daemon_startup_failed";
+  }
+  if (error instanceof HarnessRpcClientError) {
     return "daemon_startup_failed";
   }
   return "internal_error";

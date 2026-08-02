@@ -4,6 +4,7 @@ import {
   INTERNAL_ERROR_PUBLIC_MESSAGE,
   RPC_ERROR_CODES,
   decodeRequestParams,
+  decodeResponseResult,
   type JsonValue,
   type RpcRequest,
 } from "@codex-harness/protocol";
@@ -12,6 +13,7 @@ export type RpcDispatchContext = Readonly<{
   streamId: string;
   uptimeMs: number;
   closing: boolean;
+  readAccountStatus: () => unknown;
 }>;
 
 export type RpcDispatchResult = Readonly<{
@@ -37,6 +39,14 @@ function rpcResponse(id: string, result: JsonValue): JsonValue {
     protocolVersion: APPLICATION_PROTOCOL_VERSION,
     id,
     result,
+  };
+}
+
+function unavailable(id: string, message: string): RpcDispatchResult {
+  return {
+    envelope: rpcError(id, RPC_ERROR_CODES.unavailable, message),
+    shutdownRequested: false,
+    shutdownReason: undefined,
   };
 }
 
@@ -75,6 +85,23 @@ export function dispatchRpcRequest(
         shutdownRequested: false,
         shutdownReason: undefined,
       };
+    }
+
+    if (request.method === "account.status") {
+      let candidate: unknown;
+      try {
+        candidate = context.readAccountStatus();
+      } catch {
+        return unavailable(request.id, "The account status is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("account.status", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The account status is unavailable.");
     }
 
     if (request.method === "system.health") {

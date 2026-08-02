@@ -1,22 +1,11 @@
-import { validateJsonValue } from "@codex-harness/protocol";
+import {
+  ACCOUNT_PLAN_TYPES as PROTOCOL_ACCOUNT_PLAN_TYPES,
+  validateJsonValue,
+} from "@codex-harness/protocol";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-export const ACCOUNT_PLAN_TYPES = Object.freeze([
-  "free",
-  "go",
-  "plus",
-  "pro",
-  "prolite",
-  "team",
-  "self_serve_business_usage_based",
-  "business",
-  "ent26",
-  "enterprise_cbp_usage_based",
-  "enterprise",
-  "edu",
-  "unknown",
-] as const);
+export const ACCOUNT_PLAN_TYPES = PROTOCOL_ACCOUNT_PLAN_TYPES;
 
 export type AccountPlanType = (typeof ACCOUNT_PLAN_TYPES)[number];
 export type AccountAuthenticationStatus =

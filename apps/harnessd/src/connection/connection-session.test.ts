@@ -18,12 +18,18 @@ const decoder = new TextDecoder();
 const STARTUP_CAPABILITY = "A".repeat(43);
 const STREAM_ID = `${"B".repeat(21)}A`;
 
-function createSession(options?: { uptimeMs?: () => number }): ConnectionSession {
+function createSession(options?: {
+  uptimeMs?: () => number;
+  readAccountStatus?: () => unknown;
+}): ConnectionSession {
   return new ConnectionSession({
     startupCapability: STARTUP_CAPABILITY,
     serverVersion: "0.0.0",
     streamIdFactory: () => STREAM_ID,
     ...(options?.uptimeMs === undefined ? {} : { uptimeMs: options.uptimeMs }),
+    ...(options?.readAccountStatus === undefined
+      ? {}
+      : { readAccountStatus: options.readAccountStatus }),
   });
 }
 
@@ -133,6 +139,33 @@ describe("daemon connection session", () => {
       id: "health-1",
       result: { status: "ok", streamId: STREAM_ID, uptimeMs: 1_250 },
     });
+  });
+
+  it("serves a validated account snapshot after authentication", () => {
+    const session = createSession({
+      readAccountStatus: () => ({
+        schemaVersion: 1,
+        snapshotId: "00000000-0000-4000-8000-000000000821",
+        workerSessionId: "00000000-0000-4000-8000-000000000822",
+        observedAtMs: 1_750_000_000_001,
+        status: "authentication_required",
+        credentialKind: null,
+        planType: null,
+      }),
+    });
+    authenticate(session);
+
+    const actions = session.receive(frame(rpc("account-1", "account.status", {})));
+    expect(sentValues(actions)[0]).toMatchObject({
+      kind: "response",
+      id: "account-1",
+      result: {
+        status: "authentication_required",
+        credentialKind: null,
+        planType: null,
+      },
+    });
+    expect(session.state).toBe("authenticated");
   });
 
   it("fails closed on authentication failure without echoing secrets", () => {

@@ -1,4 +1,30 @@
-import type { DesktopBootstrapState } from "../shared/bootstrap-state.js";
+import type {
+  DesktopAccountPlanType,
+  DesktopAccountStatus,
+  DesktopBootstrapState,
+} from "../shared/bootstrap-state.js";
+
+const credentialLabels = Object.freeze({
+  amazon_bedrock: "Amazon Bedrock",
+  api_key: "API Key",
+  chatgpt: "ChatGPT",
+});
+
+const planLabels: Readonly<Record<DesktopAccountPlanType, string>> = Object.freeze({
+  free: "Free",
+  go: "Go",
+  plus: "Plus",
+  pro: "Pro",
+  prolite: "Pro Lite",
+  team: "Team",
+  self_serve_business_usage_based: "Business（自助按量）",
+  business: "Business",
+  ent26: "Enterprise",
+  enterprise_cbp_usage_based: "Enterprise（按量）",
+  enterprise: "Enterprise",
+  edu: "Education",
+  unknown: "方案未知",
+});
 
 const phasePresentation = Object.freeze({
   starting: Object.freeze({
@@ -11,7 +37,7 @@ const phasePresentation = Object.freeze({
   ready: Object.freeze({
     eyebrow: "CONTROL PLANE / READY",
     title: "Harness 已就绪",
-    summary: "daemon、Codex App Server 与完整模型目录已经通过启动门禁。",
+    summary: "daemon、Codex App Server、完整模型目录与去敏账户观察已通过启动门禁。",
     label: "本地在线",
     detail: "受控进程链已连接",
   }),
@@ -73,25 +99,11 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
           ) : null}
         </div>
 
-        <aside className="boundary-card" aria-label="当前能力边界">
-          <p className="card-index">01 / READINESS</p>
-          <h2>现在只验证底座</h2>
-          <p>当前界面不会创建任务、调用工具或执行路由。状态为“已就绪”只表示本地控制链完整可达。</p>
-          <dl>
-            <div>
-              <dt>Renderer</dt>
-              <dd>Sandboxed</dd>
-            </div>
-            <div>
-              <dt>IPC</dt>
-              <dd>Allowlisted</dd>
-            </div>
-            <div>
-              <dt>Execution</dt>
-              <dd>Locked</dd>
-            </div>
-          </dl>
-        </aside>
+        {state.phase === "ready" ? (
+          <AccountObservationCard account={state.account} />
+        ) : (
+          <BoundaryCard />
+        )}
       </section>
 
       <footer className="footer-note">
@@ -100,5 +112,74 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
         <span>LOCAL ONLY</span>
       </footer>
     </main>
+  );
+}
+
+function AccountObservationCard({ account }: Readonly<{ account: DesktopAccountStatus }>) {
+  const statusLabel =
+    account.status === "authenticated"
+      ? "已认证"
+      : account.status === "authentication_required"
+        ? "需要认证"
+        : "无需认证";
+  const description =
+    account.status === "authenticated"
+      ? "Harness 已在本次受控启动中验证账户类别。这不代表任务或工具已获得执行权。"
+      : account.status === "authentication_required"
+        ? "Codex 当前需要 OpenAI 认证。Harness 尚未开放登录流程或凭据输入。"
+        : "当前 Codex 运行方式不需要 OpenAI 认证。这仍不会开放任务执行。";
+  const credentialLabel =
+    account.credentialKind === null ? "未检测到" : credentialLabels[account.credentialKind];
+  const planLabel = account.planType === null ? "不适用" : planLabels[account.planType];
+
+  return (
+    <aside className="boundary-card account-card" aria-label="启动时账户观察">
+      <p className="card-index">02 / ACCOUNT</p>
+      <h2>账户边界已观察</h2>
+      <p>{description}</p>
+      <dl>
+        <div>
+          <dt>状态</dt>
+          <dd data-account-status={account.status}>{statusLabel}</dd>
+        </div>
+        <div>
+          <dt>凭据类别</dt>
+          <dd data-account-credential={account.credentialKind ?? "none"}>{credentialLabel}</dd>
+        </div>
+        <div>
+          <dt>方案</dt>
+          <dd data-account-plan={account.planType ?? "not_applicable"}>{planLabel}</dd>
+        </div>
+        <div>
+          <dt>Execution</dt>
+          <dd>Locked</dd>
+        </div>
+      </dl>
+      <p className="observation-note">启动时观察 · 不是实时认证监视</p>
+    </aside>
+  );
+}
+
+function BoundaryCard() {
+  return (
+    <aside className="boundary-card" aria-label="当前能力边界">
+      <p className="card-index">01 / READINESS</p>
+      <h2>现在只验证底座</h2>
+      <p>当前界面不会创建任务、调用工具或执行路由。状态为“已就绪”只表示本地控制链完整可达。</p>
+      <dl>
+        <div>
+          <dt>Renderer</dt>
+          <dd>Sandboxed</dd>
+        </div>
+        <div>
+          <dt>IPC</dt>
+          <dd>Allowlisted</dd>
+        </div>
+        <div>
+          <dt>Execution</dt>
+          <dd>Locked</dd>
+        </div>
+      </dl>
+    </aside>
   );
 }

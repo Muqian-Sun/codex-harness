@@ -271,6 +271,25 @@ h1 {
   line-height: 1.75;
 }
 
+.account-card h2 {
+  margin-top: 34px;
+}
+
+.account-card dd {
+  max-width: 62%;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.account-card .observation-note {
+  margin-top: 18px;
+  color: #78908a;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
 .boundary-card dl {
   margin: 28px 0 0;
   border-top: 1px solid var(--line);
