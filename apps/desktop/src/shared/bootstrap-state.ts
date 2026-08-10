@@ -176,6 +176,15 @@ export type DesktopProjectTaskRequirement = Readonly<{
   constraints: readonly string[];
   acceptanceCriteria: readonly string[];
 }>;
+export type DesktopProjectTaskCandidatePlanStep = Readonly<{
+  title: string;
+  description: string;
+  acceptanceCriteria: readonly string[];
+}>;
+export type DesktopProjectTaskCandidatePlan = Readonly<{
+  revisionNumber: number;
+  steps: readonly DesktopProjectTaskCandidatePlanStep[];
+}>;
 export type DesktopProjectTaskDetail = Readonly<{
   projectId: string;
   taskId: string;
@@ -183,6 +192,7 @@ export type DesktopProjectTaskDetail = Readonly<{
   title: string;
   stage: DesktopTaskStage;
   activeRequirement: DesktopProjectTaskRequirement;
+  candidatePlan: DesktopProjectTaskCandidatePlan | null;
 }>;
 export type DesktopProjectTaskDetailResult =
   | Readonly<{ status: "loaded"; detail: DesktopProjectTaskDetail }>
@@ -200,6 +210,19 @@ export type DesktopProjectTaskRequirementRevision = Readonly<{
 export type DesktopProjectTaskRequirementMutationResult =
   | Readonly<{
       status: "revised" | "existing";
+      taskId: string;
+      detail: DesktopProjectTaskDetail;
+      catalog: DesktopProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+export type DesktopProjectTaskCandidatePlanGeneration = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+}>;
+export type DesktopProjectTaskCandidatePlanMutationResult =
+  | Readonly<{
+      status: "generated" | "existing";
       taskId: string;
       detail: DesktopProjectTaskDetail;
       catalog: DesktopProjectTaskCatalog;
@@ -238,6 +261,10 @@ const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
 const MAX_TASK_REQUIREMENT_ITEM_BYTES = 4 * 1_024;
 const MAX_TASK_REQUIREMENT_ITEMS = 100;
 const MAX_TASK_REQUIREMENT_TOTAL_BYTES = 256 * 1_024;
+const MAX_TASK_PLAN_STEPS = 200;
+const MAX_TASK_PLAN_STEP_TITLE_BYTES = 512;
+const MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES = 8 * 1_024;
+const MAX_TASK_PLAN_TOTAL_BYTES = 256 * 1_024;
 const taskStages = new Set<string>(DESKTOP_TASK_STAGES);
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
@@ -547,6 +574,8 @@ export function projectDesktopProjectTaskDetail(
 ): DesktopProjectTaskDetail {
   const record = exactRecord(input, [
     "activeRequirement",
+    "candidatePlan",
+    "latestPlanRevisionId",
     "ownershipVersion",
     "projectId",
     "schemaVersion",
@@ -556,6 +585,7 @@ export function projectDesktopProjectTaskDetail(
     "title",
   ]);
   const requirement = decodeDesktopProjectTaskRequirement(record?.activeRequirement);
+  const candidatePlan = decodeDesktopProjectTaskCandidatePlan(record?.candidatePlan, true);
   if (
     !isUuid(expectedProjectId) ||
     !isUuid(expectedTaskId) ||
@@ -567,7 +597,12 @@ export function projectDesktopProjectTaskDetail(
     !validTaskTitle(record.title) ||
     typeof record.stage !== "string" ||
     !taskStages.has(record.stage) ||
-    requirement === undefined
+    requirement === undefined ||
+    candidatePlan === undefined ||
+    !candidatePlanMatchesStage(record.candidatePlan, record.stage) ||
+    (record.latestPlanRevisionId !== null && !isUuid(record.latestPlanRevisionId)) ||
+    !candidatePlanMatchesLatest(record.candidatePlan, record.latestPlanRevisionId) ||
+    !candidatePlanMatchesRequirement(record.candidatePlan, record.activeRequirement)
   ) {
     throw new BootstrapStateTransitionError();
   }
@@ -578,6 +613,7 @@ export function projectDesktopProjectTaskDetail(
     title: record.title,
     stage: record.stage as DesktopTaskStage,
     activeRequirement: requirement,
+    candidatePlan,
   });
 }
 
@@ -632,6 +668,53 @@ export function decodeDesktopProjectTaskSelection(
     return undefined;
   }
   return Object.freeze({ projectId: record.projectId, taskId: record.taskId });
+}
+
+export function decodeDesktopProjectTaskCandidatePlanGeneration(
+  input: unknown,
+): DesktopProjectTaskCandidatePlanGeneration | undefined {
+  const record = exactRecord(input, ["expectedTaskVersion", "projectId", "taskId"]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+  });
+}
+
+export function decodeDesktopProjectTaskCandidatePlanMutationResult(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskCandidatePlanMutationResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  if (
+    record === undefined ||
+    (record.status !== "generated" && record.status !== "existing") ||
+    record.taskId !== expectedTaskId
+  ) {
+    return undefined;
+  }
+  try {
+    return Object.freeze({
+      status: record.status,
+      taskId: expectedTaskId,
+      detail: decodeProjectedDesktopTaskDetail(record.detail, expectedProjectId, expectedTaskId),
+      catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 export function decodeDesktopProjectTaskRequirementMutationResult(
@@ -1254,6 +1337,7 @@ function decodeProjectedDesktopTaskDetail(
 ): DesktopProjectTaskDetail {
   const record = exactRecord(input, [
     "activeRequirement",
+    "candidatePlan",
     "projectId",
     "stage",
     "taskId",
@@ -1261,6 +1345,7 @@ function decodeProjectedDesktopTaskDetail(
     "title",
   ]);
   const requirement = decodeProjectedDesktopTaskRequirement(record?.activeRequirement);
+  const candidatePlan = decodeDesktopProjectTaskCandidatePlan(record?.candidatePlan, false);
   if (
     record?.projectId !== expectedProjectId ||
     record.taskId !== expectedTaskId ||
@@ -1268,7 +1353,9 @@ function decodeProjectedDesktopTaskDetail(
     !validTaskTitle(record.title) ||
     typeof record.stage !== "string" ||
     !taskStages.has(record.stage) ||
-    requirement === undefined
+    requirement === undefined ||
+    candidatePlan === undefined ||
+    !candidatePlanMatchesStage(record.candidatePlan, record.stage)
   ) {
     throw new BootstrapStateTransitionError();
   }
@@ -1279,7 +1366,118 @@ function decodeProjectedDesktopTaskDetail(
     title: record.title,
     stage: record.stage as DesktopTaskStage,
     activeRequirement: requirement,
+    candidatePlan,
   });
+}
+
+function decodeDesktopProjectTaskCandidatePlan(
+  input: unknown,
+  includesIdentifiers: boolean,
+): DesktopProjectTaskCandidatePlan | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const record = exactRecord(
+    input,
+    includesIdentifiers
+      ? ["basedOnRequirementRevisionId", "revisionId", "revisionNumber", "steps"]
+      : ["revisionNumber", "steps"],
+  );
+  if (
+    record === undefined ||
+    !isPositiveSafeInteger(record.revisionNumber) ||
+    !Array.isArray(record.steps) ||
+    record.steps.length < 1 ||
+    record.steps.length > MAX_TASK_PLAN_STEPS ||
+    (includesIdentifiers &&
+      (!isUuid(record.revisionId) || !isUuid(record.basedOnRequirementRevisionId)))
+  ) {
+    return undefined;
+  }
+  let totalBytes = 0;
+  const steps = record.steps.map((inputStep) => {
+    const step = exactRecord(
+      inputStep,
+      includesIdentifiers
+        ? ["acceptanceCriteria", "description", "stepId", "title"]
+        : ["acceptanceCriteria", "description", "title"],
+    );
+    if (
+      step === undefined ||
+      (includesIdentifiers && !isUuid(step.stepId)) ||
+      !validTaskPlanStepText(step.title, MAX_TASK_PLAN_STEP_TITLE_BYTES) ||
+      !validTaskPlanStepText(step.description, MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES) ||
+      !validTaskRequirementItems(step.acceptanceCriteria)
+    ) {
+      return undefined;
+    }
+    totalBytes += utf8ByteLength(
+      [step.title, step.description, ...step.acceptanceCriteria].join(""),
+    );
+    return Object.freeze({
+      title: step.title,
+      description: step.description,
+      acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
+    });
+  });
+  if (steps.some((step) => step === undefined) || totalBytes > MAX_TASK_PLAN_TOTAL_BYTES) {
+    return undefined;
+  }
+  if (
+    includesIdentifiers &&
+    new Set(
+      record.steps.map(
+        (step) =>
+          exactRecord(step, ["acceptanceCriteria", "description", "stepId", "title"])?.stepId,
+      ),
+    ).size !== record.steps.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    revisionNumber: record.revisionNumber,
+    steps: Object.freeze(steps as DesktopProjectTaskCandidatePlanStep[]),
+  });
+}
+
+function candidatePlanMatchesRequirement(candidate: unknown, requirement: unknown): boolean {
+  if (candidate === null) {
+    return true;
+  }
+  const candidateRecord = exactRecord(candidate, [
+    "basedOnRequirementRevisionId",
+    "revisionId",
+    "revisionNumber",
+    "steps",
+  ]);
+  const requirementRecord = exactRecord(requirement, [
+    "acceptanceCriteria",
+    "constraints",
+    "objective",
+    "revisionId",
+    "revisionNumber",
+    "sourceText",
+  ]);
+  return candidateRecord?.basedOnRequirementRevisionId === requirementRecord?.revisionId;
+}
+
+function candidatePlanMatchesStage(candidate: unknown, stage: unknown): boolean {
+  const stageHasCandidate = stage === "candidate_plan" || stage === "active_graph_with_candidate";
+  return (candidate !== null) === stageHasCandidate;
+}
+
+function candidatePlanMatchesLatest(candidate: unknown, latestPlanRevisionId: unknown): boolean {
+  if (candidate === null) {
+    return true;
+  }
+  return (
+    exactRecord(candidate, [
+      "basedOnRequirementRevisionId",
+      "revisionId",
+      "revisionNumber",
+      "steps",
+    ])?.revisionId === latestPlanRevisionId
+  );
 }
 
 function decodeProjectedDesktopTaskRequirement(
@@ -1379,6 +1577,15 @@ function validTaskRequirementItems(input: unknown): input is string[] {
         utf8ByteLength(item) <= MAX_TASK_REQUIREMENT_ITEM_BYTES &&
         !item.includes("\0"),
     )
+  );
+}
+
+function validTaskPlanStepText(input: unknown, maxBytes: number): input is string {
+  return (
+    typeof input === "string" &&
+    input.trim().length > 0 &&
+    utf8ByteLength(input) <= maxBytes &&
+    !input.includes("\0")
   );
 }
 

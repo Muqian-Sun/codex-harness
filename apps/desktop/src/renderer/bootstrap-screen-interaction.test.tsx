@@ -4,7 +4,18 @@ const PROJECT_ID = "00000000-0000-4000-8000-000000000891";
 const hooks = vi.hoisted(() => ({
   cursor: 0,
   effects: [] as Array<() => void | (() => void)>,
-  setters: [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()],
+  setters: [
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+    vi.fn(),
+  ],
   values: [] as unknown[],
 }));
 
@@ -25,7 +36,13 @@ vi.mock("react", () => ({
   },
 }));
 
-import { ProjectRegistryPanel, ProjectTaskPanel, RequirementItems } from "./bootstrap-screen.js";
+import {
+  CandidatePlan,
+  ProjectRegistryPanel,
+  ProjectTaskPanel,
+  RequirementItems,
+  taskCandidatePlanFeedback,
+} from "./bootstrap-screen.js";
 
 const PROJECTS = {
   projects: [
@@ -97,6 +114,7 @@ function findTaskControl(
   root: unknown,
   attribute:
     | "data-task-open"
+    | "data-task-plan-generate"
     | "data-task-project-select"
     | "data-task-revise"
     | "data-task-revision-source"
@@ -195,6 +213,270 @@ describe("Project routing binding interaction", () => {
 });
 
 describe("Project Task interaction", () => {
+  it("renders candidate steps and reports every user-visible generation state", () => {
+    const plan = CandidatePlan({
+      plan: {
+        revisionNumber: 2,
+        steps: [
+          {
+            title: "Review the proposal",
+            description: "Keep the model output explicitly unconfirmed.",
+            acceptanceCriteria: ["No execution starts."],
+          },
+          {
+            title: "Record the decision",
+            description: "Persist the later user decision.",
+            acceptanceCriteria: [],
+          },
+        ],
+      },
+    });
+    expect(plan.props["data-task-plan-revision"]).toBe(2);
+
+    const routing = {
+      configured: true as const,
+      profileVersion: 1,
+      configurationRevisionId: "00000000-0000-4000-8000-000000000899",
+      tiers: {
+        fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+        standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+        deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+      },
+      availability: {
+        fast: "observed_available" as const,
+        standard: "observed_available" as const,
+        deep: "observed_available" as const,
+      },
+    } as const;
+    expect(taskCandidatePlanFeedback("idle", "unbound", routing, false)).toContain("未绑定");
+    expect(taskCandidatePlanFeedback("generating", "default_bound", routing, false)).toContain(
+      "正在只读分析",
+    );
+    expect(taskCandidatePlanFeedback("generated", "default_bound", routing, false)).toContain(
+      "尚未确认",
+    );
+    expect(taskCandidatePlanFeedback("existing", "default_bound", routing, false)).toContain(
+      "已经落盘",
+    );
+    expect(taskCandidatePlanFeedback("conflict", "default_bound", routing, false)).toContain(
+      "结果未写入",
+    );
+    expect(taskCandidatePlanFeedback("unavailable", "default_bound", routing, false)).toContain(
+      "结果当前未知",
+    );
+  });
+
+  it("generates and renders an explicitly unconfirmed candidate Plan", async () => {
+    const detail = {
+      projectId: PROJECT_ID,
+      taskId: "00000000-0000-4000-8000-000000000892",
+      taskVersion: 1,
+      title: "Candidate Task",
+      stage: "requirements_only" as const,
+      activeRequirement: {
+        revisionNumber: 1,
+        sourceText: "Generate a review-only plan.",
+        objective: "Generate a review-only plan.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      candidatePlan: null,
+    } as const;
+    const generatedDetail = {
+      ...detail,
+      taskVersion: 2,
+      stage: "candidate_plan" as const,
+      candidatePlan: {
+        revisionNumber: 1,
+        steps: [
+          {
+            title: "Persist candidate",
+            description: "Store a review-only step.",
+            acceptanceCriteria: ["The step survives restart."],
+          },
+        ],
+      },
+    };
+    const generateProjectTaskCandidatePlan = vi.fn(async () => ({
+      status: "generated" as const,
+      taskId: detail.taskId,
+      detail: generatedDetail,
+      catalog: {
+        projectId: PROJECT_ID,
+        tasks: [
+          {
+            taskId: detail.taskId,
+            projectId: PROJECT_ID,
+            taskVersion: 2,
+            title: detail.title,
+            objective: detail.activeRequirement.objective,
+            stage: "candidate_plan" as const,
+          },
+        ],
+        hasMore: false,
+      },
+    }));
+    Object.assign(globalThis, {
+      codexHarness: {
+        generateProjectTaskCandidatePlan,
+        readProjectTaskCatalog: vi.fn(),
+        readProjectTaskDetail: vi.fn(),
+      },
+    });
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = [
+      PROJECT_ID,
+      { status: "loaded", catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false } },
+      detail.taskId,
+      { status: "loaded", detail },
+      "",
+      "",
+      detail.activeRequirement.sourceText,
+      "idle",
+      "idle",
+      "idle",
+    ];
+    const root = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+      routing: {
+        configured: true,
+        profileVersion: 1,
+        configurationRevisionId: "00000000-0000-4000-8000-000000000899",
+        tiers: {
+          fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+          standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+          deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+        },
+        availability: {
+          fast: "observed_available",
+          standard: "observed_available",
+          deep: "observed_available",
+        },
+      },
+    });
+    const button = findTaskControl(root, "data-task-plan-generate");
+    expect(button.props.disabled).toBe(false);
+    (button.props.onClick as () => void)();
+    await vi.waitFor(() =>
+      expect(generateProjectTaskCandidatePlan).toHaveBeenCalledWith({
+        projectId: PROJECT_ID,
+        taskId: detail.taskId,
+        expectedTaskVersion: 1,
+      }),
+    );
+    expect(hooks.setters[9]).toHaveBeenNthCalledWith(1, "generating");
+    expect(hooks.setters[9]).toHaveBeenLastCalledWith("generated");
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: generatedDetail });
+  });
+
+  it("refreshes authority after generation conflicts and contains unknown failures", async () => {
+    const taskId = "00000000-0000-4000-8000-000000000892";
+    const detail = {
+      projectId: PROJECT_ID,
+      taskId,
+      taskVersion: 2,
+      title: "Concurrent candidate Task",
+      stage: "requirements_only" as const,
+      activeRequirement: {
+        revisionNumber: 2,
+        sourceText: "Concurrent requirement.",
+        objective: "Concurrent requirement.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      candidatePlan: null,
+    };
+    const catalog = {
+      projectId: PROJECT_ID,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT_ID,
+          taskVersion: 2,
+          title: detail.title,
+          objective: detail.activeRequirement.objective,
+          stage: "requirements_only" as const,
+        },
+      ],
+      hasMore: false,
+    };
+    const generateProjectTaskCandidatePlan = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "conflict" })
+      .mockRejectedValueOnce(new Error("contained"));
+    const readProjectTaskDetail = vi.fn(async () => ({ status: "loaded" as const, detail }));
+    const readProjectTaskCatalog = vi.fn(async () => ({ status: "loaded" as const, catalog }));
+    Object.assign(globalThis, {
+      codexHarness: {
+        generateProjectTaskCandidatePlan,
+        readProjectTaskCatalog,
+        readProjectTaskDetail,
+      },
+    });
+    const routing = {
+      configured: true as const,
+      profileVersion: 1,
+      configurationRevisionId: "00000000-0000-4000-8000-000000000899",
+      tiers: {
+        fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+        standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+        deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+      },
+      availability: {
+        fast: "observed_available" as const,
+        standard: "observed_available" as const,
+        deep: "observed_available" as const,
+      },
+    } as const;
+    const values = [
+      PROJECT_ID,
+      { status: "loaded", catalog },
+      taskId,
+      { status: "loaded", detail },
+      "",
+      "",
+      detail.activeRequirement.sourceText,
+      "idle",
+      "idle",
+      "idle",
+    ];
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values;
+    const conflicted = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+      routing,
+    });
+    (findTaskControl(conflicted, "data-task-plan-generate").props.onClick as () => void)();
+    await vi.waitFor(() => expect(hooks.setters[9]).toHaveBeenLastCalledWith("conflict"));
+    expect(readProjectTaskDetail).toHaveBeenCalledWith({ projectId: PROJECT_ID, taskId });
+    expect(readProjectTaskCatalog).toHaveBeenCalledWith(PROJECT_ID);
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail });
+    expect(hooks.setters[1]).toHaveBeenCalledWith({ status: "loaded", catalog });
+    expect(hooks.setters[6]).toHaveBeenCalledWith(detail.activeRequirement.sourceText);
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values;
+    const unavailable = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+      routing,
+    });
+    (findTaskControl(unavailable, "data-task-plan-generate").props.onClick as () => void)();
+    await vi.waitFor(() => expect(hooks.setters[9]).toHaveBeenLastCalledWith("unavailable"));
+  });
+
   it("submits one bounded Task draft and replaces the local catalog from authority", async () => {
     const catalog = {
       projectId: PROJECT_ID,
@@ -349,6 +631,9 @@ describe("Project Task interaction", () => {
       currentTarget: { value: "Updated source" },
     });
     expect(hooks.setters[0]).toHaveBeenCalledWith(PROJECT_ID);
+    expect(hooks.setters[2]).toHaveBeenCalledWith(undefined);
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "idle" });
+    expect(hooks.setters[9]).toHaveBeenCalledWith("idle");
     expect(hooks.setters[4]).toHaveBeenCalledWith("Updated title");
     expect(hooks.setters[5]).toHaveBeenCalledWith("Updated source");
     const button = findTaskCreateButton(conflict);
@@ -568,6 +853,8 @@ describe("Project Task interaction", () => {
     });
     (findTaskControl(panel, "data-task-open").props.onClick as () => void)();
     expect(hooks.setters[2]).toHaveBeenCalledWith(taskId);
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loading" });
+    expect(hooks.setters[9]).toHaveBeenCalledWith("idle");
     (
       findTaskControl(panel, "data-task-revision-source").props.onChange as (event: unknown) => void
     )({ currentTarget: { value: "Draft update." } });
@@ -682,6 +969,18 @@ describe("Project Task interaction", () => {
     expect(findTaskControl(creating, "data-task-project-select").props.disabled).toBe(true);
     expect(findTaskControl(creating, "data-task-open").props.disabled).toBe(true);
     expect(findTaskControl(creating, "data-task-revision-source").props.disabled).toBe(true);
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loaded", detail }, "Revised requirement.");
+    hooks.values[9] = "generating";
+    const generatingPlan = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    expect(findTaskControl(generatingPlan, "data-task-revise").props.disabled).toBe(true);
 
     const items = RequirementItems({ title: "Constraints", items: ["One", "Two"] });
     expect(items.props.children).toBeDefined();

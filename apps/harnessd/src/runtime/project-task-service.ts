@@ -286,6 +286,11 @@ function taskDetail(
   projectId: string,
   ownershipVersion: number,
 ): HarnessTaskDetailResult {
+  const candidatePlan =
+    task.latestPlan?.status === "candidate" &&
+    task.latestPlan.basedOnRequirementRevisionId === task.activeRequirement.revisionId
+      ? task.latestPlan
+      : null;
   return Object.freeze({
     schemaVersion: 1,
     projectId,
@@ -299,6 +304,23 @@ function taskDetail(
       constraints: Object.freeze([...task.activeRequirement.constraints]),
       acceptanceCriteria: Object.freeze([...task.activeRequirement.acceptanceCriteria]),
     }),
+    latestPlanRevisionId: task.latestPlan?.revisionId ?? null,
+    candidatePlan:
+      candidatePlan === null
+        ? null
+        : Object.freeze({
+            revisionId: candidatePlan.revisionId,
+            revisionNumber: candidatePlan.revisionNumber,
+            basedOnRequirementRevisionId: candidatePlan.basedOnRequirementRevisionId,
+            steps: Object.freeze(
+              candidatePlan.steps.map((step) =>
+                Object.freeze({
+                  ...step,
+                  acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
+                }),
+              ),
+            ),
+          }),
   });
 }
 
@@ -380,6 +402,20 @@ function validateDetailResult(
       constraints: Object.freeze([...result.activeRequirement.constraints]),
       acceptanceCriteria: Object.freeze([...result.activeRequirement.acceptanceCriteria]),
     }),
+    candidatePlan:
+      result.candidatePlan === null
+        ? null
+        : Object.freeze({
+            ...result.candidatePlan,
+            steps: Object.freeze(
+              result.candidatePlan.steps.map((step) =>
+                Object.freeze({
+                  ...step,
+                  acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
+                }),
+              ),
+            ),
+          }),
   });
 }
 

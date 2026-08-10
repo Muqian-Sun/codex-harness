@@ -8,6 +8,7 @@ const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_defau
 const READ_PROJECT_TASK_CATALOG_CHANNEL = "desktop.task.catalog_page";
 const CREATE_PROJECT_TASK_CHANNEL = "desktop.task.create";
 const READ_PROJECT_TASK_DETAIL_CHANNEL = "desktop.task.detail";
+const GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.generate_candidate";
 const REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL = "desktop.task.requirement.revise";
 const FAILURE_CODES = new Set([
   "unsupported_platform",
@@ -62,6 +63,10 @@ const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
 const MAX_TASK_REQUIREMENT_ITEM_BYTES = 4 * 1_024;
 const MAX_TASK_REQUIREMENT_ITEMS = 100;
 const MAX_TASK_REQUIREMENT_TOTAL_BYTES = 256 * 1_024;
+const MAX_TASK_PLAN_STEPS = 200;
+const MAX_TASK_PLAN_STEP_TITLE_BYTES = 512;
+const MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES = 8 * 1_024;
+const MAX_TASK_PLAN_TOTAL_BYTES = 256 * 1_024;
 
 type PreloadAccountStatus = Readonly<{
   status: "authenticated" | "authentication_required" | "not_required";
@@ -183,6 +188,15 @@ type PreloadProjectTaskRequirement = Readonly<{
   constraints: readonly string[];
   acceptanceCriteria: readonly string[];
 }>;
+type PreloadProjectTaskCandidatePlanStep = Readonly<{
+  title: string;
+  description: string;
+  acceptanceCriteria: readonly string[];
+}>;
+type PreloadProjectTaskCandidatePlan = Readonly<{
+  revisionNumber: number;
+  steps: readonly PreloadProjectTaskCandidatePlanStep[];
+}>;
 type PreloadProjectTaskDetail = Readonly<{
   projectId: string;
   taskId: string;
@@ -190,6 +204,7 @@ type PreloadProjectTaskDetail = Readonly<{
   title: string;
   stage: PreloadProjectTaskSummary["stage"];
   activeRequirement: PreloadProjectTaskRequirement;
+  candidatePlan: PreloadProjectTaskCandidatePlan | null;
 }>;
 type PreloadProjectTaskSelection = Readonly<{ projectId: string; taskId: string }>;
 type PreloadProjectTaskDetailResult =
@@ -204,6 +219,19 @@ type PreloadProjectTaskRequirementRevision = Readonly<{
 type PreloadProjectTaskRequirementMutationResult =
   | Readonly<{
       status: "revised" | "existing";
+      taskId: string;
+      detail: PreloadProjectTaskDetail;
+      catalog: PreloadProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+type PreloadProjectTaskCandidatePlanGeneration = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+}>;
+type PreloadProjectTaskCandidatePlanMutationResult =
+  | Readonly<{
+      status: "generated" | "existing";
       taskId: string;
       detail: PreloadProjectTaskDetail;
       catalog: PreloadProjectTaskCatalog;
@@ -545,9 +573,57 @@ function decodeProjectTaskRequirementMutationResult(
   return Object.freeze({ status: record.status, taskId: expected.taskId, detail, catalog });
 }
 
+function decodeProjectTaskCandidatePlanGeneration(
+  input: unknown,
+): PreloadProjectTaskCandidatePlanGeneration | undefined {
+  const record = exactRecord(input, ["expectedTaskVersion", "projectId", "taskId"]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+  });
+}
+
+function decodeProjectTaskCandidatePlanMutationResult(
+  input: unknown,
+  expected: PreloadProjectTaskCandidatePlanGeneration,
+): PreloadProjectTaskCandidatePlanMutationResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  const detail = decodeProjectTaskDetail(record?.detail);
+  const catalog = decodeProjectTaskCatalog(record?.catalog);
+  if (
+    record === undefined ||
+    (record.status !== "generated" && record.status !== "existing") ||
+    record.taskId !== expected.taskId ||
+    detail?.projectId !== expected.projectId ||
+    detail.taskId !== expected.taskId ||
+    catalog?.projectId !== expected.projectId
+  ) {
+    throw new Error("The desktop Project Task candidate Plan result is invalid.");
+  }
+  return Object.freeze({
+    status: record.status,
+    taskId: expected.taskId,
+    detail,
+    catalog,
+  });
+}
+
 function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | undefined {
   const record = exactRecord(input, [
     "activeRequirement",
+    "candidatePlan",
     "projectId",
     "stage",
     "taskId",
@@ -555,6 +631,7 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
     "title",
   ]);
   const requirement = decodeProjectTaskRequirement(record?.activeRequirement);
+  const candidatePlan = decodeProjectTaskCandidatePlan(record?.candidatePlan);
   if (
     !isUuid(record?.projectId) ||
     !isUuid(record.taskId) ||
@@ -562,7 +639,9 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
     !validTaskTitle(record.title) ||
     typeof record.stage !== "string" ||
     !TASK_STAGES.has(record.stage) ||
-    requirement === undefined
+    requirement === undefined ||
+    candidatePlan === undefined ||
+    !candidatePlanMatchesStage(record.candidatePlan, record.stage)
   ) {
     return undefined;
   }
@@ -573,7 +652,57 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
     title: record.title,
     stage: record.stage as PreloadProjectTaskSummary["stage"],
     activeRequirement: requirement,
+    candidatePlan,
   });
+}
+
+function decodeProjectTaskCandidatePlan(
+  input: unknown,
+): PreloadProjectTaskCandidatePlan | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const record = exactRecord(input, ["revisionNumber", "steps"]);
+  if (
+    record === undefined ||
+    !isPositiveSafeInteger(record.revisionNumber) ||
+    !Array.isArray(record.steps) ||
+    record.steps.length < 1 ||
+    record.steps.length > MAX_TASK_PLAN_STEPS
+  ) {
+    return undefined;
+  }
+  let totalBytes = 0;
+  const steps = record.steps.map((inputStep) => {
+    const step = exactRecord(inputStep, ["acceptanceCriteria", "description", "title"]);
+    if (
+      step === undefined ||
+      !validTaskPlanStepText(step.title, MAX_TASK_PLAN_STEP_TITLE_BYTES) ||
+      !validTaskPlanStepText(step.description, MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES) ||
+      !validTaskRequirementItems(step.acceptanceCriteria)
+    ) {
+      return undefined;
+    }
+    totalBytes += utf8ByteLength(
+      [step.title, step.description, ...step.acceptanceCriteria].join(""),
+    );
+    return Object.freeze({
+      title: step.title,
+      description: step.description,
+      acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
+    });
+  });
+  return steps.some((step) => step === undefined) || totalBytes > MAX_TASK_PLAN_TOTAL_BYTES
+    ? undefined
+    : Object.freeze({
+        revisionNumber: record.revisionNumber,
+        steps: Object.freeze(steps as PreloadProjectTaskCandidatePlanStep[]),
+      });
+}
+
+function candidatePlanMatchesStage(candidate: unknown, stage: unknown): boolean {
+  const stageHasCandidate = stage === "candidate_plan" || stage === "active_graph_with_candidate";
+  return (candidate !== null) === stageHasCandidate;
 }
 
 function decodeProjectTaskRequirement(input: unknown): PreloadProjectTaskRequirement | undefined {
@@ -1070,6 +1199,15 @@ function validTaskRequirementItems(input: unknown): input is string[] {
   );
 }
 
+function validTaskPlanStepText(input: unknown, maxBytes: number): input is string {
+  return (
+    typeof input === "string" &&
+    input.trim().length > 0 &&
+    utf8ByteLength(input) <= maxBytes &&
+    !input.includes("\0")
+  );
+}
+
 const desktopApi = Object.freeze({
   async getBootstrapState(): Promise<PreloadBootstrapState> {
     return decodeBootstrapState(await ipcRenderer.invoke(GET_BOOTSTRAP_STATE_CHANNEL));
@@ -1141,6 +1279,18 @@ const desktopApi = Object.freeze({
     return decodeProjectTaskRequirementMutationResult(
       await ipcRenderer.invoke(REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL, revision),
       revision,
+    );
+  },
+  async generateProjectTaskCandidatePlan(
+    input: PreloadProjectTaskCandidatePlanGeneration,
+  ): Promise<PreloadProjectTaskCandidatePlanMutationResult> {
+    const generation = decodeProjectTaskCandidatePlanGeneration(input);
+    if (generation === undefined) {
+      throw new TypeError("A valid desktop Project Task candidate Plan request is required.");
+    }
+    return decodeProjectTaskCandidatePlanMutationResult(
+      await ipcRenderer.invoke(GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL, generation),
+      generation,
     );
   },
   onBootstrapState(listener: (state: PreloadBootstrapState) => void): () => void {

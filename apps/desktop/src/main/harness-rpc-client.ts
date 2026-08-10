@@ -32,6 +32,8 @@ import {
   type HarnessRoutingConfigurationSetParams as ProtocolRoutingConfigurationSetParams,
   type HarnessTaskCatalogPageParams as ProtocolTaskCatalogPageParams,
   type HarnessTaskCatalogPageResult as ProtocolTaskCatalogPageResult,
+  type HarnessTaskCandidatePlanGenerateParams as ProtocolTaskCandidatePlanGenerateParams,
+  type HarnessTaskCandidatePlanGenerateResult as ProtocolTaskCandidatePlanGenerateResult,
   type HarnessTaskCreateParams as ProtocolTaskCreateParams,
   type HarnessTaskCreateResult as ProtocolTaskCreateResult,
   type HarnessTaskDetailParams as ProtocolTaskDetailParams,
@@ -46,6 +48,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 60_000;
+const CANDIDATE_PLAN_REQUEST_TIMEOUT_MS = 330_000;
 
 export type HarnessRpcClientState = "connecting" | "handshaking" | "ready" | "closed";
 
@@ -130,6 +133,10 @@ export type HarnessRoutingConfigurationResult = Readonly<ProtocolRoutingConfigur
 export type HarnessRoutingConfigurationSetParams = Readonly<ProtocolRoutingConfigurationSetParams>;
 export type HarnessTaskCatalogPageParams = Readonly<ProtocolTaskCatalogPageParams>;
 export type HarnessTaskCatalogPageResult = Readonly<ProtocolTaskCatalogPageResult>;
+export type HarnessTaskCandidatePlanGenerateParams =
+  Readonly<ProtocolTaskCandidatePlanGenerateParams>;
+export type HarnessTaskCandidatePlanGenerateResult =
+  Readonly<ProtocolTaskCandidatePlanGenerateResult>;
 export type HarnessTaskCreateParams = Readonly<ProtocolTaskCreateParams>;
 export type HarnessTaskCreateResult = Readonly<ProtocolTaskCreateResult>;
 export type HarnessTaskDetailParams = Readonly<ProtocolTaskDetailParams>;
@@ -266,6 +273,7 @@ export class HarnessRpcClient {
   async #requestObservation(
     method: RpcMethodName,
     params: JsonValue,
+    timeoutMs = this.#requestTimeoutMs,
   ): Promise<RpcResponseObservation> {
     if (this.#state !== "ready") {
       throw new HarnessRpcClientError("client_closed");
@@ -294,7 +302,7 @@ export class HarnessRpcClient {
     return await new Promise<RpcResponseObservation>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#fail(new HarnessRpcClientError("request_timeout"));
-      }, this.#requestTimeoutMs);
+      }, timeoutMs);
       timer.unref();
       this.#pending.set(id, Object.freeze({ method, resolve, reject, timer }));
       this.#write(frame);
@@ -390,6 +398,18 @@ export class HarnessRpcClient {
       "task.detail",
       params as JsonValue,
     )) as unknown as HarnessTaskDetailResult;
+  }
+
+  async generateProjectTaskCandidatePlan(
+    params: HarnessTaskCandidatePlanGenerateParams,
+  ): Promise<HarnessTaskCandidatePlanGenerateResult> {
+    return (
+      await this.#requestObservation(
+        "task.plan.generate_candidate",
+        params as unknown as JsonValue,
+        CANDIDATE_PLAN_REQUEST_TIMEOUT_MS,
+      )
+    ).value as unknown as HarnessTaskCandidatePlanGenerateResult;
   }
 
   async reviseProjectTaskRequirement(

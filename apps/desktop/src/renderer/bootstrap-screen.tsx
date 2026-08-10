@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskCandidatePlanGeneration,
   decodeDesktopProjectTaskRequirementRevision,
 } from "../shared/bootstrap-state.js";
 import type {
@@ -16,6 +17,8 @@ import type {
   DesktopProjectSummary,
   DesktopProjectTaskCatalog,
   DesktopProjectTaskCatalogResult,
+  DesktopProjectTaskCandidatePlanGeneration,
+  DesktopProjectTaskCandidatePlanMutationResult,
   DesktopProjectTaskCreation,
   DesktopProjectTaskDetail,
   DesktopProjectTaskDetailResult,
@@ -36,6 +39,14 @@ const credentialLabels = Object.freeze({
   amazon_bedrock: "Amazon Bedrock",
   api_key: "API Key",
   chatgpt: "ChatGPT",
+});
+
+const unavailableRouting: DesktopRoutingConfiguration = Object.freeze({
+  configured: false,
+  profileVersion: 0,
+  configurationRevisionId: null,
+  tiers: null,
+  availability: null,
 });
 
 const planLabels: Readonly<Record<DesktopAccountPlanType, string>> = Object.freeze({
@@ -175,6 +186,7 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
           <ProjectTaskPanel
             projects={state.projects}
             projectRoutingBindings={state.projectRoutingBindings}
+            routing={state.routing}
           />
         ) : null}
 
@@ -360,9 +372,11 @@ type TaskDetailViewState =
 export function ProjectTaskPanel({
   projects,
   projectRoutingBindings,
+  routing = unavailableRouting,
 }: Readonly<{
   projects: DesktopProjectCatalog;
   projectRoutingBindings: DesktopProjectRoutingBindings;
+  routing?: DesktopRoutingConfiguration;
 }>) {
   const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(() =>
     preferredTaskProjectId(projects, projectRoutingBindings),
@@ -378,6 +392,9 @@ export function ProjectTaskPanel({
   >("idle");
   const [revisionStatus, setRevisionStatus] = useState<
     "idle" | "revising" | DesktopProjectTaskRequirementMutationResult["status"]
+  >("idle");
+  const [planStatus, setPlanStatus] = useState<
+    "idle" | "generating" | DesktopProjectTaskCandidatePlanMutationResult["status"]
   >("idle");
 
   useEffect(() => {
@@ -402,6 +419,7 @@ export function ProjectTaskPanel({
     setDetailState({ status: "idle" });
     setRequirementSource("");
     setRevisionStatus("idle");
+    setPlanStatus("idle");
     void desktopTaskApi()
       .readProjectTaskCatalog(selectedProjectId)
       .then((result) => {
@@ -434,6 +452,7 @@ export function ProjectTaskPanel({
     let active = true;
     setDetailState({ status: "loading" });
     setRevisionStatus("idle");
+    setPlanStatus("idle");
     void desktopTaskApi()
       .readProjectTaskDetail({ projectId: selectedProjectId, taskId: selectedTaskId })
       .then((result) => {
@@ -490,8 +509,28 @@ export function ProjectTaskPanel({
     detailState.status === "loaded" &&
     requirementSource !== detailState.detail.activeRequirement.sourceText &&
     revisionStatus !== "revising" &&
-    mutationStatus !== "creating";
-  const taskMutationPending = mutationStatus === "creating" || revisionStatus === "revising";
+    mutationStatus !== "creating" &&
+    planStatus !== "generating";
+  const planGeneration =
+    detailState.status !== "loaded"
+      ? undefined
+      : decodeDesktopProjectTaskCandidatePlanGeneration({
+          projectId: detailState.detail.projectId,
+          taskId: detailState.detail.taskId,
+          expectedTaskVersion: detailState.detail.taskVersion,
+        });
+  const canGeneratePlan =
+    planGeneration !== undefined &&
+    detailState.status === "loaded" &&
+    selectedBinding?.status === "default_bound" &&
+    routing.configured &&
+    routing.availability?.deep === "observed_available" &&
+    requirementSource === detailState.detail.activeRequirement.sourceText &&
+    mutationStatus !== "creating" &&
+    revisionStatus !== "revising" &&
+    planStatus !== "generating";
+  const taskMutationPending =
+    mutationStatus === "creating" || revisionStatus === "revising" || planStatus === "generating";
 
   const createTask = async (): Promise<void> => {
     if (!canCreate || creation === undefined) {
@@ -544,6 +583,39 @@ export function ProjectTaskPanel({
     }
   };
 
+  const generateCandidatePlan = async (): Promise<void> => {
+    if (!canGeneratePlan || planGeneration === undefined) {
+      return;
+    }
+    setPlanStatus("generating");
+    try {
+      const result = await desktopTaskApi().generateProjectTaskCandidatePlan(planGeneration);
+      if (result.status === "generated" || result.status === "existing") {
+        setCatalogState({ status: "loaded", catalog: result.catalog });
+        setDetailState({ status: "loaded", detail: result.detail });
+        setRequirementSource(result.detail.activeRequirement.sourceText);
+      } else if (result.status === "conflict") {
+        const [currentDetail, currentCatalog] = await Promise.allSettled([
+          desktopTaskApi().readProjectTaskDetail({
+            projectId: planGeneration.projectId,
+            taskId: planGeneration.taskId,
+          }),
+          desktopTaskApi().readProjectTaskCatalog(planGeneration.projectId),
+        ]);
+        if (currentDetail.status === "fulfilled" && currentDetail.value.status === "loaded") {
+          setDetailState({ status: "loaded", detail: currentDetail.value.detail });
+          setRequirementSource(currentDetail.value.detail.activeRequirement.sourceText);
+        }
+        if (currentCatalog.status === "fulfilled" && currentCatalog.value.status === "loaded") {
+          setCatalogState({ status: "loaded", catalog: currentCatalog.value.catalog });
+        }
+      }
+      setPlanStatus(result.status);
+    } catch {
+      setPlanStatus("unavailable");
+    }
+  };
+
   const tasks = catalogState.status === "loaded" ? catalogState.catalog.tasks : [];
   return (
     <section
@@ -557,7 +629,7 @@ export function ProjectTaskPanel({
         <div>
           <p className="card-index">04 / TASK INTAKE</p>
           <h2>持久 Task 入口</h2>
-          <p>这里只保存目标原文与 Project 归属；计划、TODO / DAG、模型调用和执行仍保持关闭。</p>
+          <p>保存权威需求，并用高级档位生成可审阅候选计划；确认、TODO / DAG 和执行仍保持关闭。</p>
         </div>
         <label>
           <span>目标 Project</span>
@@ -567,8 +639,12 @@ export function ProjectTaskPanel({
             disabled={projects.projects.length === 0 || taskMutationPending}
             onChange={(event) => {
               setSelectedProjectId(readInputValue(event.currentTarget) || undefined);
+              setSelectedTaskId(undefined);
+              setDetailState({ status: "idle" });
+              setRequirementSource("");
               setMutationStatus("idle");
               setRevisionStatus("idle");
+              setPlanStatus("idle");
             }}
           >
             {projects.projects.length === 0 ? <option value="">尚无 Project</option> : null}
@@ -639,7 +715,13 @@ export function ProjectTaskPanel({
                     type="button"
                     data-task-open
                     disabled={taskMutationPending}
-                    onClick={() => setSelectedTaskId(task.taskId)}
+                    onClick={() => {
+                      setSelectedTaskId(task.taskId);
+                      setDetailState({ status: "loading" });
+                      setRequirementSource("");
+                      setRevisionStatus("idle");
+                      setPlanStatus("idle");
+                    }}
                   >
                     <span>{String(index + 1).padStart(2, "0")}</span>
                     <div>
@@ -694,6 +776,9 @@ export function ProjectTaskPanel({
                   disabled={taskMutationPending}
                   onChange={(event) => {
                     setRequirementSource(readInputValue(event.currentTarget));
+                    if (planStatus !== "generating") {
+                      setPlanStatus("idle");
+                    }
                     if (revisionStatus !== "revising") {
                       setRevisionStatus("idle");
                     }
@@ -729,10 +814,76 @@ export function ProjectTaskPanel({
               <span data-task-revision-feedback aria-live="polite">
                 {taskRequirementFeedback(revisionStatus)}
               </span>
+              <div className="task-plan-divider" aria-hidden="true">
+                <span>CANDIDATE PLAN</span>
+                <i />
+                <small>UNCONFIRMED</small>
+              </div>
+              {detailState.detail.candidatePlan === null ? (
+                <p className="task-plan-empty">
+                  尚无候选计划。生成只会写入可审阅 TODO，不会确认计划或启动执行。
+                </p>
+              ) : (
+                <CandidatePlan plan={detailState.detail.candidatePlan} />
+              )}
+              <button
+                type="button"
+                data-task-plan-generate
+                disabled={!canGeneratePlan}
+                onClick={() => void generateCandidatePlan()}
+              >
+                {planStatus === "generating"
+                  ? "高级档位正在分析"
+                  : detailState.detail.candidatePlan === null
+                    ? "生成候选计划"
+                    : "重新生成候选计划"}
+              </button>
+              <span data-task-plan-feedback aria-live="polite">
+                {taskCandidatePlanFeedback(
+                  planStatus,
+                  selectedBinding?.status,
+                  routing,
+                  requirementSource !== detailState.detail.activeRequirement.sourceText,
+                )}
+              </span>
             </>
           ) : null}
         </div>
       </div>
+    </section>
+  );
+}
+
+export function CandidatePlan({
+  plan,
+}: Readonly<{ plan: NonNullable<DesktopProjectTaskDetail["candidatePlan"]> }>) {
+  return (
+    <section className="task-candidate-plan" data-task-plan-revision={plan.revisionNumber}>
+      <header>
+        <div>
+          <span>PLAN REVISION</span>
+          <strong>P{plan.revisionNumber}</strong>
+        </div>
+        <small>{plan.steps.length} STEPS · REVIEW REQUIRED</small>
+      </header>
+      <ol>
+        {plan.steps.map((step, index) => (
+          <li key={`${index}:${step.title}`}>
+            <span>{String(index + 1).padStart(2, "0")}</span>
+            <div>
+              <strong>{step.title}</strong>
+              <p>{step.description}</p>
+              {step.acceptanceCriteria.length > 0 ? (
+                <ul>
+                  {step.acceptanceCriteria.map((criterion, criterionIndex) => (
+                    <li key={`${criterionIndex}:${criterion}`}>{criterion}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -804,6 +955,40 @@ export function taskRequirementFeedback(
       return "Task 已发生变化；已刷新权威详情，草稿仍保留，请比较当前原文后再提交。";
     case "unavailable":
       return "结果当前未知；请重启并核对 Requirement 修订号，不要盲目重复提交。";
+  }
+}
+
+export function taskCandidatePlanFeedback(
+  status: "idle" | "generating" | DesktopProjectTaskCandidatePlanMutationResult["status"],
+  bindingStatus: "unbound" | "default_bound" | "other_profile_bound" | undefined,
+  routing: DesktopRoutingConfiguration,
+  hasRequirementDraft: boolean,
+): string {
+  if (status === "idle" && hasRequirementDraft) {
+    return "请先保存或撤销 Requirement 草稿；候选计划只绑定当前权威修订。";
+  }
+  if (status === "idle" && bindingStatus !== "default_bound") {
+    return "当前 Project 未绑定默认路由，不能解析高级档位。";
+  }
+  if (
+    status === "idle" &&
+    (!routing.configured || routing.availability?.deep !== "observed_available")
+  ) {
+    return "高级档位当前不可用；不会静默回退到其他模型。";
+  }
+  switch (status) {
+    case "idle":
+      return "将使用当前高级档位进行一次只读、禁网分析；结果仍需用户确认。";
+    case "generating":
+      return "正在只读分析工作区并复核 Task、路由和模型目录，期间不会修改文件。";
+    case "generated":
+      return "候选计划已持久化并可在重启后恢复；它尚未确认，也不能执行。";
+    case "existing":
+      return "相同生成命令已经落盘，已重新读取当前权威候选计划。";
+    case "conflict":
+      return "分析期间 Task、路由或模型目录已变化；结果未写入，已刷新当前状态。";
+    case "unavailable":
+      return "结果当前未知；请重启并核对 Plan 修订号，不要盲目重复生成。";
   }
 }
 
@@ -1121,6 +1306,9 @@ function desktopTaskApi(): Readonly<{
   reviseProjectTaskRequirement(
     revision: DesktopProjectTaskRequirementRevision,
   ): Promise<DesktopProjectTaskRequirementMutationResult>;
+  generateProjectTaskCandidatePlan(
+    input: DesktopProjectTaskCandidatePlanGeneration,
+  ): Promise<DesktopProjectTaskCandidatePlanMutationResult>;
 }> {
   return (
     globalThis as unknown as {
@@ -1135,6 +1323,9 @@ function desktopTaskApi(): Readonly<{
         reviseProjectTaskRequirement(
           revision: DesktopProjectTaskRequirementRevision,
         ): Promise<DesktopProjectTaskRequirementMutationResult>;
+        generateProjectTaskCandidatePlan(
+          input: DesktopProjectTaskCandidatePlanGeneration,
+        ): Promise<DesktopProjectTaskCandidatePlanMutationResult>;
       }>;
     }
   ).codexHarness;

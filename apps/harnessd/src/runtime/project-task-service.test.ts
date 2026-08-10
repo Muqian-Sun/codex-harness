@@ -287,6 +287,8 @@ describe("ProjectTaskService", () => {
         constraints: [],
         acceptanceCriteria: [],
       },
+      latestPlanRevisionId: null,
+      candidatePlan: null,
     });
     expect(Object.isFrozen(initial.activeRequirement.constraints)).toBe(true);
     expect(service.reviseRequirement(reviseParams())).toEqual({

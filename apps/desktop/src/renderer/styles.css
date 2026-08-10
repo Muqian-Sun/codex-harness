@@ -618,6 +618,128 @@ h1 {
   line-height: 1.5;
 }
 
+.task-plan-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  color: #c9a96b;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+
+.task-plan-divider i {
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(90deg, rgba(201, 169, 107, 0.55), transparent);
+}
+
+.task-plan-divider small {
+  color: #887653;
+  font-size: 7px;
+}
+
+.task-plan-empty {
+  margin: 0;
+  padding: 12px 13px;
+  border-left: 2px solid rgba(201, 169, 107, 0.38);
+  color: #8fa09a;
+  background: rgba(201, 169, 107, 0.045);
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.task-candidate-plan {
+  overflow: hidden;
+  border: 1px solid rgba(201, 169, 107, 0.23);
+  background:
+    linear-gradient(135deg, rgba(201, 169, 107, 0.07), transparent 42%), rgba(8, 18, 22, 0.58);
+}
+
+.task-candidate-plan > header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 13px;
+  border-bottom: 1px solid rgba(201, 169, 107, 0.18);
+}
+
+.task-candidate-plan > header div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.task-candidate-plan > header span,
+.task-candidate-plan > header small {
+  color: #9a8766;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 7px;
+  letter-spacing: 0.08em;
+}
+
+.task-candidate-plan > header strong {
+  color: #e2ca9c;
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 16px;
+}
+
+.task-candidate-plan > ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-candidate-plan > ol > li {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  border-bottom: 1px solid rgba(195, 211, 203, 0.1);
+}
+
+.task-candidate-plan > ol > li:last-child {
+  border-bottom: 0;
+}
+
+.task-candidate-plan > ol > li > span {
+  padding: 13px 8px;
+  border-right: 1px solid rgba(201, 169, 107, 0.18);
+  color: #aa8f5c;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  text-align: center;
+}
+
+.task-candidate-plan > ol > li > div {
+  padding: 12px 13px 13px;
+}
+
+.task-candidate-plan > ol > li strong {
+  color: #dce5df;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.task-candidate-plan > ol > li p {
+  margin: 5px 0 0;
+  color: #91a19b;
+  font-size: 9px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.task-candidate-plan ul {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding-left: 15px;
+  color: #aa9b7d;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
 .project-header button {
   min-width: 136px;
   padding: 10px 14px 9px;

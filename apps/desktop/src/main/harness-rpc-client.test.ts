@@ -589,8 +589,12 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
                       constraints: [],
                       acceptanceCriteria: [],
                     },
+                    latestPlanRevisionId: null,
+                    candidatePlan: null,
                   }
-                : { schemaVersion: 1, status: "revised", taskId },
+                : method === "task.plan.generate_candidate"
+                  ? { schemaVersion: 1, status: "generated", taskId }
+                  : { schemaVersion: 1, status: "revised", taskId },
       });
     });
     const client = await createClient(endpoint);
@@ -616,6 +620,21 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       activeRequirement: { revisionNumber: 1 },
     });
     await expect(
+      client.generateProjectTaskCandidatePlan({
+        commandId: "00000000-0000-4000-8000-000000000915",
+        projectId,
+        taskId,
+        expectedProjectVersion: 1,
+        expectedTaskVersion: 1,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        previousPlanRevisionId: null,
+        expectedRoutingBindingVersion: 1,
+        expectedProfileVersion: 1,
+        expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000916",
+      }),
+    ).resolves.toEqual({ schemaVersion: 1, status: "generated", taskId });
+    await expect(
       client.reviseProjectTaskRequirement({
         commandId: "00000000-0000-4000-8000-000000000914",
         projectId,
@@ -630,6 +649,7 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       "task.catalog_page",
       "task.create",
       "task.detail",
+      "task.plan.generate_candidate",
       "task.requirement.revise",
     ]);
     await expect(

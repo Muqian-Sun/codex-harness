@@ -37,10 +37,15 @@ const harness = vi.hoisted(() => {
           constraints: [],
           acceptanceCriteria: [],
         },
+        candidatePlan: null,
       },
     };
   });
   const reviseProjectTaskRequirement = vi.fn(async (input: unknown): Promise<unknown> => {
+    void input;
+    return { status: "unavailable" as const };
+  });
+  const generateProjectTaskCandidatePlan = vi.fn(async (input: unknown): Promise<unknown> => {
     void input;
     return { status: "unavailable" as const };
   });
@@ -72,6 +77,7 @@ const harness = vi.hoisted(() => {
     createProjectTask,
     readProjectTaskDetail,
     reviseProjectTaskRequirement,
+    generateProjectTaskCandidatePlan,
     ipcHandlers,
     webContents,
     window,
@@ -211,6 +217,10 @@ vi.mock("./application-controller.js", () => {
         return await harness.reviseProjectTaskRequirement(input);
       }
 
+      async generateProjectTaskCandidatePlan(input: unknown): Promise<unknown> {
+        return await harness.generateProjectTaskCandidatePlan(input);
+      }
+
       async setRoutingConfiguration(): Promise<Readonly<{ status: "unavailable" }>> {
         return { status: "unavailable" };
       }
@@ -288,6 +298,7 @@ describe("desktop Electron main Project Task IPC", () => {
     await import("./main.js");
     const read = harness.ipcHandlers.get("desktop.task.detail")!;
     const revise = harness.ipcHandlers.get("desktop.task.requirement.revise")!;
+    const generate = harness.ipcHandlers.get("desktop.task.plan.generate_candidate")!;
     const event = { sender: harness.webContents, senderFrame: {} };
     const taskId = "00000000-0000-4000-8000-000000000894";
     const selection = { projectId: PROJECT_ID, taskId };
@@ -317,6 +328,7 @@ describe("desktop Electron main Project Task IPC", () => {
           constraints: [],
           acceptanceCriteria: [],
         },
+        candidatePlan: null,
       },
     });
     await expect(read(event, selection)).resolves.toEqual({ status: "unavailable" });
@@ -348,6 +360,38 @@ describe("desktop Electron main Project Task IPC", () => {
     await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
     harness.reviseProjectTaskRequirement.mockRejectedValueOnce(new Error("private"));
     await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
+
+    const generation = { ...selection, expectedTaskVersion: 1 };
+    await expect(generate(event, { ...generation, extra: true })).rejects.toThrow(
+      "candidate Plan generation is invalid",
+    );
+    let resolveGeneration!: (value: Readonly<{ status: "unavailable" }>) => void;
+    harness.generateProjectTaskCandidatePlan.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveGeneration = resolve;
+        }),
+    );
+    const pendingGeneration = generate(event, generation);
+    await vi.waitFor(() =>
+      expect(harness.generateProjectTaskCandidatePlan).toHaveBeenCalledWith(generation),
+    );
+    await expect(generate(event, generation)).resolves.toEqual({ status: "unavailable" });
+    await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
+    resolveGeneration({ status: "unavailable" });
+    await expect(pendingGeneration).resolves.toEqual({ status: "unavailable" });
+
+    const detail = await harness.readProjectTaskDetail(selection);
+    harness.generateProjectTaskCandidatePlan.mockResolvedValueOnce({
+      status: "generated",
+      taskId,
+      detail: (detail as { detail: unknown }).detail,
+      catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
+    });
+    await expect(generate(event, generation)).resolves.toMatchObject({
+      status: "generated",
+      taskId,
+    });
   });
 });
 

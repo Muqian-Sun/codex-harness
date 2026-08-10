@@ -37,6 +37,7 @@ function createSession(options?: {
   createProjectTask?: (params: JsonValue) => unknown;
   readProjectTaskDetail?: (params: JsonValue) => unknown;
   reviseProjectTaskRequirement?: (params: JsonValue) => unknown;
+  generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }): ConnectionSession {
@@ -69,6 +70,9 @@ function createSession(options?: {
     ...(options?.reviseProjectTaskRequirement === undefined
       ? {}
       : { reviseProjectTaskRequirement: options.reviseProjectTaskRequirement }),
+    ...(options?.generateProjectTaskCandidatePlan === undefined
+      ? {}
+      : { generateProjectTaskCandidatePlan: options.generateProjectTaskCandidatePlan }),
     ...(options?.readRoutingConfiguration === undefined
       ? {}
       : { readRoutingConfiguration: options.readRoutingConfiguration }),
@@ -137,8 +141,8 @@ function sentValues(actions: readonly ConnectionSessionAction[]): JsonValue[] {
     });
 }
 
-function authenticate(session: ConnectionSession): JsonValue {
-  const actions = session.receive(frame(hello(), true));
+async function authenticate(session: ConnectionSession): Promise<JsonValue> {
+  const actions = await session.receive(frame(hello(), true));
   expect(actions).toHaveLength(1);
   const values = sentValues(actions);
   expect(values).toHaveLength(1);
@@ -148,12 +152,12 @@ function authenticate(session: ConnectionSession): JsonValue {
 }
 
 describe("daemon connection session", () => {
-  it("authenticates a fragmented hello before accepting RPC", () => {
+  it("authenticates a fragmented hello before accepting RPC", async () => {
     const session = createSession();
     const encoded = frame(hello());
     const split = Math.floor(encoded.byteLength / 2);
-    expect(session.receive(encoded.subarray(0, split))).toEqual([]);
-    const actions = session.receive(encoded.subarray(split));
+    expect(await session.receive(encoded.subarray(0, split))).toEqual([]);
+    const actions = await session.receive(encoded.subarray(split));
     const response = sentValues(actions)[0];
     expect(response).toMatchObject({
       kind: "bootstrap-response",
@@ -172,9 +176,11 @@ describe("daemon connection session", () => {
     expect(session.state).toBe("authenticated");
   });
 
-  it("processes hello and health frames in order from one chunk", () => {
+  it("processes hello and health frames in order from one chunk", async () => {
     const session = createSession({ uptimeMs: () => 1_250.9 });
-    const actions = session.receive(joinedFrames(hello(), rpc("health-1", "system.health", {})));
+    const actions = await session.receive(
+      joinedFrames(hello(), rpc("health-1", "system.health", {})),
+    );
     const values = sentValues(actions);
     expect(values).toHaveLength(2);
     expect(parseServerBootstrapEnvelope(values[0]).ok).toBe(true);
@@ -186,7 +192,7 @@ describe("daemon connection session", () => {
     });
   });
 
-  it("serves a validated account snapshot after authentication", () => {
+  it("serves a validated account snapshot after authentication", async () => {
     const session = createSession({
       readAccountStatus: () => ({
         schemaVersion: 1,
@@ -198,9 +204,9 @@ describe("daemon connection session", () => {
         planType: null,
       }),
     });
-    authenticate(session);
+    await authenticate(session);
 
-    const actions = session.receive(frame(rpc("account-1", "account.status", {})));
+    const actions = await session.receive(frame(rpc("account-1", "account.status", {})));
     expect(sentValues(actions)[0]).toMatchObject({
       kind: "response",
       id: "account-1",
@@ -213,7 +219,7 @@ describe("daemon connection session", () => {
     expect(session.state).toBe("authenticated");
   });
 
-  it("serves a validated bounded model catalog page only after authentication", () => {
+  it("serves a validated bounded model catalog page only after authentication", async () => {
     const observedParams: JsonValue[] = [];
     const session = createSession({
       readModelCatalogPage: (params) => {
@@ -234,10 +240,10 @@ describe("daemon connection session", () => {
         };
       },
     });
-    authenticate(session);
+    await authenticate(session);
 
     const params = { cursor: null, limit: 12 } as const;
-    const actions = session.receive(frame(rpc("catalog-1", "model.catalog_page", params)));
+    const actions = await session.receive(frame(rpc("catalog-1", "model.catalog_page", params)));
     expect(sentValues(actions)[0]).toMatchObject({
       kind: "response",
       id: "catalog-1",
@@ -252,7 +258,7 @@ describe("daemon connection session", () => {
     expect(session.state).toBe("authenticated");
   });
 
-  it("serves routing reads and writes through the authenticated session", () => {
+  it("serves routing reads and writes through the authenticated session", async () => {
     const unconfigured = {
       schemaVersion: 1,
       configured: false,
@@ -266,10 +272,12 @@ describe("daemon connection session", () => {
       readRoutingConfiguration: () => unconfigured,
       setRoutingConfiguration,
     });
-    authenticate(session);
+    await authenticate(session);
 
     expect(
-      sentValues(session.receive(frame(rpc("routing-get", "routing.configuration.get", {}))))[0],
+      sentValues(
+        await session.receive(frame(rpc("routing-get", "routing.configuration.get", {}))),
+      )[0],
     ).toMatchObject({ kind: "response", result: unconfigured });
     const params = {
       commandId: "00000000-0000-4000-8000-000000000851",
@@ -283,13 +291,13 @@ describe("daemon connection session", () => {
     } as const;
     expect(
       sentValues(
-        session.receive(frame(rpc("routing-set", "routing.configuration.set", params))),
+        await session.receive(frame(rpc("routing-set", "routing.configuration.set", params))),
       )[0],
     ).toMatchObject({ kind: "response", result: unconfigured });
     expect(setRoutingConfiguration).toHaveBeenCalledWith(params);
   });
 
-  it("serves Project routing binding reads and writes through the authenticated session", () => {
+  it("serves Project routing binding reads and writes through the authenticated session", async () => {
     const projectId = "00000000-0000-4000-8000-000000000861";
     const profileId = "00000000-0000-4000-8000-000000000901";
     const revisionId = "00000000-0000-4000-8000-000000000851";
@@ -313,12 +321,12 @@ describe("daemon connection session", () => {
       readProjectRoutingBindingStatuses,
       bindProjectDefaultRouting,
     });
-    authenticate(session);
+    await authenticate(session);
 
     const statusParams = { projectIds: [projectId] };
     expect(
       sentValues(
-        session.receive(
+        await session.receive(
           frame(rpc("binding-get", "project.routing_binding.status_batch", statusParams)),
         ),
       )[0],
@@ -335,7 +343,7 @@ describe("daemon connection session", () => {
     } as const;
     expect(
       sentValues(
-        session.receive(
+        await session.receive(
           frame(rpc("binding-set", "project.routing_binding.bind_default", bindParams)),
         ),
       )[0],
@@ -343,13 +351,13 @@ describe("daemon connection session", () => {
     expect(bindProjectDefaultRouting).toHaveBeenCalledWith(bindParams);
   });
 
-  it("fails closed when Project routing binding providers are absent", () => {
+  it("fails closed when Project routing binding providers are absent", async () => {
     const session = createSession();
-    authenticate(session);
+    await authenticate(session);
 
     expect(
       sentValues(
-        session.receive(
+        await session.receive(
           frame(
             rpc("binding-get", "project.routing_binding.status_batch", {
               projectIds: ["00000000-0000-4000-8000-000000000861"],
@@ -360,7 +368,7 @@ describe("daemon connection session", () => {
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
   });
 
-  it("serves Project Task catalog, creation, detail, and revision through explicit providers", () => {
+  it("serves Project Task catalog, creation, detail, and revision through explicit providers", async () => {
     const projectId = "00000000-0000-4000-8000-000000000861";
     const taskId = "00000000-0000-4000-8000-000000000911";
     const readProjectTaskCatalogPage = vi.fn(() => ({
@@ -398,6 +406,8 @@ describe("daemon connection session", () => {
         constraints: [],
         acceptanceCriteria: [],
       },
+      latestPlanRevisionId: null,
+      candidatePlan: null,
     }));
     const reviseProjectTaskRequirement = vi.fn(() => ({
       schemaVersion: 1,
@@ -410,10 +420,12 @@ describe("daemon connection session", () => {
       readProjectTaskDetail,
       reviseProjectTaskRequirement,
     });
-    authenticate(session);
+    await authenticate(session);
     const catalogParams = { projectId, cursor: null, limit: 12 };
     expect(
-      sentValues(session.receive(frame(rpc("task-get", "task.catalog_page", catalogParams))))[0],
+      sentValues(
+        await session.receive(frame(rpc("task-get", "task.catalog_page", catalogParams))),
+      )[0],
     ).toMatchObject({ kind: "response", result: { tasks: [{ taskId }] } });
     expect(readProjectTaskCatalogPage).toHaveBeenCalledWith(catalogParams);
 
@@ -428,13 +440,13 @@ describe("daemon connection session", () => {
       sourceText: "Persist without execution.",
     };
     expect(
-      sentValues(session.receive(frame(rpc("task-create", "task.create", createParams))))[0],
+      sentValues(await session.receive(frame(rpc("task-create", "task.create", createParams))))[0],
     ).toMatchObject({ kind: "response", result: { status: "created", taskId } });
     expect(createProjectTask).toHaveBeenCalledWith(createParams);
 
     const detailParams = { projectId, taskId };
     expect(
-      sentValues(session.receive(frame(rpc("task-detail", "task.detail", detailParams))))[0],
+      sentValues(await session.receive(frame(rpc("task-detail", "task.detail", detailParams))))[0],
     ).toMatchObject({ kind: "response", result: { taskId, taskVersion: 1 } });
     expect(readProjectTaskDetail).toHaveBeenCalledWith(detailParams);
 
@@ -449,24 +461,64 @@ describe("daemon connection session", () => {
     };
     expect(
       sentValues(
-        session.receive(frame(rpc("task-revise", "task.requirement.revise", reviseParams))),
+        await session.receive(frame(rpc("task-revise", "task.requirement.revise", reviseParams))),
       )[0],
     ).toMatchObject({ kind: "response", result: { status: "revised", taskId } });
     expect(reviseProjectTaskRequirement).toHaveBeenCalledWith(reviseParams);
 
     const missing = createSession();
-    authenticate(missing);
+    await authenticate(missing);
     expect(
       sentValues(
-        missing.receive(frame(rpc("task-missing", "task.catalog_page", catalogParams))),
+        await missing.receive(frame(rpc("task-missing", "task.catalog_page", catalogParams))),
       )[0],
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
   });
 
-  it("fails closed on authentication failure without echoing secrets", () => {
+  it("awaits candidate Plan generation and preserves request order", async () => {
+    let resolveGeneration!: (value: JsonValue) => void;
+    const generateProjectTaskCandidatePlan = vi.fn(
+      async () =>
+        await new Promise<JsonValue>((resolve) => {
+          resolveGeneration = resolve;
+        }),
+    );
+    const session = createSession({ generateProjectTaskCandidatePlan, uptimeMs: () => 10 });
+    await authenticate(session);
+    const params = {
+      commandId: "00000000-0000-4000-8000-000000000921",
+      projectId: "00000000-0000-4000-8000-000000000922",
+      taskId: "00000000-0000-4000-8000-000000000923",
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 1,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000924",
+      previousPlanRevisionId: null,
+      expectedRoutingBindingVersion: 1,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000925",
+    };
+    const actionsPromise = session.receive(
+      joinedFrames(
+        rpc("plan-1", "task.plan.generate_candidate", params),
+        rpc("health-after-plan", "system.health", {}),
+      ),
+    );
+    await vi.waitFor(() => expect(generateProjectTaskCandidatePlan).toHaveBeenCalledWith(params));
+    resolveGeneration({ schemaVersion: 1, status: "generated", taskId: params.taskId });
+
+    const values = sentValues(await actionsPromise);
+    expect(values.map((value) => (value as { id?: string }).id)).toEqual([
+      "plan-1",
+      "health-after-plan",
+    ]);
+    expect(values[0]).toMatchObject({ kind: "response", result: { status: "generated" } });
+  });
+
+  it("fails closed on authentication failure without echoing secrets", async () => {
     const session = createSession();
     const wrongCapability = `${"B".repeat(42)}A`;
-    const actions = session.receive(frame(hello(wrongCapability)));
+    const actions = await session.receive(frame(hello(wrongCapability)));
     const serialized = JSON.stringify(sentValues(actions));
     expect(serialized).not.toContain(STARTUP_CAPABILITY);
     expect(serialized).not.toContain(wrongCapability);
@@ -478,9 +530,9 @@ describe("daemon connection session", () => {
     expect(session.state).toBe("closed");
   });
 
-  it("rejects RPC before hello and repeated hello after authentication", () => {
+  it("rejects RPC before hello and repeated hello after authentication", async () => {
     const beforeHello = createSession();
-    const firstActions = beforeHello.receive(frame(rpc("health-1", "system.health", {})));
+    const firstActions = await beforeHello.receive(frame(rpc("health-1", "system.health", {})));
     expect(sentValues(firstActions)[0]).toMatchObject({
       kind: "bootstrap-error",
       error: { code: RPC_ERROR_CODES.invalidMessage },
@@ -488,8 +540,8 @@ describe("daemon connection session", () => {
     expect(beforeHello.state).toBe("closed");
 
     const repeated = createSession();
-    authenticate(repeated);
-    const repeatedActions = repeated.receive(frame(hello()));
+    await authenticate(repeated);
+    const repeatedActions = await repeated.receive(frame(hello()));
     expect(sentValues(repeatedActions)[0]).toMatchObject({
       kind: "error",
       error: { code: RPC_ERROR_CODES.invalidMessage },
@@ -497,18 +549,18 @@ describe("daemon connection session", () => {
     expect(repeated.state).toBe("closed");
   });
 
-  it("marks resume attempts for conservative resynchronization", () => {
+  it("marks resume attempts for conservative resynchronization", async () => {
     const session = createSession();
-    const response = sentValues(session.receive(frame(hello(STARTUP_CAPABILITY, true))))[0];
+    const response = sentValues(await session.receive(frame(hello(STARTUP_CAPABILITY, true))))[0];
     expect(response).toMatchObject({
       result: { stream: { id: STREAM_ID, resyncRequired: true } },
     });
   });
 
-  it("publishes only authenticated account events with a strictly increasing sequence", () => {
+  it("publishes only authenticated account events with a strictly increasing sequence", async () => {
     const session = createSession();
     expect(session.publishEvent("account.status_changed", ACCOUNT_STATUS)).toEqual([]);
-    authenticate(session);
+    await authenticate(session);
 
     const first = sentValues(session.publishEvent("account.status_changed", ACCOUNT_STATUS))[0];
     const second = sentValues(session.publishEvent("account.status_changed", ACCOUNT_STATUS))[0];
@@ -525,9 +577,9 @@ describe("daemon connection session", () => {
     expect(session.state).toBe("authenticated");
   });
 
-  it("fails closed instead of publishing an unknown or malformed trusted event", () => {
+  it("fails closed instead of publishing an unknown or malformed trusted event", async () => {
     const unknown = createSession();
-    authenticate(unknown);
+    await authenticate(unknown);
     const unknownActions = unknown.publishEvent("future.event", ACCOUNT_STATUS);
     expect(sentValues(unknownActions)[0]).toMatchObject({
       kind: "error",
@@ -537,7 +589,7 @@ describe("daemon connection session", () => {
     expect(unknown.state).toBe("closed");
 
     const malformed = createSession();
-    authenticate(malformed);
+    await authenticate(malformed);
     const malformedActions = malformed.publishEvent("account.status_changed", {
       ...ACCOUNT_STATUS,
       email: "private@example.com",
@@ -546,9 +598,9 @@ describe("daemon connection session", () => {
     expect(JSON.stringify(sentValues(malformedActions))).not.toContain("private@example.com");
   });
 
-  it("fails closed when version or required capability negotiation fails", () => {
+  it("fails closed when version or required capability negotiation fails", async () => {
     const unsupportedVersion = createSession();
-    const versionActions = unsupportedVersion.receive(
+    const versionActions = await unsupportedVersion.receive(
       frame(hello(STARTUP_CAPABILITY, false, { versions: ["2.0"] })),
     );
     expect(sentValues(versionActions)[0]).toMatchObject({
@@ -558,7 +610,7 @@ describe("daemon connection session", () => {
     expect(versionActions.at(-1)).toEqual({ type: "close", reason: "protocol_violation" });
 
     const unsupportedCapability = createSession();
-    const capabilityActions = unsupportedCapability.receive(
+    const capabilityActions = await unsupportedCapability.receive(
       frame(
         hello(STARTUP_CAPABILITY, false, {
           supportedCapabilities: ["harness.events.replay.v1"],
@@ -576,10 +628,10 @@ describe("daemon connection session", () => {
     });
   });
 
-  it("emits one shutdown request and rejects later work while closing", () => {
+  it("emits one shutdown request and rejects later work while closing", async () => {
     const session = createSession();
-    authenticate(session);
-    const shutdownActions = session.receive(
+    await authenticate(session);
+    const shutdownActions = await session.receive(
       frame(rpc("shutdown-1", "system.shutdown", { reason: "user.requested" })),
     );
     expect(sentValues(shutdownActions)[0]).toMatchObject({
@@ -593,7 +645,7 @@ describe("daemon connection session", () => {
     });
     expect(session.state).toBe("closing");
 
-    const laterActions = session.receive(frame(rpc("health-2", "system.health", {})));
+    const laterActions = await session.receive(frame(rpc("health-2", "system.health", {})));
     expect(sentValues(laterActions)[0]).toMatchObject({
       kind: "error",
       id: "health-2",
@@ -602,10 +654,10 @@ describe("daemon connection session", () => {
     expect(laterActions.some((action) => action.type === "shutdown_requested")).toBe(false);
   });
 
-  it("does not enter closing state for invalid shutdown parameters", () => {
+  it("does not enter closing state for invalid shutdown parameters", async () => {
     const session = createSession();
-    authenticate(session);
-    const actions = session.receive(
+    await authenticate(session);
+    const actions = await session.receive(
       frame(rpc("shutdown-invalid", "system.shutdown", { reason: "not valid" })),
     );
     expect(sentValues(actions)[0]).toMatchObject({
@@ -616,10 +668,10 @@ describe("daemon connection session", () => {
     expect(session.state).toBe("authenticated");
   });
 
-  it("keeps unknown methods non-fatal", () => {
+  it("keeps unknown methods non-fatal", async () => {
     const session = createSession();
-    authenticate(session);
-    const actions = session.receive(frame(rpc("future-1", "future.method", {})));
+    await authenticate(session);
+    const actions = await session.receive(frame(rpc("future-1", "future.method", {})));
     expect(sentValues(actions)[0]).toMatchObject({
       kind: "error",
       id: "future-1",
@@ -628,13 +680,13 @@ describe("daemon connection session", () => {
     expect(session.state).toBe("authenticated");
   });
 
-  it("reports injected internal failures without blaming the peer", () => {
+  it("reports injected internal failures without blaming the peer", async () => {
     const invalidRandomSource = new ConnectionSession({
       startupCapability: STARTUP_CAPABILITY,
       serverVersion: "0.0.0",
       streamIdFactory: () => "invalid-stream-id",
     });
-    const bootstrapActions = invalidRandomSource.receive(frame(hello()));
+    const bootstrapActions = await invalidRandomSource.receive(frame(hello()));
     expect(sentValues(bootstrapActions)[0]).toEqual({
       kind: "bootstrap-error",
       wireVersion: BOOTSTRAP_WIRE_VERSION,
@@ -655,9 +707,9 @@ describe("daemon connection session", () => {
         return 1_000;
       },
     });
-    authenticate(failingClock);
+    await authenticate(failingClock);
     clockFails = true;
-    const rpcActions = failingClock.receive(frame(rpc("health-clock", "system.health", {})));
+    const rpcActions = await failingClock.receive(frame(rpc("health-clock", "system.health", {})));
     expect(sentValues(rpcActions)[0]).toMatchObject({
       kind: "error",
       id: null,
@@ -670,23 +722,23 @@ describe("daemon connection session", () => {
     expect(rpcActions.at(-1)).toEqual({ type: "close", reason: "internal_error" });
   });
 
-  it("closes on invalid UTF-8 and reports truncated EOF conservatively", () => {
+  it("closes on invalid UTF-8 and reports truncated EOF conservatively", async () => {
     const invalidUtf8 = createSession();
-    authenticate(invalidUtf8);
-    const invalidActions = invalidUtf8.receive(Uint8Array.of(0xff, 0x0a));
+    await authenticate(invalidUtf8);
+    const invalidActions = await invalidUtf8.receive(Uint8Array.of(0xff, 0x0a));
     expect(invalidActions.at(-1)).toEqual({ type: "close", reason: "protocol_violation" });
     expect(invalidUtf8.state).toBe("closed");
 
     const truncated = createSession();
-    expect(truncated.receive(encoder.encode("partial"))).toEqual([]);
+    expect(await truncated.receive(encoder.encode("partial"))).toEqual([]);
     expect(truncated.end()).toEqual([{ type: "close", reason: "truncated_frame" }]);
   });
 
-  it("never throws for arbitrary byte input", () => {
-    fc.assert(
-      fc.property(fc.uint8Array({ maxLength: 8192 }), (input) => {
+  it("never throws for arbitrary byte input", async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.uint8Array({ maxLength: 8192 }), async (input) => {
         const session = createSession();
-        expect(() => session.receive(input)).not.toThrow();
+        await expect(session.receive(input)).resolves.toBeDefined();
       }),
       { numRuns: 500 },
     );
