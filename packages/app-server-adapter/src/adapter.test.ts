@@ -175,6 +175,55 @@ describe("App Server protocol adapter", () => {
     });
   });
 
+  it("projects completed agent messages independently from recovery lifecycle", () => {
+    const adapter = initializedAdapter();
+    expect(
+      adapter.accept({
+        kind: "notification",
+        method: "item/completed",
+        params: {
+          completedAtMs: 10,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "message-1",
+            type: "agentMessage",
+            phase: "final_answer",
+            text: '{"ok":true}',
+            private: "not copied",
+          },
+        },
+      }),
+    ).toEqual({
+      ok: true,
+      value: {
+        type: "turn_output",
+        signal: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "message-1",
+          phase: "final_answer",
+          text: '{"ok":true}',
+        },
+      },
+    });
+
+    const malformed = initializedAdapter();
+    expect(
+      malformed.accept({
+        kind: "notification",
+        method: "item/completed",
+        params: {
+          completedAtMs: 10,
+          threadId: "private-thread",
+          turnId: "turn-1",
+          item: { id: "message-1", type: "agentMessage", text: 42 },
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid_message" } });
+    expect(malformed.state).toBe("closed");
+  });
+
   it("emits a payload-free account invalidation signal", () => {
     const adapter = initializedAdapter();
     const result = adapter.accept({

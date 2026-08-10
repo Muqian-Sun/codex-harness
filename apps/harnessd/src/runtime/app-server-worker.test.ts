@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AppServerWorker,
   AppServerWorkerError,
+  type AppServerReadOnlyAnalysisInput,
   type AppServerWorkerConfig,
 } from "./app-server-worker.js";
 
@@ -18,6 +19,16 @@ type FakeBehavior = Readonly<{
   deleteAfterVersion?: boolean;
   appMode?:
     | "account_event"
+    | "analysis_failed"
+    | "analysis_happy"
+    | "analysis_duplicate_message"
+    | "analysis_invalid_output"
+    | "analysis_mismatched_turn"
+    | "analysis_missing_output"
+    | "analysis_non_json_value"
+    | "analysis_output_limit"
+    | "analysis_message_limit"
+    | "analysis_timeout"
     | "duplicate_response"
     | "early_exit"
     | "event"
@@ -36,6 +47,8 @@ type FakeBehavior = Readonly<{
   closeMode?: "graceful" | "sigkill" | "sigterm";
   lineEnding?: "lf" | "crlf";
   stderrText?: string;
+  analysisDelayMs?: number;
+  analysisLegacyPhase?: boolean;
 }>;
 
 type FakeCodex = Readonly<{ directory: string; executable: string; logPath: string }>;
@@ -68,6 +81,7 @@ function workerConfig(
     versionCheckTimeoutMs: 10_000,
     startupTimeoutMs: 10_000,
     requestTimeoutMs: 10_000,
+    analysisTurnTimeoutMs: 10_000,
     gracefulTimeoutMs: 200,
     sigtermTimeoutMs: 200,
     sigkillTimeoutMs: 200,
@@ -221,6 +235,147 @@ if (args.length === 1 && args[0] === "--version") {
       });
       return;
     }
+    if (message.method === "thread/start") {
+      send({ id: message.id, result: { thread: { id: "thread-analysis" } } });
+      return;
+    }
+    if (message.method === "turn/start") {
+      send({ id: message.id, result: { turn: { id: "turn-analysis" } } });
+      const eventTurnId = behavior.appMode === "analysis_mismatched_turn"
+        ? "turn-other"
+        : "turn-analysis";
+      send({
+        method: "turn/started",
+        params: {
+          threadId: "thread-analysis",
+          turn: { id: eventTurnId, items: [], status: "inProgress" }
+        }
+      });
+      if (behavior.appMode === "analysis_mismatched_turn") return;
+      if (behavior.appMode === "analysis_timeout") return;
+      const completeAnalysis = () => {
+        if (behavior.appMode === "analysis_failed") {
+          send({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-analysis",
+              turn: { id: "turn-analysis", items: [], status: "failed" }
+            }
+          });
+          return;
+        }
+        if (behavior.appMode === "analysis_message_limit") {
+          for (let index = 0; index < 65; index += 1) {
+            send({
+              method: "item/completed",
+              params: {
+                completedAtMs: index + 1,
+                threadId: "thread-analysis",
+                turnId: "turn-analysis",
+                item: {
+                  id: "commentary-" + index,
+                  type: "agentMessage",
+                  phase: "commentary",
+                  text: "progress"
+                }
+              }
+            });
+          }
+          return;
+        }
+        if (behavior.appMode === "analysis_output_limit") {
+          for (let index = 0; index < 3; index += 1) {
+            send({
+              method: "item/completed",
+              params: {
+                completedAtMs: index + 1,
+                threadId: "thread-analysis",
+                turnId: "turn-analysis",
+                item: {
+                  id: "large-" + index,
+                  type: "agentMessage",
+                  phase: "commentary",
+                  text: "x".repeat(1_000_000)
+                }
+              }
+            });
+          }
+          return;
+        }
+        send({
+          method: "item/completed",
+          params: {
+            completedAtMs: 1,
+            threadId: "thread-analysis",
+            turnId: "turn-analysis",
+            item: {
+              id: "commentary-1",
+              type: "agentMessage",
+              phase: "commentary",
+              text: "not-json"
+            }
+          }
+        });
+        if (behavior.appMode === "analysis_missing_output") {
+          send({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-analysis",
+              turn: {
+                id: "turn-analysis",
+                items: [{ id: "commentary-1", type: "agentMessage" }],
+                status: "completed"
+              }
+            }
+          });
+          return;
+        }
+        const text = behavior.appMode === "analysis_invalid_output"
+          ? "not-json"
+          : behavior.appMode === "analysis_non_json_value"
+            ? "1e400"
+            : JSON.stringify({ kind: "candidate", steps: 2 });
+        const finalItem = { id: "final-1", type: "agentMessage", phase: "final_answer", text };
+        if (behavior.analysisLegacyPhase) delete finalItem.phase;
+        send({
+          method: "item/completed",
+          params: {
+            completedAtMs: 2,
+            threadId: "thread-analysis",
+            turnId: "turn-analysis",
+            item: finalItem
+          }
+        });
+        if (behavior.appMode === "analysis_duplicate_message") {
+          send({
+            method: "item/completed",
+            params: {
+              completedAtMs: 3,
+              threadId: "thread-analysis",
+              turnId: "turn-analysis",
+              item: finalItem
+            }
+          });
+          return;
+        }
+        send({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-analysis",
+            turn: {
+              id: "turn-analysis",
+              items: [
+                { id: "commentary-1", type: "agentMessage" },
+                { id: "final-1", type: "agentMessage" }
+              ],
+              status: "completed"
+            }
+          }
+        });
+      };
+      setTimeout(completeAnalysis, behavior.analysisDelayMs ?? 0);
+      return;
+    }
     if (message.method !== "model/list") {
       process.exit(65);
     }
@@ -255,6 +410,25 @@ async function readWireLog(fake: FakeCodex): Promise<readonly unknown[]> {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as unknown);
+}
+
+function analysisInput(): AppServerReadOnlyAnalysisInput {
+  return {
+    cwd: "/tmp/codex-harness-project",
+    modelProvider: "openai",
+    model: "gpt-5.6",
+    reasoningEffort: "high",
+    prompt: "分析任务并返回候选结构。",
+    outputSchema: {
+      type: "object",
+      required: ["kind", "steps"],
+      properties: {
+        kind: { type: "string" },
+        steps: { type: "integer" },
+      },
+      additionalProperties: false,
+    },
+  };
 }
 
 describe("Codex App Server worker", () => {
@@ -303,6 +477,135 @@ describe("Codex App Server worker", () => {
     });
     expect(worker.state).toBe("closed");
     await expect(worker.close()).resolves.toEqual(closed);
+    await expect(worker.runReadOnlyAnalysisTurn(analysisInput())).rejects.toMatchObject({
+      code: "closed",
+    });
+  });
+
+  it("runs an ephemeral read-only structured analysis turn with fixed safety policy", async () => {
+    const { fake, worker } = await startFakeWorker({ appMode: "analysis_happy" });
+    const input = analysisInput();
+    const result = await worker.runReadOnlyAnalysisTurn(input);
+
+    expect(result).toEqual({
+      threadId: "thread-analysis",
+      turnId: "turn-analysis",
+      output: { kind: "candidate", steps: 2 },
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.output)).toBe(true);
+    expect(Object.isFrozen(input.outputSchema)).toBe(false);
+
+    const messages = (await readWireLog(fake))
+      .filter(
+        (entry): entry is { type: string; message: { method?: string; params?: unknown } } =>
+          typeof entry === "object" && entry !== null && "message" in entry,
+      )
+      .map((entry) => entry.message);
+    expect(messages.find((message) => message.method === "thread/start")?.params).toEqual({
+      approvalPolicy: "never",
+      cwd: input.cwd,
+      ephemeral: true,
+      model: input.model,
+      modelProvider: input.modelProvider,
+      sandbox: "read-only",
+    });
+    expect(messages.find((message) => message.method === "turn/start")?.params).toEqual({
+      approvalPolicy: "never",
+      cwd: input.cwd,
+      effort: input.reasoningEffort,
+      input: [{ type: "text", text: input.prompt, text_elements: [] }],
+      model: input.model,
+      outputSchema: input.outputSchema,
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+      summary: "none",
+      threadId: "thread-analysis",
+    });
+  });
+
+  it("supports phase-less final messages and rejects overlapping analysis turns", async () => {
+    const { worker: legacyWorker } = await startFakeWorker({
+      appMode: "analysis_happy",
+      analysisLegacyPhase: true,
+    });
+    await expect(legacyWorker.runReadOnlyAnalysisTurn(analysisInput())).resolves.toMatchObject({
+      output: { kind: "candidate", steps: 2 },
+    });
+
+    const { worker } = await startFakeWorker({
+      appMode: "analysis_happy",
+      analysisDelayMs: 30,
+    });
+    const first = worker.runReadOnlyAnalysisTurn(analysisInput());
+    await expect(worker.runReadOnlyAnalysisTurn(analysisInput())).rejects.toMatchObject({
+      code: "analysis_busy",
+    });
+    await expect(first).resolves.toMatchObject({ turnId: "turn-analysis" });
+  });
+
+  it("rejects invalid analysis input before sending a thread request", async () => {
+    const { fake, worker } = await startFakeWorker();
+    const valid = analysisInput();
+    for (const invalid of [
+      { ...valid, cwd: "relative/path" },
+      { ...valid, prompt: "" },
+      { ...valid, outputSchema: [] },
+      { ...valid, outputSchema: { description: "x".repeat(256 * 1024) } },
+      { ...valid, extra: true },
+    ]) {
+      await expect(worker.runReadOnlyAnalysisTurn(invalid as never)).rejects.toMatchObject({
+        code: "invalid_analysis_input",
+      });
+    }
+    const methods = (await readWireLog(fake)).map(
+      (entry) => (entry as { message?: { method?: string } }).message?.method,
+    );
+    expect(methods).not.toContain("thread/start");
+  });
+
+  it("returns fixed failures for failed, missing, and malformed turn output", async () => {
+    for (const appMode of [
+      "analysis_failed",
+      "analysis_missing_output",
+      "analysis_invalid_output",
+      "analysis_non_json_value",
+    ] as const) {
+      const { worker } = await startFakeWorker({ appMode });
+      const error = await worker.runReadOnlyAnalysisTurn(analysisInput()).catch((caught) => caught);
+      expect(error).toBeInstanceOf(AppServerWorkerError);
+      expect(error).toMatchObject({
+        code: appMode === "analysis_failed" ? "turn_failed" : "invalid_turn_output",
+      });
+      expect(JSON.stringify(error)).not.toContain("分析任务");
+      expect(worker.state).toBe("ready");
+    }
+  });
+
+  it("fails closed on conflicting turn identity or duplicate completed messages", async () => {
+    for (const appMode of [
+      "analysis_mismatched_turn",
+      "analysis_duplicate_message",
+      "analysis_message_limit",
+      "analysis_output_limit",
+    ] as const) {
+      const { worker } = await startFakeWorker({ appMode });
+      await expect(worker.runReadOnlyAnalysisTurn(analysisInput())).rejects.toMatchObject({
+        code: "protocol_failure",
+      });
+      await expect(worker.closed).resolves.toMatchObject({ reason: "protocol_failure" });
+    }
+  });
+
+  it("contains the worker when an analysis turn exceeds its deadline", async () => {
+    const { worker } = await startFakeWorker(
+      { appMode: "analysis_timeout" },
+      { analysisTurnTimeoutMs: 20 },
+    );
+    await expect(worker.runReadOnlyAnalysisTurn(analysisInput())).rejects.toMatchObject({
+      code: "turn_timeout",
+    });
+    await expect(worker.closed).resolves.toMatchObject({ reason: "turn_timeout" });
+    expect(worker.state).toBe("closed");
   });
 
   it("correlates concurrent model requests even when responses arrive out of order", async () => {
@@ -345,6 +648,7 @@ describe("Codex App Server worker", () => {
     const invalid = [
       workerConfig("relative-codex"),
       workerConfig(fake.executable, { startupTimeoutMs: 0 }),
+      workerConfig(fake.executable, { analysisTurnTimeoutMs: 900_001 }),
       workerConfig(fake.executable, {
         clientIdentity: { name: "", title: "Codex Harness", version: "0.0.0" },
       }),
