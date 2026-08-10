@@ -6,7 +6,12 @@ import {
 } from "@codex-harness/protocol";
 import { describe, expect, it, vi } from "vitest";
 
-import { RpcProviderError, dispatchRpcRequest, type RpcDispatchContext } from "./rpc-dispatcher.js";
+import {
+  RpcProviderError,
+  dispatchRpcRequest,
+  dispatchRpcRequestAsync,
+  type RpcDispatchContext,
+} from "./rpc-dispatcher.js";
 
 const ACCOUNT_STATUS = Object.freeze({
   schemaVersion: 1,
@@ -118,6 +123,8 @@ const PROJECT_TASK_DETAIL = Object.freeze({
     constraints: Object.freeze([]),
     acceptanceCriteria: Object.freeze([]),
   }),
+  latestPlanRevisionId: null,
+  candidatePlan: null,
 });
 
 const PROJECT_TASK_REVISED = Object.freeze({
@@ -600,6 +607,74 @@ describe("RPC dispatcher Project Task methods", () => {
     previousRequirementRevisionId: PROJECT_TASK_DETAIL.activeRequirement.revisionId,
     sourceText: "Revise the persisted Requirement.",
   };
+  const generateParams = {
+    commandId: "00000000-0000-4000-8000-000000000915",
+    projectId: PROJECT.projectId,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    expectedProjectVersion: 1,
+    expectedTaskVersion: 1,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: PROJECT_TASK_DETAIL.activeRequirement.revisionId,
+    previousPlanRevisionId: null,
+    expectedRoutingBindingVersion: 1,
+    expectedProfileVersion: 1,
+    expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000916",
+  };
+
+  it("awaits candidate Plan generation and maps its stable outcomes", async () => {
+    const base = context(() => ACCOUNT_STATUS);
+    const generated = {
+      schemaVersion: 1 as const,
+      status: "generated" as const,
+      taskId: generateParams.taskId,
+    };
+    const provider = vi.fn(async () => generated);
+    await expect(
+      dispatchRpcRequestAsync(request("task.plan.generate_candidate", generateParams), {
+        ...base,
+        generateProjectTaskCandidatePlan: provider,
+      }),
+    ).resolves.toMatchObject({ envelope: { kind: "response", result: generated } });
+    expect(provider).toHaveBeenCalledWith(generateParams);
+
+    for (const [implementation, expectedCode] of [
+      [
+        async () => {
+          throw new RpcProviderError("conflict");
+        },
+        RPC_ERROR_CODES.conflict,
+      ],
+      [
+        async () => {
+          throw new Error("private analysis failure");
+        },
+        RPC_ERROR_CODES.unavailable,
+      ],
+      [async () => ({ private: true }), RPC_ERROR_CODES.unavailable],
+    ] as const) {
+      const result = await dispatchRpcRequestAsync(
+        request("task.plan.generate_candidate", generateParams),
+        { ...base, generateProjectTaskCandidatePlan: implementation },
+      );
+      expect(result.envelope).toMatchObject({
+        kind: "error",
+        error: { code: expectedCode },
+      });
+      expect(JSON.stringify(result)).not.toContain("private analysis failure");
+    }
+    expect(
+      (await dispatchRpcRequestAsync(request("task.plan.generate_candidate", generateParams), base))
+        .envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+    expect(
+      (
+        await dispatchRpcRequestAsync(
+          request("task.plan.generate_candidate", { ...generateParams, extra: true }),
+          { ...base, generateProjectTaskCandidatePlan: provider },
+        )
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+  });
 
   it("passes strict catalog, creation, detail, and revision inputs to their providers", () => {
     const readProjectTaskCatalogPage = vi.fn(() => PROJECT_TASK_CATALOG);

@@ -17,6 +17,9 @@ const MAX_TASK_TITLE_BYTES = 256;
 const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
 const MAX_TASK_REQUIREMENT_ITEM_BYTES = 4 * 1_024;
 const MAX_TASK_REQUIREMENT_TOTAL_BYTES = 256 * 1_024;
+const MAX_TASK_PLAN_STEP_TITLE_BYTES = 512;
+const MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES = 8 * 1_024;
+const MAX_TASK_PLAN_TOTAL_BYTES = 256 * 1_024;
 
 export const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
 export const MAX_MODEL_REASONING_EFFORTS = 64;
@@ -24,6 +27,7 @@ export const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
 export const MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE = 16;
 export const MAX_TASK_CATALOG_PAGE_SIZE = 12;
 export const MAX_TASK_REQUIREMENT_ITEMS = 100;
+export const MAX_TASK_PLAN_STEPS = 200;
 
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
@@ -398,6 +402,64 @@ const TaskRequirementSchema = z
     }
   });
 
+const TaskPlanStepSchema = z
+  .object({
+    stepId: z.string().regex(UUID_PATTERN),
+    title: z
+      .string()
+      .min(1)
+      .refine(
+        (value) =>
+          value.trim().length > 0 &&
+          utf8ByteLength(value) <= MAX_TASK_PLAN_STEP_TITLE_BYTES &&
+          !value.includes("\0"),
+        "Task plan step title is invalid",
+      ),
+    description: z
+      .string()
+      .min(1)
+      .refine(
+        (value) =>
+          value.trim().length > 0 &&
+          utf8ByteLength(value) <= MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES &&
+          !value.includes("\0"),
+        "Task plan step description is invalid",
+      ),
+    acceptanceCriteria: z.array(TaskRequirementItemSchema).max(MAX_TASK_REQUIREMENT_ITEMS),
+  })
+  .strict();
+
+const TaskCandidatePlanSchema = z
+  .object({
+    revisionId: z.string().regex(UUID_PATTERN),
+    revisionNumber: NonNegativeSafeIntegerSchema.min(1),
+    basedOnRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    steps: z.array(TaskPlanStepSchema).min(1).max(MAX_TASK_PLAN_STEPS),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.steps.map((step) => step.stepId)).size !== value.steps.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["steps"],
+        message: "Task plan step identifiers must be unique",
+      });
+    }
+    if (
+      utf8ByteLength(
+        value.steps
+          .flatMap((step) => [step.title, step.description, ...step.acceptanceCriteria])
+          .join(""),
+      ) > MAX_TASK_PLAN_TOTAL_BYTES
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["steps"],
+        message: "Task plan text exceeds the aggregate limit",
+      });
+    }
+  });
+
 const TaskSummarySchema = z
   .object({
     taskId: z.string().regex(UUID_PATTERN),
@@ -489,6 +551,71 @@ export const TaskDetailResultSchema = z
     title: TaskTitleSchema,
     stage: z.enum(TASK_STAGES),
     activeRequirement: TaskRequirementSchema,
+    latestPlanRevisionId: z.string().regex(UUID_PATTERN).nullable(),
+    candidatePlan: TaskCandidatePlanSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const stageHasCandidate =
+      value.stage === "candidate_plan" || value.stage === "active_graph_with_candidate";
+    if ((value.candidatePlan !== null) !== stageHasCandidate) {
+      context.addIssue({
+        code: "custom",
+        path: ["candidatePlan"],
+        message: "Task stage and candidate plan must agree",
+      });
+    }
+    if (
+      value.candidatePlan !== null &&
+      (value.candidatePlan.revisionId !== value.latestPlanRevisionId ||
+        value.candidatePlan.basedOnRequirementRevisionId !== value.activeRequirement.revisionId)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["candidatePlan"],
+        message: "Task candidate plan fences must match current detail",
+      });
+    }
+  });
+
+export const TaskCandidatePlanGenerateParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    expectedProjectVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedOwnershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    previousRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    previousPlanRevisionId: z.string().regex(UUID_PATTERN).nullable(),
+    expectedRoutingBindingVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedProfileVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedConfigurationRevisionId: z.string().regex(UUID_PATTERN),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const identifiers = [
+      value.commandId,
+      value.projectId,
+      value.taskId,
+      value.previousRequirementRevisionId,
+      value.expectedConfigurationRevisionId,
+      ...(value.previousPlanRevisionId === null ? [] : [value.previousPlanRevisionId]),
+    ];
+    if (new Set(identifiers).size !== identifiers.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "Task candidate plan identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskCandidatePlanGenerateResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["generated", "existing"]),
+    taskId: z.string().regex(UUID_PATTERN),
   })
   .strict();
 
@@ -566,6 +693,18 @@ export type HarnessTaskRequirement = Readonly<{
   constraints: readonly string[];
   acceptanceCriteria: readonly string[];
 }>;
+export type HarnessTaskPlanStep = Readonly<{
+  stepId: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: readonly string[];
+}>;
+export type HarnessTaskCandidatePlan = Readonly<{
+  revisionId: string;
+  revisionNumber: number;
+  basedOnRequirementRevisionId: string;
+  steps: readonly HarnessTaskPlanStep[];
+}>;
 export type HarnessTaskDetailParams = Readonly<{
   projectId: string;
   taskId: string;
@@ -579,6 +718,26 @@ export type HarnessTaskDetailResult = Readonly<{
   title: string;
   stage: HarnessTaskStage;
   activeRequirement: HarnessTaskRequirement;
+  latestPlanRevisionId: string | null;
+  candidatePlan: HarnessTaskCandidatePlan | null;
+}>;
+export type HarnessTaskCandidatePlanGenerateParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  taskId: string;
+  expectedProjectVersion: number;
+  expectedTaskVersion: number;
+  expectedOwnershipVersion: number;
+  previousRequirementRevisionId: string;
+  previousPlanRevisionId: string | null;
+  expectedRoutingBindingVersion: number;
+  expectedProfileVersion: number;
+  expectedConfigurationRevisionId: string;
+}>;
+export type HarnessTaskCandidatePlanGenerateResult = Readonly<{
+  schemaVersion: 1;
+  status: "generated" | "existing";
+  taskId: string;
 }>;
 export type HarnessTaskRequirementReviseParams = Readonly<{
   commandId: string;
@@ -908,6 +1067,10 @@ export const METHOD_CONTRACTS = Object.freeze({
   "task.detail": Object.freeze({
     params: TaskDetailParamsSchema,
     result: TaskDetailResultSchema,
+  }),
+  "task.plan.generate_candidate": Object.freeze({
+    params: TaskCandidatePlanGenerateParamsSchema,
+    result: TaskCandidatePlanGenerateResultSchema,
   }),
   "task.requirement.revise": Object.freeze({
     params: TaskRequirementReviseParamsSchema,

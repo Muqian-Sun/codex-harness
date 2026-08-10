@@ -22,6 +22,8 @@ import {
 } from "../domain/model-catalog.js";
 import {
   AppServerWorker,
+  type AppServerReadOnlyAnalysisInput,
+  type AppServerReadOnlyAnalysisResult,
   type AppServerWorkerCloseResult,
   type AppServerWorkerConfig,
   type AppServerWorkerContainment,
@@ -45,6 +47,7 @@ export type AppServerWorkerManagerState =
 
 export type AppServerWorkerManagerErrorCode =
   | "account_snapshot_failed"
+  | "analysis_unavailable"
   | "catalog_page_unavailable"
   | "catalog_refresh_failed"
   | "closed"
@@ -54,6 +57,7 @@ export type AppServerWorkerManagerErrorCode =
 
 const ERROR_MESSAGES: Readonly<Record<AppServerWorkerManagerErrorCode, string>> = Object.freeze({
   account_snapshot_failed: "The Codex account status snapshot failed.",
+  analysis_unavailable: "The Codex App Server analysis turn is unavailable.",
   catalog_page_unavailable: "The current Codex model catalog page is unavailable.",
   catalog_refresh_failed: "The Codex model catalog refresh failed.",
   closed: "The Codex App Server worker manager is closed.",
@@ -95,6 +99,9 @@ export type ManagedAppServerWorker = Readonly<{
   state: AppServerWorkerState;
   listModels(params: unknown): Promise<JsonValue>;
   readAccount(): Promise<JsonValue>;
+  runReadOnlyAnalysisTurn?(
+    input: AppServerReadOnlyAnalysisInput,
+  ): Promise<AppServerReadOnlyAnalysisResult>;
   close(): Promise<AppServerWorkerCloseResult>;
   closed: Promise<AppServerWorkerCloseResult>;
 }>;
@@ -268,6 +275,37 @@ export class AppServerWorkerManager {
       candidate === this.#catalog &&
       this.#catalog?.workerSessionId === this.#workerSessionId
     );
+  }
+
+  async runReadOnlyAnalysisTurn(
+    input: AppServerReadOnlyAnalysisInput,
+  ): Promise<AppServerReadOnlyAnalysisResult> {
+    if (this.#state !== "ready") {
+      throw new AppServerWorkerManagerError(
+        this.#state === "closing" || this.#state === "closed" ? "closed" : "analysis_unavailable",
+      );
+    }
+    const catalog = this.#catalog;
+    if (catalog === undefined || !this.isCatalogCurrent(catalog)) {
+      throw new AppServerWorkerManagerError("analysis_unavailable");
+    }
+    const model = catalog.models.find(
+      (candidate) => !candidate.hidden && candidate.model === input.model,
+    );
+    if (
+      typeof this.#worker.runReadOnlyAnalysisTurn !== "function" ||
+      input.modelProvider !== catalog.provider ||
+      model === undefined ||
+      !model.inputModalities.includes("text") ||
+      !model.supportedReasoningEfforts.includes(input.reasoningEffort)
+    ) {
+      throw new AppServerWorkerManagerError("analysis_unavailable");
+    }
+    try {
+      return await this.#worker.runReadOnlyAnalysisTurn(input);
+    } catch {
+      throw new AppServerWorkerManagerError("analysis_unavailable");
+    }
   }
 
   readCatalogPage(input: unknown): HarnessModelCatalogPageResult {

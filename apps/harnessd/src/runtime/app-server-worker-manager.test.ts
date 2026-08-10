@@ -2,6 +2,7 @@ import type { JsonValue } from "@codex-harness/protocol";
 import { describe, expect, it } from "vitest";
 
 import type {
+  AppServerReadOnlyAnalysisInput,
   AppServerWorkerCloseResult,
   AppServerWorkerConfig,
   AppServerWorkerEvent,
@@ -67,6 +68,8 @@ class FakeWorker implements ManagedAppServerWorker {
   readonly closed: Promise<AppServerWorkerCloseResult>;
   #resolveClosed!: (result: AppServerWorkerCloseResult) => void;
   closeCalls = 0;
+  readonly analysisRequests: AppServerReadOnlyAnalysisInput[] = [];
+  analysisFailure = false;
 
   constructor(
     responses: readonly PendingResponse[],
@@ -109,6 +112,14 @@ class FakeWorker implements ManagedAppServerWorker {
       throw new Error("missing fake account response");
     }
     return response as JsonValue;
+  }
+
+  async runReadOnlyAnalysisTurn(input: AppServerReadOnlyAnalysisInput) {
+    this.analysisRequests.push(structuredClone(input));
+    if (this.analysisFailure) {
+      throw new Error("private analysis failure");
+    }
+    return Object.freeze({ threadId: "thread-1", turnId: "turn-1", output: { ok: true } });
   }
 
   async close(): Promise<AppServerWorkerCloseResult> {
@@ -158,6 +169,56 @@ async function startManager(
 }
 
 describe("AppServerWorkerManager", () => {
+  it("runs one analysis only for an observed visible model target", async () => {
+    const worker = new FakeWorker([page([model("deep", "high")], null)]);
+    const manager = await startManager(worker);
+    const input = {
+      cwd: "/Users/example/project",
+      modelProvider: "openai",
+      model: "deep",
+      reasoningEffort: "high",
+      prompt: "Build a candidate plan.",
+      outputSchema: { type: "object" },
+    } as const;
+
+    await expect(manager.runReadOnlyAnalysisTurn(input)).resolves.toMatchObject({
+      output: { ok: true },
+    });
+    expect(worker.analysisRequests).toEqual([input]);
+    for (const invalid of [
+      { ...input, modelProvider: "other" },
+      { ...input, model: "missing" },
+      { ...input, reasoningEffort: "low" },
+    ]) {
+      await expect(manager.runReadOnlyAnalysisTurn(invalid)).rejects.toMatchObject({
+        code: "analysis_unavailable",
+      });
+    }
+    worker.analysisFailure = true;
+    await expect(manager.runReadOnlyAnalysisTurn(input)).rejects.toMatchObject({
+      code: "analysis_unavailable",
+    });
+    await manager.close();
+    await expect(manager.runReadOnlyAnalysisTurn(input)).rejects.toMatchObject({ code: "closed" });
+
+    const imageOnlyWorker = new FakeWorker([
+      page(
+        [
+          {
+            ...(model("deep", "high") as Record<string, JsonValue>),
+            inputModalities: ["image"],
+          },
+        ],
+        null,
+      ),
+    ]);
+    const imageOnlyManager = await startManager(imageOnlyWorker);
+    await expect(imageOnlyManager.runReadOnlyAnalysisTurn(input)).rejects.toMatchObject({
+      code: "analysis_unavailable",
+    });
+    await imageOnlyManager.close();
+  });
+
   it("closes the complete model pagination chain and brands one current session snapshot", async () => {
     const worker = new FakeWorker([
       page([model("standard")], "page-2"),

@@ -194,6 +194,8 @@ function projectMethods(): Pick<
         constraints: Object.freeze([]),
         acceptanceCriteria: Object.freeze([]),
       },
+      latestPlanRevisionId: null,
+      candidatePlan: null,
     })),
     reviseProjectTaskRequirement: vi.fn(async (params) => ({
       schemaVersion: 1 as const,
@@ -817,6 +819,8 @@ describe("desktop application controller", () => {
         constraints: Object.freeze([]),
         acceptanceCriteria: Object.freeze([]),
       },
+      latestPlanRevisionId: null,
+      candidatePlan: null,
     }));
     const readProjectTaskCatalogPage = vi.fn(async () => ({
       schemaVersion: 1 as const,
@@ -877,6 +881,7 @@ describe("desktop application controller", () => {
           constraints: [],
           acceptanceCriteria: [],
         },
+        candidatePlan: null,
       },
     });
     const revised = await controller.reviseProjectTaskRequirement({
@@ -913,6 +918,145 @@ describe("desktop application controller", () => {
       }),
     ).resolves.toEqual({ status: "conflict" });
     expect(reviseProjectTaskRequirement).toHaveBeenCalledTimes(1);
+  });
+
+  it("generates a candidate Plan with main-owned routing and Task fences", async () => {
+    const stateStore = new BootstrapStateStore();
+    const taskId = "00000000-0000-4000-8000-000000000894";
+    const requirementId = "00000000-0000-4000-8000-000000000895";
+    const stepId = "00000000-0000-4000-8000-000000000896";
+    let taskVersion = 1;
+    let planRevisionId: string | null = null;
+    const rawDetail = () => ({
+      schemaVersion: 1 as const,
+      projectId: PROJECT.projectId,
+      ownershipVersion: 2,
+      taskId,
+      taskVersion,
+      title: "候选计划 Task",
+      stage: planRevisionId === null ? ("requirements_only" as const) : ("candidate_plan" as const),
+      activeRequirement: {
+        revisionId: requirementId,
+        revisionNumber: 1,
+        sourceText: "生成只读候选计划。",
+        objective: "生成只读候选计划。",
+        constraints: Object.freeze([]),
+        acceptanceCriteria: Object.freeze([]),
+      },
+      latestPlanRevisionId: planRevisionId,
+      candidatePlan:
+        planRevisionId === null
+          ? null
+          : {
+              revisionId: planRevisionId,
+              revisionNumber: 1,
+              basedOnRequirementRevisionId: requirementId,
+              steps: [
+                {
+                  stepId,
+                  title: "生成计划",
+                  description: "写入待确认步骤。",
+                  acceptanceCriteria: ["renderer 不接收 ID。"],
+                },
+              ],
+            },
+    });
+    const readProjectTaskDetail = vi.fn(async () => rawDetail());
+    const readProjectTaskCatalogPage = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT.projectId,
+          taskVersion,
+          title: "候选计划 Task",
+          objective: "生成只读候选计划。",
+          stage:
+            planRevisionId === null ? ("requirements_only" as const) : ("candidate_plan" as const),
+        },
+      ],
+      nextCursor: null,
+    }));
+    const generateProjectTaskCandidatePlan = vi.fn(async (command) => {
+      taskVersion += 1;
+      planRevisionId = command.commandId;
+      return { schemaVersion: 1 as const, status: "generated" as const, taskId };
+    });
+    const defaultBinding = {
+      projectId: PROJECT.projectId,
+      bindingVersion: 3,
+      profileId: "00000000-0000-4000-8000-000000000901",
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+    };
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
+        readProjectCatalogPage: vi.fn(async () => ({
+          schemaVersion: 1 as const,
+          projects: [PROJECT],
+          nextCursor: null,
+        })),
+        readProjectRoutingBindingStatuses: vi.fn(async () => ({
+          schemaVersion: 1 as const,
+          statuses: [
+            {
+              projectId: PROJECT.projectId,
+              status: "default_bound" as const,
+              binding: defaultBinding,
+            },
+          ],
+        })),
+        readProjectTaskCatalogPage,
+        readProjectTaskDetail,
+        generateProjectTaskCandidatePlan,
+        readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
+        setRoutingConfiguration: routingMethods().setRoutingConfiguration,
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    const result = await controller.generateProjectTaskCandidatePlan({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 1,
+    });
+    expect(result).toMatchObject({
+      status: "generated",
+      taskId,
+      detail: {
+        taskVersion: 2,
+        candidatePlan: { revisionNumber: 1, steps: [{ title: "生成计划" }] },
+      },
+      catalog: { tasks: [{ taskVersion: 2, stage: "candidate_plan" }] },
+    });
+    const command = generateProjectTaskCandidatePlan.mock.calls[0]![0];
+    expect(command).toMatchObject({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 1,
+      expectedOwnershipVersion: 2,
+      previousRequirementRevisionId: requirementId,
+      previousPlanRevisionId: null,
+      expectedRoutingBindingVersion: 3,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: CONFIGURED_ROUTING.configurationRevisionId,
+    });
+    expect(JSON.stringify(result)).not.toContain(stepId);
+    expect(JSON.stringify(result)).not.toContain(command.commandId);
+    await expect(
+      controller.generateProjectTaskCandidatePlan({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 1,
+      }),
+    ).resolves.toEqual({ status: "conflict" });
   });
 
   it("contains invalid Task detail and Requirement revision outcomes", async () => {

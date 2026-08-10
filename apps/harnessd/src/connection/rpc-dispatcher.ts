@@ -23,6 +23,7 @@ export type RpcDispatchContext = Readonly<{
   createProjectTask: (params: JsonValue) => unknown;
   readProjectTaskDetail: (params: JsonValue) => unknown;
   reviseProjectTaskRequirement: (params: JsonValue) => unknown;
+  generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -364,6 +365,10 @@ export function dispatchRpcRequest(
         : unavailable(request.id, "The Project Task Requirement service is unavailable.");
     }
 
+    if (request.method === "task.plan.generate_candidate") {
+      return unavailable(request.id, "The candidate Plan generation service is unavailable.");
+    }
+
     if (request.method === "routing.configuration.set") {
       let candidate: unknown;
       try {
@@ -436,4 +441,50 @@ export function dispatchRpcRequest(
       shutdownReason: undefined,
     };
   }
+}
+
+export async function dispatchRpcRequestAsync(
+  request: RpcRequest,
+  context: RpcDispatchContext,
+): Promise<RpcDispatchResult> {
+  if (request.method !== "task.plan.generate_candidate" || context.closing) {
+    return dispatchRpcRequest(request, context);
+  }
+  const decodedParams = decodeRequestParams(request.method, request.params);
+  if (!decodedParams.ok || context.generateProjectTaskCandidatePlan === undefined) {
+    return dispatchRpcRequest(request, context);
+  }
+  return await dispatchCandidatePlanGeneration(
+    request.id,
+    decodedParams.value,
+    context.generateProjectTaskCandidatePlan,
+  );
+}
+
+async function dispatchCandidatePlanGeneration(
+  requestId: string,
+  params: JsonValue,
+  provider: NonNullable<RpcDispatchContext["generateProjectTaskCandidatePlan"]>,
+): Promise<RpcDispatchResult> {
+  let candidate: unknown;
+  try {
+    candidate = await provider(params);
+  } catch (error: unknown) {
+    if (error instanceof RpcProviderError && error.code === "conflict") {
+      return {
+        envelope: rpcError(requestId, RPC_ERROR_CODES.conflict, "The Project Task changed."),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      };
+    }
+    return unavailable(requestId, "The candidate Plan generation service is unavailable.");
+  }
+  const decodedResult = decodeResponseResult("task.plan.generate_candidate", candidate);
+  return decodedResult.ok
+    ? {
+        envelope: rpcResponse(requestId, decodedResult.value),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      }
+    : unavailable(requestId, "The candidate Plan generation service is unavailable.");
 }

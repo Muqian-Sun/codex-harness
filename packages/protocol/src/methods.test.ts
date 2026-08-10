@@ -631,6 +631,8 @@ describe("method contracts", () => {
       title: "可修订 Task",
       stage: "requirements_only",
       activeRequirement: requirement,
+      latestPlanRevisionId: null,
+      candidatePlan: null,
     } as const;
     const revise = {
       commandId,
@@ -697,6 +699,99 @@ describe("method contracts", () => {
       { schemaVersion: 1, status: "revised", taskId: projectId, extra: true },
     ]) {
       expect(decodeResponseResult("task.requirement.revise", invalid).ok).toBe(false);
+    }
+  });
+
+  it("strictly validates candidate Plan detail and generation fences", () => {
+    const params = {
+      commandId: "00000000-0000-4000-8000-000000000941",
+      projectId: "00000000-0000-4000-8000-000000000942",
+      taskId: "00000000-0000-4000-8000-000000000943",
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 2,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000944",
+      previousPlanRevisionId: null,
+      expectedRoutingBindingVersion: 1,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000945",
+    } as const;
+    const candidatePlan = {
+      revisionId: params.commandId,
+      revisionNumber: 1,
+      basedOnRequirementRevisionId: params.previousRequirementRevisionId,
+      steps: [
+        {
+          stepId: "00000000-0000-4000-8000-000000000946",
+          title: "生成候选计划",
+          description: "只写入待确认计划。",
+          acceptanceCriteria: ["重启后恢复。"],
+        },
+      ],
+    } as const;
+    const detail = {
+      schemaVersion: 1,
+      projectId: params.projectId,
+      ownershipVersion: 1,
+      taskId: params.taskId,
+      taskVersion: 3,
+      title: "候选计划 Task",
+      stage: "candidate_plan",
+      activeRequirement: {
+        revisionId: params.previousRequirementRevisionId,
+        revisionNumber: 2,
+        sourceText: "生成计划。",
+        objective: "生成计划。",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      latestPlanRevisionId: params.commandId,
+      candidatePlan,
+    } as const;
+
+    expect(decodeRequestParams("task.plan.generate_candidate", params).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.plan.generate_candidate", {
+        schemaVersion: 1,
+        status: "generated",
+        taskId: params.taskId,
+      }).ok,
+    ).toBe(true);
+    expect(decodeResponseResult("task.detail", detail).ok).toBe(true);
+    for (const invalid of [
+      { ...params, expectedProfileVersion: 0 },
+      { ...params, commandId: params.taskId },
+      { ...params, extra: true },
+    ]) {
+      expect(decodeRequestParams("task.plan.generate_candidate", invalid).ok).toBe(false);
+    }
+    for (const invalid of [
+      { ...detail, stage: "requirements_only" },
+      { ...detail, latestPlanRevisionId: params.previousRequirementRevisionId },
+      {
+        ...detail,
+        candidatePlan: {
+          ...candidatePlan,
+          basedOnRequirementRevisionId: "00000000-0000-4000-8000-000000000947",
+        },
+      },
+      { ...detail, candidatePlan: { ...candidatePlan, steps: [] } },
+      {
+        ...detail,
+        candidatePlan: {
+          ...candidatePlan,
+          steps: [candidatePlan.steps[0], candidatePlan.steps[0]],
+        },
+      },
+      {
+        ...detail,
+        candidatePlan: {
+          ...candidatePlan,
+          steps: [{ ...candidatePlan.steps[0], title: " " }],
+        },
+      },
+    ]) {
+      expect(decodeResponseResult("task.detail", invalid).ok).toBe(false);
     }
   });
 

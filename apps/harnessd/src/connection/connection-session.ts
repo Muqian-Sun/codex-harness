@@ -19,7 +19,7 @@ import {
 } from "@codex-harness/protocol";
 
 import { generateStreamId, startupCapabilitiesEqual } from "./identifiers.js";
-import { dispatchRpcRequest } from "./rpc-dispatcher.js";
+import { dispatchRpcRequestAsync } from "./rpc-dispatcher.js";
 
 export type ConnectionSessionState = "awaiting_hello" | "authenticated" | "closing" | "closed";
 
@@ -51,6 +51,7 @@ export type ConnectionSessionConfig = Readonly<{
   createProjectTask?: (params: JsonValue) => unknown;
   readProjectTaskDetail?: (params: JsonValue) => unknown;
   reviseProjectTaskRequirement?: (params: JsonValue) => unknown;
+  generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
@@ -130,6 +131,7 @@ export class ConnectionSession {
   readonly #createProjectTask: (params: JsonValue) => unknown;
   readonly #readProjectTaskDetail: (params: JsonValue) => unknown;
   readonly #reviseProjectTaskRequirement: (params: JsonValue) => unknown;
+  readonly #generateProjectTaskCandidatePlan: (params: JsonValue) => unknown | Promise<unknown>;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
@@ -166,7 +168,9 @@ export class ConnectionSession {
       (config.readProjectTaskDetail !== undefined &&
         typeof config.readProjectTaskDetail !== "function") ||
       (config.reviseProjectTaskRequirement !== undefined &&
-        typeof config.reviseProjectTaskRequirement !== "function")
+        typeof config.reviseProjectTaskRequirement !== "function") ||
+      (config.generateProjectTaskCandidatePlan !== undefined &&
+        typeof config.generateProjectTaskCandidatePlan !== "function")
     ) {
       throw new Error("Invalid connection session configuration.");
     }
@@ -193,6 +197,8 @@ export class ConnectionSession {
     this.#createProjectTask = config.createProjectTask ?? (() => null);
     this.#readProjectTaskDetail = config.readProjectTaskDetail ?? (() => null);
     this.#reviseProjectTaskRequirement = config.reviseProjectTaskRequirement ?? (() => null);
+    this.#generateProjectTaskCandidatePlan =
+      config.generateProjectTaskCandidatePlan ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
     this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
@@ -205,7 +211,7 @@ export class ConnectionSession {
     return this.#streamId;
   }
 
-  receive(input: unknown): readonly ConnectionSessionAction[] {
+  async receive(input: unknown): Promise<readonly ConnectionSessionAction[]> {
     if (this.#state === "closed") {
       return Object.freeze([]);
     }
@@ -219,7 +225,9 @@ export class ConnectionSession {
       const actions: ConnectionSessionAction[] = [];
       for (const frame of decoded.frames) {
         const frameActions =
-          this.#state === "awaiting_hello" ? this.#handleHello(frame) : this.#handleRpc(frame);
+          this.#state === "awaiting_hello"
+            ? this.#handleHello(frame)
+            : await this.#handleRpc(frame);
         actions.push(...frameActions);
         if (frameActions.some((action) => action.type === "close")) {
           break;
@@ -345,7 +353,7 @@ export class ConnectionSession {
     ]);
   }
 
-  #handleRpc(frame: Uint8Array): readonly ConnectionSessionAction[] {
+  async #handleRpc(frame: Uint8Array): Promise<readonly ConnectionSessionAction[]> {
     const parsed = decodeClientRpcFrame(frame);
     if (!parsed.ok) {
       const error = send(rpcProtocolError());
@@ -358,7 +366,7 @@ export class ConnectionSession {
     if (streamId === undefined) {
       return this.#failConnection("protocol_violation");
     }
-    const dispatched = dispatchRpcRequest(parsed.value, {
+    const dispatched = await dispatchRpcRequestAsync(parsed.value, {
       streamId,
       uptimeMs: safeUptime(this.#uptimeMs()),
       closing: this.#state === "closing",
@@ -372,6 +380,7 @@ export class ConnectionSession {
       createProjectTask: this.#createProjectTask,
       readProjectTaskDetail: this.#readProjectTaskDetail,
       reviseProjectTaskRequirement: this.#reviseProjectTaskRequirement,
+      generateProjectTaskCandidatePlan: this.#generateProjectTaskCandidatePlan,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
     });

@@ -19,7 +19,10 @@ import { DaemonStateStore } from "./daemon-state-store.js";
 import { DESKTOP_DEFAULT_ROUTING_PROFILE_ID } from "./desktop-default-routing-profile.js";
 import { ModelRoutingProfileRepository } from "../domain/model-routing-profile-repository.js";
 import { ProjectRegistryRepository } from "../domain/project-registry-repository.js";
+import { ProjectRoutingProfileBindingRepository } from "../domain/project-routing-profile-binding-repository.js";
 import type {
+  AppServerReadOnlyAnalysisInput,
+  AppServerReadOnlyAnalysisResult,
   AppServerWorkerCloseResult,
   AppServerWorkerConfig,
   AppServerWorkerState,
@@ -30,6 +33,7 @@ import {
   type ManagedAppServerWorker,
 } from "./app-server-worker-manager.js";
 import { monitorParentWatchdog } from "./parent-watchdog.js";
+import { ProjectTaskService } from "./project-task-service.js";
 
 const STARTUP_CAPABILITY = "A".repeat(43);
 const WORKER_SESSION_ID = "00000000-0000-4000-8000-000000000611";
@@ -70,8 +74,12 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
   readonly #closeResult: AppServerWorkerCloseResult;
   readonly #closeGate: Promise<void> | undefined;
   readonly #accountResponses: JsonValue[];
+  readonly #analysis:
+    | ((input: AppServerReadOnlyAnalysisInput) => Promise<AppServerReadOnlyAnalysisResult>)
+    | undefined;
   #resolveClosed!: (result: AppServerWorkerCloseResult) => void;
   closeCalls = 0;
+  readonly analysisInputs: AppServerReadOnlyAnalysisInput[] = [];
 
   constructor(
     closeResult: AppServerWorkerCloseResult = runtimeWorkerClose(),
@@ -79,10 +87,12 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
     accountResponses: readonly JsonValue[] = [
       Object.freeze({ account: null, requiresOpenaiAuth: true }),
     ],
+    analysis?: (input: AppServerReadOnlyAnalysisInput) => Promise<AppServerReadOnlyAnalysisResult>,
   ) {
     this.#closeResult = closeResult;
     this.#closeGate = closeGate;
     this.#accountResponses = [...accountResponses];
+    this.#analysis = analysis;
     this.closed = new Promise((resolve) => {
       this.#resolveClosed = resolve;
     });
@@ -90,16 +100,14 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
 
   async listModels(): Promise<JsonValue> {
     return {
-      data: [
-        {
-          id: "id-runtime",
-          model: "runtime",
-          hidden: false,
-          defaultReasoningEffort: "medium",
-          supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
-          inputModalities: ["text"],
-        },
-      ],
+      data:
+        this.#analysis === undefined
+          ? [runtimeModel("runtime", "medium")]
+          : [
+              runtimeModel("fast", "low"),
+              runtimeModel("standard", "medium"),
+              runtimeModel("deep", "high"),
+            ],
       nextCursor: null,
     };
   }
@@ -110,6 +118,16 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
       throw new Error("missing fake account response");
     }
     return response;
+  }
+
+  async runReadOnlyAnalysisTurn(
+    input: AppServerReadOnlyAnalysisInput,
+  ): Promise<AppServerReadOnlyAnalysisResult> {
+    this.analysisInputs.push(structuredClone(input));
+    if (this.#analysis === undefined) {
+      throw new Error("analysis is not configured");
+    }
+    return await this.#analysis(input);
   }
 
   async close(): Promise<AppServerWorkerCloseResult> {
@@ -131,6 +149,17 @@ class RuntimeFakeWorker implements ManagedAppServerWorker {
     this.state = "closed";
     this.#resolveClosed(runtimeWorkerClose("already_exited", "worker_exited"));
   }
+}
+
+function runtimeModel(model: string, reasoningEffort: string): JsonValue {
+  return {
+    id: `id-${model}`,
+    model,
+    hidden: false,
+    defaultReasoningEffort: reasoningEffort,
+    supportedReasoningEfforts: [{ reasoningEffort }],
+    inputModalities: ["text"],
+  };
 }
 
 function runtimeWorkerClose(
@@ -211,6 +240,43 @@ async function readFrame(socket: Socket): Promise<JsonValue> {
     const onClose = (): void => {
       cleanup();
       reject(new Error("socket closed before a frame was received"));
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = (): void => {
+      socket.off("data", onData);
+      socket.off("close", onClose);
+      socket.off("error", onError);
+    };
+    socket.on("data", onData);
+    socket.once("close", onClose);
+    socket.once("error", onError);
+  });
+}
+
+async function readFrames(socket: Socket, count: number): Promise<readonly JsonValue[]> {
+  return await new Promise<readonly JsonValue[]>((resolve, reject) => {
+    let buffered = Buffer.alloc(0);
+    const frames: JsonValue[] = [];
+    const onData = (chunk: Buffer): void => {
+      buffered = Buffer.concat([buffered, chunk]);
+      let newline = buffered.indexOf(0x0a);
+      while (newline >= 0) {
+        frames.push(JSON.parse(buffered.subarray(0, newline).toString("utf8")) as JsonValue);
+        buffered = buffered.subarray(newline + 1);
+        if (frames.length === count) {
+          cleanup();
+          resolve(Object.freeze(frames));
+          return;
+        }
+        newline = buffered.indexOf(0x0a);
+      }
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error("socket closed before all frames were received"));
     };
     const onError = (error: Error): void => {
       cleanup();
@@ -378,6 +444,29 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
     await expect(taskRevisionPromise).resolves.toMatchObject({
       kind: "error",
       id: "task-revision-1",
+      error: { code: "service.unavailable" },
+    });
+
+    const planGenerationPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-plan-generate-1", "task.plan.generate_candidate", {
+        commandId: "00000000-0000-4000-8000-000000000981",
+        projectId: "00000000-0000-4000-8000-000000000941",
+        taskId: "00000000-0000-4000-8000-000000000973",
+        expectedProjectVersion: 1,
+        expectedTaskVersion: 1,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000971",
+        previousPlanRevisionId: null,
+        expectedRoutingBindingVersion: 1,
+        expectedProfileVersion: 1,
+        expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000951",
+      }),
+    );
+    await expect(planGenerationPromise).resolves.toMatchObject({
+      kind: "error",
+      id: "task-plan-generate-1",
       error: { code: "service.unavailable" },
     });
 
@@ -832,6 +921,150 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
     );
     await expect(stalePromise).resolves.toMatchObject({
       kind: "error",
+      error: { code: "rpc.conflict" },
+    });
+  });
+
+  it("generates a deep-tier candidate Plan and preserves same-connection request order", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-plan-"));
+    temporaryDirectories.push(directory);
+    await chmod(directory, 0o700);
+    const stateStore = await DaemonStateStore.open({
+      databasePath: join(directory, "harness.db"),
+    });
+    const projectId = "00000000-0000-4000-8000-000000000991";
+    const configurationRevisionId = "00000000-0000-4000-8000-000000000992";
+    const taskId = "00000000-0000-4000-8000-000000000993";
+    const requirementRevisionId = "00000000-0000-4000-8000-000000000994";
+    new ProjectRegistryRepository(stateStore.events).registerProject({
+      eventId: "00000000-0000-4000-8000-000000000995",
+      projectId,
+      displayName: "candidate-plan-workspace",
+      workspace: { platform: "macos", absolutePath: "/Users/example/candidate-plan" },
+      occurredAtMs: 1_750_000_000_001,
+    });
+    new ModelRoutingProfileRepository(stateStore.events).setConfiguration({
+      profileId: DESKTOP_DEFAULT_ROUTING_PROFILE_ID,
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      occurredAtMs: 1_750_000_000_002,
+      configuration: {
+        schemaVersion: 1,
+        revisionId: configurationRevisionId,
+        revisionNumber: 1,
+        tiers: {
+          fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+          standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+          deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+        },
+      },
+    });
+    new ProjectRoutingProfileBindingRepository(stateStore.events).bindProfile({
+      eventId: "00000000-0000-4000-8000-000000000996",
+      projectId,
+      expectedBindingVersion: 0,
+      previousProfileId: null,
+      profileId: DESKTOP_DEFAULT_ROUTING_PROFILE_ID,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: configurationRevisionId,
+      occurredAtMs: 1_750_000_000_003,
+    });
+    new ProjectTaskService(stateStore, { now: () => 1_750_000_000_004 }).create({
+      commandId: requirementRevisionId,
+      ownershipCommandId: "00000000-0000-4000-8000-000000000997",
+      taskId,
+      projectId,
+      expectedProjectVersion: 1,
+      expectedRoutingBindingVersion: 1,
+      title: "生成持久候选计划",
+      sourceText: "使用高级档位生成 TODO，并保持为未确认状态。",
+    });
+    const analysisGate = deferred<AppServerReadOnlyAnalysisResult>();
+    const worker = new RuntimeFakeWorker(
+      runtimeWorkerClose(),
+      undefined,
+      [Object.freeze({ account: null, requiresOpenaiAuth: true })],
+      async () => await analysisGate.promise,
+    );
+    const workerManager = await createWorkerManager(worker);
+    const { endpoint } = await createRuntime({ stateStore, workerManager });
+    const socket = await connect(endpoint);
+    await authenticate(socket);
+    const generationParams = {
+      commandId: "00000000-0000-4000-8000-000000000998",
+      projectId,
+      taskId,
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 1,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: requirementRevisionId,
+      previousPlanRevisionId: null,
+      expectedRoutingBindingVersion: 1,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: configurationRevisionId,
+    };
+    const responsesPromise = readFrames(socket, 2);
+    sendFrame(socket, rpc("plan-generate", "task.plan.generate_candidate", generationParams));
+    sendFrame(socket, rpc("health-after-plan", "system.health", {}));
+    await expect.poll(() => worker.analysisInputs.length).toBe(1);
+    expect(worker.analysisInputs[0]).toMatchObject({
+      cwd: "/Users/example/candidate-plan",
+      modelProvider: "openai",
+      model: "deep",
+      reasoningEffort: "high",
+    });
+
+    analysisGate.resolve({
+      threadId: "thread-plan",
+      turnId: "turn-plan",
+      output: {
+        steps: [
+          {
+            title: "写入候选步骤",
+            description: "持久化模型返回的受约束计划。",
+            acceptanceCriteria: ["Task 详情显示未确认候选步骤。"],
+          },
+        ],
+      },
+    });
+    await expect(responsesPromise).resolves.toMatchObject([
+      {
+        kind: "response",
+        id: "plan-generate",
+        result: { status: "generated", taskId },
+      },
+      {
+        kind: "response",
+        id: "health-after-plan",
+        result: { status: "ok" },
+      },
+    ]);
+
+    const detailPromise = readFrame(socket);
+    sendFrame(socket, rpc("plan-detail", "task.detail", { projectId, taskId }));
+    await expect(detailPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        taskVersion: 2,
+        candidatePlan: {
+          revisionId: generationParams.commandId,
+          basedOnRequirementRevisionId: requirementRevisionId,
+          steps: [{ title: "写入候选步骤" }],
+        },
+      },
+    });
+
+    const stalePromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("plan-stale", "task.plan.generate_candidate", {
+        ...generationParams,
+        commandId: "00000000-0000-4000-8000-000000000999",
+      }),
+    );
+    await expect(stalePromise).resolves.toMatchObject({
+      kind: "error",
+      id: "plan-stale",
       error: { code: "rpc.conflict" },
     });
   });

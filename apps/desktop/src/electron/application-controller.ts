@@ -12,6 +12,7 @@ import {
   failedBootstrapState,
   decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskCandidatePlanGeneration,
   decodeDesktopProjectTaskRequirementRevision,
   decodeDesktopProjectTaskSelection,
   decodeDesktopRoutingConfigurationUpdate,
@@ -30,6 +31,7 @@ import {
   type DesktopProjectSelectionResult,
   type DesktopProjectRoutingBindingMutationResult,
   type DesktopProjectTaskCatalogResult,
+  type DesktopProjectTaskCandidatePlanMutationResult,
   type DesktopProjectTaskDetailResult,
   type DesktopProjectTaskMutationResult,
   type DesktopProjectTaskRequirementMutationResult,
@@ -52,7 +54,8 @@ export type DesktopSupervisorHandle = Pick<
   | "readRoutingConfiguration"
   | "setRoutingConfiguration"
   | "stop"
->;
+> &
+  Partial<Pick<DaemonProcessSupervisor, "generateProjectTaskCandidatePlan">>;
 
 export type DesktopApplicationControllerConfig = Readonly<{
   stateStore: BootstrapStateStore;
@@ -415,6 +418,93 @@ export class DesktopApplicationController {
         : Object.freeze({ status: "unavailable" });
     } catch {
       return Object.freeze({ status: "unavailable" });
+    }
+  }
+
+  async generateProjectTaskCandidatePlan(
+    input: unknown,
+  ): Promise<DesktopProjectTaskCandidatePlanMutationResult> {
+    const generation = decodeDesktopProjectTaskCandidatePlanGeneration(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    const project =
+      generation === undefined || state.phase !== "ready"
+        ? undefined
+        : state.projects.projects.find((candidate) => candidate.projectId === generation.projectId);
+    const binding =
+      generation === undefined || state.phase !== "ready"
+        ? undefined
+        : state.projectRoutingBindings.bindings.find(
+            (candidate) => candidate.projectId === generation.projectId,
+          );
+    if (
+      generation === undefined ||
+      state.phase !== "ready" ||
+      supervisor === undefined ||
+      typeof supervisor.generateProjectTaskCandidatePlan !== "function" ||
+      project === undefined ||
+      binding?.status !== "default_bound" ||
+      binding.bindingVersion === null ||
+      !state.routing.configured ||
+      state.routing.configurationRevisionId === null ||
+      state.routing.availability?.deep !== "observed_available"
+    ) {
+      return Object.freeze({ status: "unavailable" });
+    }
+
+    try {
+      const current = await supervisor.readProjectTaskDetail({
+        projectId: generation.projectId,
+        taskId: generation.taskId,
+      });
+      projectDesktopProjectTaskDetail(current, generation.projectId, generation.taskId);
+      if (current.taskVersion !== generation.expectedTaskVersion) {
+        return Object.freeze({ status: "conflict" });
+      }
+      const result = await supervisor.generateProjectTaskCandidatePlan({
+        commandId: randomUUID(),
+        projectId: generation.projectId,
+        taskId: generation.taskId,
+        expectedProjectVersion: project.projectVersion,
+        expectedTaskVersion: current.taskVersion,
+        expectedOwnershipVersion: current.ownershipVersion,
+        previousRequirementRevisionId: current.activeRequirement.revisionId,
+        previousPlanRevisionId: current.latestPlanRevisionId,
+        expectedRoutingBindingVersion: binding.bindingVersion,
+        expectedProfileVersion: state.routing.profileVersion,
+        expectedConfigurationRevisionId: state.routing.configurationRevisionId,
+      });
+      if (
+        (result.status !== "generated" && result.status !== "existing") ||
+        result.taskId !== generation.taskId ||
+        this.#stateStore.current.phase !== "ready"
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const [rawDetail, rawCatalog] = await Promise.all([
+        supervisor.readProjectTaskDetail({
+          projectId: generation.projectId,
+          taskId: generation.taskId,
+        }),
+        supervisor.readProjectTaskCatalogPage({
+          projectId: generation.projectId,
+          cursor: null,
+          limit: 12,
+        }),
+      ]);
+      const detail = projectDesktopProjectTaskDetail(
+        rawDetail,
+        generation.projectId,
+        generation.taskId,
+      );
+      const catalog = projectDesktopProjectTaskCatalog(rawCatalog, generation.projectId);
+      return this.#stateStore.current.phase === "ready"
+        ? Object.freeze({ status: result.status, taskId: result.taskId, detail, catalog })
+        : Object.freeze({ status: "unavailable" });
+    } catch (error: unknown) {
+      return error instanceof HarnessRpcClientError && error.remoteCode === "rpc.conflict"
+        ? Object.freeze({ status: "conflict" })
+        : Object.freeze({ status: "unavailable" });
     }
   }
 

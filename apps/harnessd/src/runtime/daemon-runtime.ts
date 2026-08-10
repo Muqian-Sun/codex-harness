@@ -27,6 +27,7 @@ import type { ModelRoutingConfigurationService } from "./model-routing-configura
 import type { ProjectRegistryService } from "./project-registry-service.js";
 import type { ProjectRoutingBindingService } from "./project-routing-binding-service.js";
 import type { ProjectTaskService } from "./project-task-service.js";
+import type { CandidatePlanGenerationService } from "./candidate-plan-generation-service.js";
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -65,6 +66,11 @@ export type DaemonRuntimeConfig = Readonly<{
   stateStore?: DaemonStateStore;
 }>;
 
+type SocketInputQueue = {
+  socket: Socket;
+  tail: Promise<void>;
+};
+
 export class DaemonRuntimeStartError extends Error {
   readonly code: "invalid_configuration" | "listen_failed" | "worker_unavailable";
 
@@ -94,11 +100,13 @@ export class DaemonRuntime {
   readonly #projectRegistryService: ProjectRegistryService | undefined;
   readonly #projectRoutingBindingService: ProjectRoutingBindingService | undefined;
   readonly #projectTaskService: ProjectTaskService | undefined;
+  readonly #candidatePlanGenerationService: CandidatePlanGenerationService | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
   #activeSocket: Socket | undefined;
   #activeSession: ConnectionSession | undefined;
+  #activeInputQueue: SocketInputQueue | undefined;
   #unsubscribeAccountStatus: (() => void) | undefined;
   #handshakeTimer: NodeJS.Timeout | undefined;
   #socketCloseTimer: NodeJS.Timeout | undefined;
@@ -125,6 +133,7 @@ export class DaemonRuntime {
         projectRegistryService?: ProjectRegistryService;
         projectRoutingBindingService?: ProjectRoutingBindingService;
         projectTaskService?: ProjectTaskService;
+        candidatePlanGenerationService?: CandidatePlanGenerationService;
         stateStore?: DaemonStateStore;
         workerManager?: AppServerWorkerManager;
       }>,
@@ -140,6 +149,7 @@ export class DaemonRuntime {
     this.#projectRegistryService = config.projectRegistryService;
     this.#projectRoutingBindingService = config.projectRoutingBindingService;
     this.#projectTaskService = config.projectTaskService;
+    this.#candidatePlanGenerationService = config.candidatePlanGenerationService;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
@@ -209,6 +219,12 @@ export class DaemonRuntime {
         config.stateStore === undefined
           ? undefined
           : new (await import("./project-task-service.js")).ProjectTaskService(config.stateStore);
+      const candidatePlanGenerationService =
+        config.stateStore === undefined || config.workerManager === undefined
+          ? undefined
+          : new (
+              await import("./candidate-plan-generation-service.js")
+            ).CandidatePlanGenerationService(config.stateStore, config.workerManager);
       runtime = new DaemonRuntime(endpoint, {
         startupCapability: config.startupCapability,
         serverVersion: config.serverVersion,
@@ -220,6 +236,7 @@ export class DaemonRuntime {
         ...(projectRegistryService === undefined ? {} : { projectRegistryService }),
         ...(projectRoutingBindingService === undefined ? {} : { projectRoutingBindingService }),
         ...(projectTaskService === undefined ? {} : { projectTaskService }),
+        ...(candidatePlanGenerationService === undefined ? {} : { candidatePlanGenerationService }),
       });
     } catch {
       await Promise.all([
@@ -335,11 +352,14 @@ export class DaemonRuntime {
       createProjectTask: (params) => this.#createProjectTask(params),
       readProjectTaskDetail: (params) => this.#readProjectTaskDetail(params),
       reviseProjectTaskRequirement: (params) => this.#reviseProjectTaskRequirement(params),
+      generateProjectTaskCandidatePlan: (params) => this.#generateProjectTaskCandidatePlan(params),
       readRoutingConfiguration: () => this.#readRoutingConfiguration(),
       setRoutingConfiguration: (params) => this.#setRoutingConfiguration(params),
     });
     this.#activeSocket = socket;
     this.#activeSession = session;
+    const inputQueue: SocketInputQueue = { socket, tail: Promise.resolve() };
+    this.#activeInputQueue = inputQueue;
     socket.setNoDelay(true);
     this.#handshakeTimer = setTimeout(() => {
       if (session.state === "awaiting_hello") {
@@ -352,18 +372,35 @@ export class DaemonRuntime {
       if (socket !== this.#activeSocket) {
         return;
       }
-      this.#applyActions(socket, session.receive(chunk));
-      if (session.state !== "awaiting_hello") {
-        this.#clearHandshakeTimer();
-      }
+      this.#enqueueSocketInput(inputQueue, async () => {
+        this.#applyActions(socket, await session.receive(chunk));
+        if (session.state !== "awaiting_hello") {
+          this.#clearHandshakeTimer();
+        }
+      });
     });
     socket.once("end", () => {
       if (socket === this.#activeSocket) {
-        this.#applyActions(socket, session.end());
+        this.#enqueueSocketInput(inputQueue, () => {
+          this.#applyActions(socket, session.end());
+        });
       }
     });
     socket.on("error", () => socket.destroy());
     socket.once("close", () => this.#release(socket));
+  }
+
+  #enqueueSocketInput(queue: SocketInputQueue, operation: () => void | Promise<void>): void {
+    queue.tail = queue.tail
+      .then(async () => {
+        if (queue !== this.#activeInputQueue || queue.socket !== this.#activeSocket) {
+          return;
+        }
+        await operation();
+      })
+      .catch(() => {
+        queue.socket.destroy();
+      });
   }
 
   #applyActions(socket: Socket, actions: readonly ConnectionSessionAction[]): void {
@@ -407,6 +444,7 @@ export class DaemonRuntime {
     }
     this.#activeSocket = undefined;
     this.#activeSession = undefined;
+    this.#activeInputQueue = undefined;
   }
 
   #clearHandshakeTimer(): void {
@@ -544,6 +582,20 @@ export class DaemonRuntime {
       return service.reviseRequirement(params);
     } catch (error: unknown) {
       throw new RpcProviderError(isProjectTaskConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
+  async #generateProjectTaskCandidatePlan(params: unknown): Promise<unknown> {
+    const service = this.#candidatePlanGenerationService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return await service.generate(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(
+        isCandidatePlanGenerationConflict(error) ? "conflict" : "unavailable",
+      );
     }
   }
 
@@ -725,6 +777,15 @@ function isProjectTaskConflict(error: unknown): boolean {
   return (
     error instanceof Error &&
     error.name === "ProjectTaskServiceError" &&
+    "code" in error &&
+    error.code === "conflict"
+  );
+}
+
+function isCandidatePlanGenerationConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "CandidatePlanGenerationServiceError" &&
     "code" in error &&
     error.code === "conflict"
   );

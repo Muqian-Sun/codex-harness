@@ -538,9 +538,9 @@ describe("desktop bootstrap state", () => {
       projectId: PROJECT.projectId,
       ownershipVersion: 4,
       taskId,
-      taskVersion: 3,
+      taskVersion: 4,
       title: "可修订 Task",
-      stage: "requirements_only",
+      stage: "candidate_plan",
       activeRequirement: {
         revisionId: "00000000-0000-4000-8000-000000000884",
         revisionNumber: 3,
@@ -549,12 +549,26 @@ describe("desktop bootstrap state", () => {
         constraints: ["不得自动执行。"],
         acceptanceCriteria: ["重启后恢复当前修订。"],
       },
+      latestPlanRevisionId: "00000000-0000-4000-8000-000000000885",
+      candidatePlan: {
+        revisionId: "00000000-0000-4000-8000-000000000885",
+        revisionNumber: 1,
+        basedOnRequirementRevisionId: "00000000-0000-4000-8000-000000000884",
+        steps: [
+          {
+            stepId: "00000000-0000-4000-8000-000000000886",
+            title: "生成候选计划",
+            description: "只生成并持久化待确认步骤。",
+            acceptanceCriteria: ["内部 ID 不进入 renderer。"],
+          },
+        ],
+      },
     };
     const detail = projectDesktopProjectTaskDetail(raw, PROJECT.projectId, taskId);
     expect(detail).toEqual({
       projectId: PROJECT.projectId,
       taskId,
-      taskVersion: 3,
+      taskVersion: 4,
       title: raw.title,
       stage: raw.stage,
       activeRequirement: {
@@ -564,10 +578,23 @@ describe("desktop bootstrap state", () => {
         constraints: raw.activeRequirement.constraints,
         acceptanceCriteria: raw.activeRequirement.acceptanceCriteria,
       },
+      candidatePlan: {
+        revisionNumber: 1,
+        steps: [
+          {
+            title: "生成候选计划",
+            description: "只生成并持久化待确认步骤。",
+            acceptanceCriteria: ["内部 ID 不进入 renderer。"],
+          },
+        ],
+      },
     });
     expect(JSON.stringify(detail)).not.toContain(raw.activeRequirement.revisionId);
+    expect(JSON.stringify(detail)).not.toContain(raw.latestPlanRevisionId);
+    expect(JSON.stringify(detail)).not.toContain(raw.candidatePlan.steps[0]!.stepId);
     expect(JSON.stringify(detail)).not.toContain("ownershipVersion");
     expect(Object.isFrozen(detail.activeRequirement.constraints)).toBe(true);
+    expect(Object.isFrozen(detail.candidatePlan?.steps)).toBe(true);
     expect(
       decodeDesktopProjectTaskDetailResult({ status: "loaded", detail }, PROJECT.projectId, taskId),
     ).toEqual({ status: "loaded", detail });
@@ -641,6 +668,20 @@ describe("desktop bootstrap state", () => {
         taskId,
       ),
     ).toThrow(BootstrapStateTransitionError);
+    expect(() =>
+      projectDesktopProjectTaskDetail(
+        { ...raw, stage: "requirements_only" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toThrow(BootstrapStateTransitionError);
+    expect(
+      decodeDesktopProjectTaskDetailResult(
+        { status: "loaded", detail: { ...detail, stage: "requirements_only" } },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
     expect(
       decodeDesktopProjectTaskDetailResult(
         {

@@ -3,6 +3,8 @@ import type {
   DesktopProjectSelectionResult,
   DesktopProjectRoutingBindingMutationResult,
   DesktopProjectTaskCatalogResult,
+  DesktopProjectTaskCandidatePlanGeneration,
+  DesktopProjectTaskCandidatePlanMutationResult,
   DesktopProjectTaskCreation,
   DesktopProjectTaskDetailResult,
   DesktopProjectTaskMutationResult,
@@ -31,6 +33,9 @@ declare global {
       reviseProjectTaskRequirement(
         revision: DesktopProjectTaskRequirementRevision,
       ): Promise<DesktopProjectTaskRequirementMutationResult>;
+      generateProjectTaskCandidatePlan(
+        input: DesktopProjectTaskCandidatePlanGeneration,
+      ): Promise<DesktopProjectTaskCandidatePlanMutationResult>;
       setRoutingConfiguration(
         update: DesktopRoutingConfigurationUpdate,
       ): Promise<DesktopRoutingConfigurationMutationResult>;
