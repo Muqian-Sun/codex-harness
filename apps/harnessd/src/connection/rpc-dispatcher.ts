@@ -21,6 +21,8 @@ export type RpcDispatchContext = Readonly<{
   bindProjectDefaultRouting: (params: JsonValue) => unknown;
   readProjectTaskCatalogPage: (params: JsonValue) => unknown;
   createProjectTask: (params: JsonValue) => unknown;
+  readProjectTaskDetail: (params: JsonValue) => unknown;
+  reviseProjectTaskRequirement: (params: JsonValue) => unknown;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -312,6 +314,54 @@ export function dispatchRpcRequest(
             shutdownReason: undefined,
           }
         : unavailable(request.id, "The Project Task service is unavailable.");
+    }
+
+    if (request.method === "task.detail") {
+      let candidate: unknown;
+      try {
+        candidate = context.readProjectTaskDetail(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(request.id, RPC_ERROR_CODES.conflict, "The Project Task changed."),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Project Task detail is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("task.detail", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project Task detail is unavailable.");
+    }
+
+    if (request.method === "task.requirement.revise") {
+      let candidate: unknown;
+      try {
+        candidate = context.reviseProjectTaskRequirement(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(request.id, RPC_ERROR_CODES.conflict, "The Project Task changed."),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Project Task Requirement service is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("task.requirement.revise", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project Task Requirement service is unavailable.");
     }
 
     if (request.method === "routing.configuration.set") {

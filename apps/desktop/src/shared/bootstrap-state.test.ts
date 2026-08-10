@@ -10,7 +10,11 @@ import {
   decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopProjectTaskCatalogResult,
   decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskDetailResult,
   decodeDesktopProjectTaskMutationResult,
+  decodeDesktopProjectTaskRequirementMutationResult,
+  decodeDesktopProjectTaskRequirementRevision,
+  decodeDesktopProjectTaskSelection,
   decodeDesktopProjectWorkspaceRegistration,
   decodeDesktopRoutingConfigurationMutationResult,
   decodeDesktopRoutingConfigurationUpdate,
@@ -20,6 +24,7 @@ import {
   projectDesktopProjectRegistration,
   projectDesktopProjectRoutingBindings,
   projectDesktopProjectTaskCatalog,
+  projectDesktopProjectTaskDetail,
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
 } from "./bootstrap-state.js";
@@ -522,6 +527,156 @@ describe("desktop bootstrap state", () => {
           tasks: [{ ...raw.tasks[0], projectId: otherProjectId }],
         },
         PROJECT.projectId,
+      ),
+    ).toThrow(BootstrapStateTransitionError);
+  });
+
+  it("strictly projects Task detail and Requirement revision without internal fences", () => {
+    const taskId = "00000000-0000-4000-8000-000000000883";
+    const raw = {
+      schemaVersion: 1,
+      projectId: PROJECT.projectId,
+      ownershipVersion: 4,
+      taskId,
+      taskVersion: 3,
+      title: "可修订 Task",
+      stage: "requirements_only",
+      activeRequirement: {
+        revisionId: "00000000-0000-4000-8000-000000000884",
+        revisionNumber: 3,
+        sourceText: "用户澄清后的需求。",
+        objective: "用户澄清后的需求。",
+        constraints: ["不得自动执行。"],
+        acceptanceCriteria: ["重启后恢复当前修订。"],
+      },
+    };
+    const detail = projectDesktopProjectTaskDetail(raw, PROJECT.projectId, taskId);
+    expect(detail).toEqual({
+      projectId: PROJECT.projectId,
+      taskId,
+      taskVersion: 3,
+      title: raw.title,
+      stage: raw.stage,
+      activeRequirement: {
+        revisionNumber: 3,
+        sourceText: raw.activeRequirement.sourceText,
+        objective: raw.activeRequirement.objective,
+        constraints: raw.activeRequirement.constraints,
+        acceptanceCriteria: raw.activeRequirement.acceptanceCriteria,
+      },
+    });
+    expect(JSON.stringify(detail)).not.toContain(raw.activeRequirement.revisionId);
+    expect(JSON.stringify(detail)).not.toContain("ownershipVersion");
+    expect(Object.isFrozen(detail.activeRequirement.constraints)).toBe(true);
+    expect(
+      decodeDesktopProjectTaskDetailResult({ status: "loaded", detail }, PROJECT.projectId, taskId),
+    ).toEqual({ status: "loaded", detail });
+    expect(
+      decodeDesktopProjectTaskDetailResult({ status: "unavailable" }, PROJECT.projectId, taskId),
+    ).toEqual({ status: "unavailable" });
+    expect(
+      decodeDesktopProjectTaskDetailResult({ status: "unexpected" }, PROJECT.projectId, taskId),
+    ).toBeUndefined();
+
+    const selection = { projectId: PROJECT.projectId, taskId };
+    const revision = {
+      ...selection,
+      expectedTaskVersion: 3,
+      sourceText: "再次补充需求。",
+    };
+    expect(decodeDesktopProjectTaskSelection(selection)).toEqual(selection);
+    expect(decodeDesktopProjectTaskRequirementRevision(revision)).toEqual(revision);
+    const catalog = {
+      projectId: PROJECT.projectId,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT.projectId,
+          taskVersion: 3,
+          title: raw.title,
+          objective: raw.activeRequirement.objective,
+          stage: raw.stage,
+        },
+      ],
+      hasMore: false,
+    };
+    expect(
+      decodeDesktopProjectTaskRequirementMutationResult(
+        { status: "revised", taskId, detail, catalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({ status: "revised", taskId, detail, catalog });
+    expect(
+      decodeDesktopProjectTaskRequirementMutationResult(
+        { status: "conflict" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({ status: "conflict" });
+
+    const otherTaskId = "00000000-0000-4000-8000-000000000885";
+    expect(decodeDesktopProjectTaskSelection({ ...selection, extra: true })).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskRequirementRevision({ ...revision, expectedTaskVersion: 0 }),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskDetailResult(
+        { status: "loaded", detail: { ...detail, taskId: otherTaskId } },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskRequirementMutationResult(
+        { status: "revised", taskId, detail: { ...detail, taskId: otherTaskId }, catalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(() =>
+      projectDesktopProjectTaskDetail(
+        { ...raw, activeRequirement: { ...raw.activeRequirement, constraints: [" "] } },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toThrow(BootstrapStateTransitionError);
+    expect(
+      decodeDesktopProjectTaskDetailResult(
+        {
+          status: "loaded",
+          detail: {
+            ...detail,
+            activeRequirement: {
+              ...detail.activeRequirement,
+              constraints: ["x".repeat(4_000)],
+              acceptanceCriteria: Array.from({ length: 65 }, () => "x".repeat(4_000)),
+            },
+          },
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(() =>
+      projectDesktopProjectTaskDetail(
+        {
+          ...raw,
+          activeRequirement: {
+            ...raw.activeRequirement,
+            constraints: ["x".repeat(4_000)],
+            acceptanceCriteria: Array.from({ length: 65 }, () => "x".repeat(4_000)),
+          },
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toThrow(BootstrapStateTransitionError);
+    expect(() =>
+      projectDesktopProjectTaskDetail(
+        { ...raw, privateFence: "secret" },
+        PROJECT.projectId,
+        taskId,
       ),
     ).toThrow(BootstrapStateTransitionError);
   });

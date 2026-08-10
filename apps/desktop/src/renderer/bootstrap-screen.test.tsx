@@ -5,6 +5,7 @@ import {
   BootstrapScreen,
   createRoutingDraftInputUpdate,
   projectBindingFeedback,
+  taskRequirementFeedback,
 } from "./bootstrap-screen.js";
 
 const CATALOG = Object.freeze({
@@ -83,6 +84,17 @@ const PROJECT_ROUTING_BINDINGS = Object.freeze({
 });
 
 describe("desktop bootstrap screen", () => {
+  it.each([
+    ["idle", "保存会创建新修订"],
+    ["revising", "正在校验 Task 与 Project 归属"],
+    ["revised", "新 Requirement Revision 已持久化"],
+    ["existing", "相同修订命令已经提交"],
+    ["conflict", "草稿仍保留"],
+    ["unavailable", "结果当前未知"],
+  ] as const)("formats stable %s Requirement feedback", (status, expected) => {
+    expect(taskRequirementFeedback(status)).toContain(expected);
+  });
+
   it.each([
     ["idle", true, undefined],
     ["idle", false, "请先保存完整三级模型配置，再为 Project 绑定默认路由。"],
@@ -211,6 +223,8 @@ describe("desktop bootstrap screen", () => {
     expect(markup).toContain('data-project-routing-status="unbound"');
     expect(markup).toContain("ROUTING UNBOUND");
     expect(markup).toContain("绑定默认路由");
+    expect(markup).toContain('data-task-detail-status="idle"');
+    expect(markup).toContain("选择一个 Task 查看当前 Requirement");
   });
 
   it("renders a stable empty observation when Codex reports no visible model", () => {

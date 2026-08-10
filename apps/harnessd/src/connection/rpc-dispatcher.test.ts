@@ -102,6 +102,30 @@ const PROJECT_TASK_CREATED = Object.freeze({
   taskId: "00000000-0000-4000-8000-000000000913",
 });
 
+const PROJECT_TASK_DETAIL = Object.freeze({
+  schemaVersion: 1,
+  projectId: PROJECT.projectId,
+  ownershipVersion: 1,
+  taskId: PROJECT_TASK_CREATED.taskId,
+  taskVersion: 1,
+  title: "Persist Task",
+  stage: "requirements_only",
+  activeRequirement: Object.freeze({
+    revisionId: "00000000-0000-4000-8000-000000000911",
+    revisionNumber: 1,
+    sourceText: "Persist the requirement without execution.",
+    objective: "Persist the requirement without execution.",
+    constraints: Object.freeze([]),
+    acceptanceCriteria: Object.freeze([]),
+  }),
+});
+
+const PROJECT_TASK_REVISED = Object.freeze({
+  schemaVersion: 1,
+  status: "revised",
+  taskId: PROJECT_TASK_CREATED.taskId,
+});
+
 function request(method: string, params: unknown = {}): RpcRequest {
   return {
     kind: "request",
@@ -129,6 +153,8 @@ function context(
     bindProjectDefaultRouting: () => PROJECT_ROUTING_BIND_RESULT,
     readProjectTaskCatalogPage: () => PROJECT_TASK_CATALOG,
     createProjectTask: () => PROJECT_TASK_CREATED,
+    readProjectTaskDetail: () => PROJECT_TASK_DETAIL,
+    reviseProjectTaskRequirement: () => PROJECT_TASK_REVISED,
     readRoutingConfiguration: () => ROUTING_CONFIGURATION,
     setRoutingConfiguration: () => ROUTING_CONFIGURATION,
   };
@@ -564,8 +590,18 @@ describe("RPC dispatcher Project Task methods", () => {
     title: "Persist Task",
     sourceText: "Persist the requirement without execution.",
   };
+  const detailParams = { projectId: PROJECT.projectId, taskId: PROJECT_TASK_CREATED.taskId };
+  const reviseParams = {
+    commandId: "00000000-0000-4000-8000-000000000914",
+    projectId: PROJECT.projectId,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    expectedTaskVersion: 1,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: PROJECT_TASK_DETAIL.activeRequirement.revisionId,
+    sourceText: "Revise the persisted Requirement.",
+  };
 
-  it("passes strict catalog and creation inputs to their providers", () => {
+  it("passes strict catalog, creation, detail, and revision inputs to their providers", () => {
     const readProjectTaskCatalogPage = vi.fn(() => PROJECT_TASK_CATALOG);
     const createProjectTask = vi.fn(() => PROJECT_TASK_CREATED);
     const base = context(() => ACCOUNT_STATUS);
@@ -585,11 +621,31 @@ describe("RPC dispatcher Project Task methods", () => {
       }).envelope,
     ).toMatchObject({ kind: "response", result: PROJECT_TASK_CREATED });
     expect(createProjectTask).toHaveBeenCalledWith(createParams);
+
+    const readProjectTaskDetail = vi.fn(() => PROJECT_TASK_DETAIL);
+    expect(
+      dispatchRpcRequest(request("task.detail", detailParams), {
+        ...base,
+        readProjectTaskDetail,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: PROJECT_TASK_DETAIL });
+    expect(readProjectTaskDetail).toHaveBeenCalledWith(detailParams);
+
+    const reviseProjectTaskRequirement = vi.fn(() => PROJECT_TASK_REVISED);
+    expect(
+      dispatchRpcRequest(request("task.requirement.revise", reviseParams), {
+        ...base,
+        reviseProjectTaskRequirement,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: PROJECT_TASK_REVISED });
+    expect(reviseProjectTaskRequirement).toHaveBeenCalledWith(reviseParams);
   });
 
   it("rejects malformed Task parameters before consulting providers", () => {
     const readProjectTaskCatalogPage = vi.fn(() => PROJECT_TASK_CATALOG);
     const createProjectTask = vi.fn(() => PROJECT_TASK_CREATED);
+    const readProjectTaskDetail = vi.fn(() => PROJECT_TASK_DETAIL);
+    const reviseProjectTaskRequirement = vi.fn(() => PROJECT_TASK_REVISED);
     const base = context(() => ACCOUNT_STATUS);
     expect(
       dispatchRpcRequest(request("task.catalog_page", { ...catalogParams, limit: 13 }), {
@@ -606,8 +662,22 @@ describe("RPC dispatcher Project Task methods", () => {
         { ...base, createProjectTask },
       ).envelope,
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(
+      dispatchRpcRequest(request("task.detail", { ...detailParams, extra: true }), {
+        ...base,
+        readProjectTaskDetail,
+      }).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(
+      dispatchRpcRequest(
+        request("task.requirement.revise", { ...reviseParams, expectedTaskVersion: 0 }),
+        { ...base, reviseProjectTaskRequirement },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
     expect(readProjectTaskCatalogPage).not.toHaveBeenCalled();
     expect(createProjectTask).not.toHaveBeenCalled();
+    expect(readProjectTaskDetail).not.toHaveBeenCalled();
+    expect(reviseProjectTaskRequirement).not.toHaveBeenCalled();
   });
 
   it("maps Task conflicts and invalid provider results to stable public errors", () => {
@@ -615,6 +685,8 @@ describe("RPC dispatcher Project Task methods", () => {
     for (const [method, params, provider] of [
       ["task.catalog_page", catalogParams, "readProjectTaskCatalogPage"],
       ["task.create", createParams, "createProjectTask"],
+      ["task.detail", detailParams, "readProjectTaskDetail"],
+      ["task.requirement.revise", reviseParams, "reviseProjectTaskRequirement"],
     ] as const) {
       const conflict = dispatchRpcRequest(request(method, params), {
         ...base,

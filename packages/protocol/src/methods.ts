@@ -15,12 +15,15 @@ const MAX_PROJECT_DISPLAY_NAME_BYTES = 256;
 const MAX_PROJECT_PATH_BYTES = 4_096;
 const MAX_TASK_TITLE_BYTES = 256;
 const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
+const MAX_TASK_REQUIREMENT_ITEM_BYTES = 4 * 1_024;
+const MAX_TASK_REQUIREMENT_TOTAL_BYTES = 256 * 1_024;
 
 export const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
 export const MAX_MODEL_REASONING_EFFORTS = 64;
 export const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
 export const MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE = 16;
 export const MAX_TASK_CATALOG_PAGE_SIZE = 12;
+export const MAX_TASK_REQUIREMENT_ITEMS = 100;
 
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
@@ -358,6 +361,43 @@ const TaskSourceTextSchema = z
     "Task source text is invalid",
   );
 
+const TaskRequirementItemSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      value.trim().length > 0 &&
+      utf8ByteLength(value) <= MAX_TASK_REQUIREMENT_ITEM_BYTES &&
+      !value.includes("\0"),
+    "Task requirement item is invalid",
+  );
+
+const TaskRequirementSchema = z
+  .object({
+    revisionId: z.string().regex(UUID_PATTERN),
+    revisionNumber: NonNegativeSafeIntegerSchema.min(1),
+    sourceText: TaskSourceTextSchema,
+    objective: TaskSourceTextSchema,
+    constraints: z.array(TaskRequirementItemSchema).max(MAX_TASK_REQUIREMENT_ITEMS),
+    acceptanceCriteria: z.array(TaskRequirementItemSchema).max(MAX_TASK_REQUIREMENT_ITEMS),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      utf8ByteLength(
+        [value.sourceText, value.objective, ...value.constraints, ...value.acceptanceCriteria].join(
+          "",
+        ),
+      ) > MAX_TASK_REQUIREMENT_TOTAL_BYTES
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sourceText"],
+        message: "Task requirement text exceeds the aggregate limit",
+      });
+    }
+  });
+
 const TaskSummarySchema = z
   .object({
     taskId: z.string().regex(UUID_PATTERN),
@@ -432,6 +472,58 @@ export const TaskCreateResultSchema = z
   })
   .strict();
 
+export const TaskDetailParamsSchema = z
+  .object({
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
+export const TaskDetailResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    projectId: z.string().regex(UUID_PATTERN),
+    ownershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    taskId: z.string().regex(UUID_PATTERN),
+    taskVersion: NonNegativeSafeIntegerSchema.min(1),
+    title: TaskTitleSchema,
+    stage: z.enum(TASK_STAGES),
+    activeRequirement: TaskRequirementSchema,
+  })
+  .strict();
+
+export const TaskRequirementReviseParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedOwnershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    previousRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    sourceText: TaskSourceTextSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.commandId === value.taskId ||
+      value.commandId === value.previousRequirementRevisionId
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "Task revision identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskRequirementReviseResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["revised", "existing"]),
+    taskId: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
 export type HarnessTaskStage = (typeof TASK_STAGES)[number];
 export type HarnessTaskSummary = Readonly<{
   taskId: string;
@@ -464,6 +556,42 @@ export type HarnessTaskCreateParams = Readonly<{
 export type HarnessTaskCreateResult = Readonly<{
   schemaVersion: 1;
   status: "created" | "existing";
+  taskId: string;
+}>;
+export type HarnessTaskRequirement = Readonly<{
+  revisionId: string;
+  revisionNumber: number;
+  sourceText: string;
+  objective: string;
+  constraints: readonly string[];
+  acceptanceCriteria: readonly string[];
+}>;
+export type HarnessTaskDetailParams = Readonly<{
+  projectId: string;
+  taskId: string;
+}>;
+export type HarnessTaskDetailResult = Readonly<{
+  schemaVersion: 1;
+  projectId: string;
+  ownershipVersion: number;
+  taskId: string;
+  taskVersion: number;
+  title: string;
+  stage: HarnessTaskStage;
+  activeRequirement: HarnessTaskRequirement;
+}>;
+export type HarnessTaskRequirementReviseParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  expectedOwnershipVersion: number;
+  previousRequirementRevisionId: string;
+  sourceText: string;
+}>;
+export type HarnessTaskRequirementReviseResult = Readonly<{
+  schemaVersion: 1;
+  status: "revised" | "existing";
   taskId: string;
 }>;
 
@@ -776,6 +904,14 @@ export const METHOD_CONTRACTS = Object.freeze({
   "task.create": Object.freeze({
     params: TaskCreateParamsSchema,
     result: TaskCreateResultSchema,
+  }),
+  "task.detail": Object.freeze({
+    params: TaskDetailParamsSchema,
+    result: TaskDetailResultSchema,
+  }),
+  "task.requirement.revise": Object.freeze({
+    params: TaskRequirementReviseParamsSchema,
+    result: TaskRequirementReviseResultSchema,
   }),
   "system.health": Object.freeze({
     params: SystemHealthParamsSchema,

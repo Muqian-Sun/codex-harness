@@ -348,6 +348,39 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       error: { code: "service.unavailable" },
     });
 
+    const taskDetailPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-detail-1", "task.detail", {
+        projectId: "00000000-0000-4000-8000-000000000941",
+        taskId: "00000000-0000-4000-8000-000000000973",
+      }),
+    );
+    await expect(taskDetailPromise).resolves.toMatchObject({
+      kind: "error",
+      id: "task-detail-1",
+      error: { code: "service.unavailable" },
+    });
+
+    const taskRevisionPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-revision-1", "task.requirement.revise", {
+        commandId: "00000000-0000-4000-8000-000000000974",
+        projectId: "00000000-0000-4000-8000-000000000941",
+        taskId: "00000000-0000-4000-8000-000000000973",
+        expectedTaskVersion: 1,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000971",
+        sourceText: "Still unavailable.",
+      }),
+    );
+    await expect(taskRevisionPromise).resolves.toMatchObject({
+      kind: "error",
+      id: "task-revision-1",
+      error: { code: "service.unavailable" },
+    });
+
     const closePromise = once(socket, "close");
     const shutdownResponsePromise = readFrame(socket);
     sendFrame(socket, rpc("shutdown-1", "system.shutdown", { reason: "user.requested" }));
@@ -661,6 +694,90 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
     await expect(retryTaskPromise).resolves.toMatchObject({
       kind: "response",
       result: { schemaVersion: 1, status: "existing", taskId },
+    });
+
+    const detailTaskPromise = readFrame(socket);
+    sendFrame(socket, rpc("task-detail", "task.detail", { projectId, taskId }));
+    await expect(detailTaskPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        schemaVersion: 1,
+        projectId,
+        ownershipVersion: 1,
+        taskId,
+        taskVersion: 1,
+        activeRequirement: {
+          revisionId: taskParams.commandId,
+          revisionNumber: 1,
+          sourceText: taskParams.sourceText,
+        },
+      },
+    });
+
+    const revisionParams = {
+      commandId: "00000000-0000-4000-8000-000000000977",
+      projectId,
+      taskId,
+      expectedTaskVersion: 1,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: taskParams.commandId,
+      sourceText: "用户澄清后的持久需求。",
+    };
+    const reviseTaskPromise = readFrame(socket);
+    sendFrame(socket, rpc("task-requirement-revise", "task.requirement.revise", revisionParams));
+    await expect(reviseTaskPromise).resolves.toMatchObject({
+      kind: "response",
+      result: { schemaVersion: 1, status: "revised", taskId },
+    });
+
+    const revisedDetailPromise = readFrame(socket);
+    sendFrame(socket, rpc("task-detail-revised", "task.detail", { projectId, taskId }));
+    await expect(revisedDetailPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        taskVersion: 2,
+        activeRequirement: {
+          revisionId: revisionParams.commandId,
+          revisionNumber: 2,
+          sourceText: revisionParams.sourceText,
+          objective: revisionParams.sourceText,
+          constraints: [],
+          acceptanceCriteria: [],
+        },
+      },
+    });
+
+    const retryRevisionPromise = readFrame(socket);
+    sendFrame(socket, rpc("task-revision-retry", "task.requirement.revise", revisionParams));
+    await expect(retryRevisionPromise).resolves.toMatchObject({
+      kind: "response",
+      result: { schemaVersion: 1, status: "existing", taskId },
+    });
+
+    const staleRevisionPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-revision-stale", "task.requirement.revise", {
+        ...revisionParams,
+        commandId: "00000000-0000-4000-8000-000000000978",
+      }),
+    );
+    await expect(staleRevisionPromise).resolves.toMatchObject({
+      kind: "error",
+      error: { code: "rpc.conflict" },
+    });
+
+    const crossProjectDetailPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-detail-cross-project", "task.detail", {
+        projectId: "00000000-0000-4000-8000-000000000942",
+        taskId,
+      }),
+    );
+    await expect(crossProjectDetailPromise).resolves.toMatchObject({
+      kind: "error",
+      error: { code: "rpc.conflict" },
     });
 
     const missingTaskCatalogPromise = readFrame(socket);

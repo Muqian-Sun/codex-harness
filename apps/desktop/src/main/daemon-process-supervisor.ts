@@ -30,6 +30,10 @@ import {
   type HarnessTaskCatalogPageResult,
   type HarnessTaskCreateParams,
   type HarnessTaskCreateResult,
+  type HarnessTaskDetailParams,
+  type HarnessTaskDetailResult,
+  type HarnessTaskRequirementReviseParams,
+  type HarnessTaskRequirementReviseResult,
   type HarnessRpcClientConfig,
 } from "./harness-rpc-client.js";
 import {
@@ -511,6 +515,16 @@ export class DaemonProcessSupervisor {
 
   async createProjectTask(params: HarnessTaskCreateParams): Promise<HarnessTaskCreateResult> {
     return await this.client.createProjectTask(params);
+  }
+
+  async readProjectTaskDetail(params: HarnessTaskDetailParams): Promise<HarnessTaskDetailResult> {
+    return await this.client.projectTaskDetail(params);
+  }
+
+  async reviseProjectTaskRequirement(
+    params: HarnessTaskRequirementReviseParams,
+  ): Promise<HarnessTaskRequirementReviseResult> {
+    return await this.client.reviseProjectTaskRequirement(params);
   }
 
   async setRoutingConfiguration(

@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { decodeDesktopProjectTaskCreation } from "../shared/bootstrap-state.js";
+import {
+  decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskRequirementRevision,
+} from "../shared/bootstrap-state.js";
 import type {
   DesktopAccountPlanType,
   DesktopAccountStatus,
@@ -14,7 +17,12 @@ import type {
   DesktopProjectTaskCatalog,
   DesktopProjectTaskCatalogResult,
   DesktopProjectTaskCreation,
+  DesktopProjectTaskDetail,
+  DesktopProjectTaskDetailResult,
   DesktopProjectTaskMutationResult,
+  DesktopProjectTaskRequirementMutationResult,
+  DesktopProjectTaskRequirementRevision,
+  DesktopProjectTaskSelection,
   DesktopTaskStage,
   DesktopRoutingAvailabilityStatus,
   DesktopRoutingConfiguration,
@@ -179,7 +187,7 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
 
       <footer className="footer-note">
         <span>
-          工作区、路由配置与 Task 初始需求可持久化；TODO /
+          工作区、路由配置与 Task 需求修订可持久化；TODO /
           DAG、实际模型选择与执行仍由后续安全门禁控制。
         </span>
         <span className="footer-rule" aria-hidden="true" />
@@ -345,6 +353,10 @@ type TaskCatalogViewState =
   | Readonly<{ status: "idle" | "loading" | "unavailable" }>
   | Readonly<{ status: "loaded"; catalog: DesktopProjectTaskCatalog }>;
 
+type TaskDetailViewState =
+  | Readonly<{ status: "idle" | "loading" | "unavailable" }>
+  | Readonly<{ status: "loaded"; detail: DesktopProjectTaskDetail }>;
+
 export function ProjectTaskPanel({
   projects,
   projectRoutingBindings,
@@ -356,10 +368,16 @@ export function ProjectTaskPanel({
     preferredTaskProjectId(projects, projectRoutingBindings),
   );
   const [catalogState, setCatalogState] = useState<TaskCatalogViewState>({ status: "idle" });
+  const [selectedTaskId, setSelectedTaskId] = useState<string>();
+  const [detailState, setDetailState] = useState<TaskDetailViewState>({ status: "idle" });
   const [title, setTitle] = useState("");
   const [sourceText, setSourceText] = useState("");
+  const [requirementSource, setRequirementSource] = useState("");
   const [mutationStatus, setMutationStatus] = useState<
     "idle" | "creating" | DesktopProjectTaskMutationResult["status"]
+  >("idle");
+  const [revisionStatus, setRevisionStatus] = useState<
+    "idle" | "revising" | DesktopProjectTaskRequirementMutationResult["status"]
   >("idle");
 
   useEffect(() => {
@@ -374,10 +392,16 @@ export function ProjectTaskPanel({
   useEffect(() => {
     if (selectedProjectId === undefined) {
       setCatalogState({ status: "idle" });
+      setSelectedTaskId(undefined);
+      setDetailState({ status: "idle" });
       return;
     }
     let active = true;
     setCatalogState({ status: "loading" });
+    setSelectedTaskId(undefined);
+    setDetailState({ status: "idle" });
+    setRequirementSource("");
+    setRevisionStatus("idle");
     void desktopTaskApi()
       .readProjectTaskCatalog(selectedProjectId)
       .then((result) => {
@@ -387,6 +411,9 @@ export function ProjectTaskPanel({
               ? { status: "loaded", catalog: result.catalog }
               : { status: "unavailable" },
           );
+          if (result.status === "loaded") {
+            setSelectedTaskId(result.catalog.tasks[0]?.taskId);
+          }
         }
       })
       .catch(() => {
@@ -398,6 +425,37 @@ export function ProjectTaskPanel({
       active = false;
     };
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId === undefined || selectedTaskId === undefined) {
+      setDetailState({ status: "idle" });
+      return;
+    }
+    let active = true;
+    setDetailState({ status: "loading" });
+    setRevisionStatus("idle");
+    void desktopTaskApi()
+      .readProjectTaskDetail({ projectId: selectedProjectId, taskId: selectedTaskId })
+      .then((result) => {
+        if (!active) {
+          return;
+        }
+        if (result.status === "loaded") {
+          setDetailState({ status: "loaded", detail: result.detail });
+          setRequirementSource(result.detail.activeRequirement.sourceText);
+        } else {
+          setDetailState({ status: "unavailable" });
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setDetailState({ status: "unavailable" });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId, selectedTaskId]);
 
   const selectedProject = projects.projects.find(
     (project) => project.projectId === selectedProjectId,
@@ -416,7 +474,24 @@ export function ProjectTaskPanel({
   const canCreate =
     creation !== undefined &&
     selectedBinding?.status === "default_bound" &&
+    mutationStatus !== "creating" &&
+    revisionStatus !== "revising";
+  const requirementRevision =
+    detailState.status !== "loaded"
+      ? undefined
+      : decodeDesktopProjectTaskRequirementRevision({
+          projectId: detailState.detail.projectId,
+          taskId: detailState.detail.taskId,
+          expectedTaskVersion: detailState.detail.taskVersion,
+          sourceText: requirementSource,
+        });
+  const canRevise =
+    requirementRevision !== undefined &&
+    detailState.status === "loaded" &&
+    requirementSource !== detailState.detail.activeRequirement.sourceText &&
+    revisionStatus !== "revising" &&
     mutationStatus !== "creating";
+  const taskMutationPending = mutationStatus === "creating" || revisionStatus === "revising";
 
   const createTask = async (): Promise<void> => {
     if (!canCreate || creation === undefined) {
@@ -427,12 +502,31 @@ export function ProjectTaskPanel({
       const result = await desktopTaskApi().createProjectTask(creation);
       if (result.status === "created" || result.status === "existing") {
         setCatalogState({ status: "loaded", catalog: result.catalog });
+        setSelectedTaskId(result.taskId);
         setTitle("");
         setSourceText("");
       }
       setMutationStatus(result.status);
     } catch {
       setMutationStatus("unavailable");
+    }
+  };
+
+  const reviseRequirement = async (): Promise<void> => {
+    if (!canRevise || requirementRevision === undefined) {
+      return;
+    }
+    setRevisionStatus("revising");
+    try {
+      const result = await desktopTaskApi().reviseProjectTaskRequirement(requirementRevision);
+      if (result.status === "revised" || result.status === "existing") {
+        setCatalogState({ status: "loaded", catalog: result.catalog });
+        setDetailState({ status: "loaded", detail: result.detail });
+        setRequirementSource(result.detail.activeRequirement.sourceText);
+      }
+      setRevisionStatus(result.status);
+    } catch {
+      setRevisionStatus("unavailable");
     }
   };
 
@@ -456,10 +550,11 @@ export function ProjectTaskPanel({
           <select
             data-task-project-select
             value={selectedProjectId ?? ""}
-            disabled={projects.projects.length === 0 || mutationStatus === "creating"}
+            disabled={projects.projects.length === 0 || taskMutationPending}
             onChange={(event) => {
               setSelectedProjectId(readInputValue(event.currentTarget) || undefined);
               setMutationStatus("idle");
+              setRevisionStatus("idle");
             }}
           >
             {projects.projects.length === 0 ? <option value="">尚无 Project</option> : null}
@@ -480,7 +575,7 @@ export function ProjectTaskPanel({
               data-task-title
               value={title}
               maxLength={256}
-              disabled={selectedProject === undefined || mutationStatus === "creating"}
+              disabled={selectedProject === undefined || taskMutationPending}
               onChange={(event) => setTitle(readInputValue(event.currentTarget))}
               placeholder="例如：设计并实现持久计划恢复"
             />
@@ -491,7 +586,7 @@ export function ProjectTaskPanel({
               data-task-source
               value={sourceText}
               maxLength={16 * 1_024}
-              disabled={selectedProject === undefined || mutationStatus === "creating"}
+              disabled={selectedProject === undefined || taskMutationPending}
               onChange={(event) => setSourceText(readInputValue(event.currentTarget))}
               placeholder="描述目标、约束和验收预期；Harness 会原样持久化。"
             />
@@ -520,15 +615,27 @@ export function ProjectTaskPanel({
           {tasks.length > 0 ? (
             <ol>
               {tasks.map((task, index) => (
-                <li key={task.taskId} data-task-id={task.taskId} data-task-stage={task.stage}>
-                  <span>{String(index + 1).padStart(2, "0")}</span>
-                  <div>
-                    <strong>{task.title}</strong>
-                    <p>{task.objective}</p>
-                  </div>
-                  <small>
-                    V{task.taskVersion} · {taskStageLabels[task.stage]}
-                  </small>
+                <li
+                  key={task.taskId}
+                  data-task-id={task.taskId}
+                  data-task-stage={task.stage}
+                  data-task-selected={String(task.taskId === selectedTaskId)}
+                >
+                  <button
+                    type="button"
+                    data-task-open
+                    disabled={taskMutationPending}
+                    onClick={() => setSelectedTaskId(task.taskId)}
+                  >
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <div>
+                      <strong>{task.title}</strong>
+                      <p>{task.objective}</p>
+                    </div>
+                    <small>
+                      V{task.taskVersion} · {taskStageLabels[task.stage]}
+                    </small>
+                  </button>
                 </li>
               ))}
             </ol>
@@ -537,8 +644,92 @@ export function ProjectTaskPanel({
             <small>另有 Task 未在首屏展开</small>
           ) : null}
         </div>
+
+        <div
+          className="task-detail"
+          data-task-detail-status={detailState.status}
+          data-task-revision-status={revisionStatus}
+          data-task-version={detailState.status === "loaded" ? detailState.detail.taskVersion : 0}
+          data-task-requirement-revision={
+            detailState.status === "loaded"
+              ? detailState.detail.activeRequirement.revisionNumber
+              : 0
+          }
+        >
+          {detailState.status === "idle" ? <p>选择一个 Task 查看当前 Requirement。</p> : null}
+          {detailState.status === "loading" ? <p>正在读取当前 Requirement…</p> : null}
+          {detailState.status === "unavailable" ? (
+            <p>当前无法确认 Task 详情；不会把未知状态当作空需求。</p>
+          ) : null}
+          {detailState.status === "loaded" ? (
+            <>
+              <header>
+                <span>REQUIREMENT R{detailState.detail.activeRequirement.revisionNumber}</span>
+                <strong>{detailState.detail.title}</strong>
+                <small>
+                  Task V{detailState.detail.taskVersion} ·{" "}
+                  {taskStageLabels[detailState.detail.stage]}
+                </small>
+              </header>
+              <label>
+                <span>需求原文修订</span>
+                <textarea
+                  data-task-revision-source
+                  value={requirementSource}
+                  maxLength={16 * 1_024}
+                  disabled={taskMutationPending}
+                  onChange={(event) => {
+                    setRequirementSource(readInputValue(event.currentTarget));
+                    if (revisionStatus !== "revising") {
+                      setRevisionStatus("idle");
+                    }
+                  }}
+                />
+              </label>
+              {detailState.detail.activeRequirement.constraints.length > 0 ? (
+                <RequirementItems
+                  title="当前约束"
+                  items={detailState.detail.activeRequirement.constraints}
+                />
+              ) : null}
+              {detailState.detail.activeRequirement.acceptanceCriteria.length > 0 ? (
+                <RequirementItems
+                  title="当前验收条件"
+                  items={detailState.detail.activeRequirement.acceptanceCriteria}
+                />
+              ) : null}
+              <button
+                type="button"
+                data-task-revise
+                disabled={!canRevise}
+                onClick={() => void reviseRequirement()}
+              >
+                {revisionStatus === "revising" ? "正在提交新修订" : "保存 Requirement Revision"}
+              </button>
+              <span data-task-revision-feedback aria-live="polite">
+                {taskRequirementFeedback(revisionStatus)}
+              </span>
+            </>
+          ) : null}
+        </div>
       </div>
     </section>
+  );
+}
+
+export function RequirementItems({
+  title,
+  items,
+}: Readonly<{ title: string; items: readonly string[] }>) {
+  return (
+    <div className="task-requirement-items">
+      <span>{title}</span>
+      <ul>
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -574,6 +765,25 @@ function taskMutationFeedback(
       return "Project 尚未绑定默认路由。";
     case "unavailable":
       return "结果当前未知；请先重启核对目录，不要盲目重复创建。";
+  }
+}
+
+export function taskRequirementFeedback(
+  status: "idle" | "revising" | DesktopProjectTaskRequirementMutationResult["status"],
+): string {
+  switch (status) {
+    case "idle":
+      return "保存会创建新修订；旧 Requirement 保留在历史中，计划与执行不会自动开始。";
+    case "revising":
+      return "正在校验 Task 与 Project 归属并提交新 Requirement Revision。";
+    case "revised":
+      return "新 Requirement Revision 已持久化；旧候选计划或 DAG 不会继续作为当前状态。";
+    case "existing":
+      return "相同修订命令已经提交，已重新读取当前权威详情。";
+    case "conflict":
+      return "Task 已发生变化；草稿仍保留，请重新打开详情后核对再提交。";
+    case "unavailable":
+      return "结果当前未知；请重启并核对 Requirement 修订号，不要盲目重复提交。";
   }
 }
 
@@ -885,6 +1095,12 @@ function desktopTaskApi(): Readonly<{
   createProjectTask(
     creation: DesktopProjectTaskCreation,
   ): Promise<DesktopProjectTaskMutationResult>;
+  readProjectTaskDetail(
+    selection: DesktopProjectTaskSelection,
+  ): Promise<DesktopProjectTaskDetailResult>;
+  reviseProjectTaskRequirement(
+    revision: DesktopProjectTaskRequirementRevision,
+  ): Promise<DesktopProjectTaskRequirementMutationResult>;
 }> {
   return (
     globalThis as unknown as {
@@ -893,6 +1109,12 @@ function desktopTaskApi(): Readonly<{
         createProjectTask(
           creation: DesktopProjectTaskCreation,
         ): Promise<DesktopProjectTaskMutationResult>;
+        readProjectTaskDetail(
+          selection: DesktopProjectTaskSelection,
+        ): Promise<DesktopProjectTaskDetailResult>;
+        reviseProjectTaskRequirement(
+          revision: DesktopProjectTaskRequirementRevision,
+        ): Promise<DesktopProjectTaskRequirementMutationResult>;
       }>;
     }
   ).codexHarness;

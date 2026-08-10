@@ -5,6 +5,10 @@ import {
   type HarnessTaskCatalogPageResult,
   type HarnessTaskCreateParams,
   type HarnessTaskCreateResult,
+  type HarnessTaskDetailParams,
+  type HarnessTaskDetailResult,
+  type HarnessTaskRequirementReviseParams,
+  type HarnessTaskRequirementReviseResult,
   type HarnessTaskStage,
   type HarnessTaskSummary,
 } from "@codex-harness/protocol";
@@ -171,6 +175,94 @@ export class ProjectTaskService {
     }
   }
 
+  detail(input: unknown): HarnessTaskDetailResult {
+    const decoded = decodeRequestParams("task.detail", input);
+    if (!decoded.ok) {
+      throw new ProjectTaskServiceError("conflict");
+    }
+    const params = decoded.value as HarnessTaskDetailParams;
+
+    try {
+      this.#assertAvailable();
+      this.#projects.readProject(params.projectId);
+      const ownership = this.#ownerships.readOwnership(params.taskId);
+      if (ownership.projectId !== params.projectId) {
+        throw new ProjectTaskServiceError("conflict");
+      }
+      return validateDetailResult(
+        taskDetail(
+          this.#tasks.readTask(params.taskId),
+          ownership.projectId,
+          ownership.ownershipVersion,
+        ),
+        params,
+      );
+    } catch (error: unknown) {
+      throw mapServiceError(error);
+    }
+  }
+
+  reviseRequirement(input: unknown): HarnessTaskRequirementReviseResult {
+    const decoded = decodeRequestParams("task.requirement.revise", input);
+    if (!decoded.ok) {
+      throw new ProjectTaskServiceError("conflict");
+    }
+    const params = decoded.value as HarnessTaskRequirementReviseParams;
+
+    try {
+      this.#assertAvailable();
+      const existing = this.#stateStore.events.readByEventId(params.commandId);
+      const occurredAtMs =
+        existing === undefined ? requireTimestamp(this.#dependencies.now()) : existing.occurredAtMs;
+      if (existing === undefined) {
+        const project = this.#projects.readProject(params.projectId);
+        const ownership = this.#ownerships.readOwnership(params.taskId);
+        const task = this.#tasks.readTask(params.taskId);
+        if (
+          ownership.projectId !== params.projectId ||
+          ownership.ownershipVersion !== params.expectedOwnershipVersion ||
+          task.taskVersion !== params.expectedTaskVersion ||
+          task.activeRequirement.revisionId !== params.previousRequirementRevisionId
+        ) {
+          throw new ProjectTaskServiceError("conflict");
+        }
+        if (
+          occurredAtMs < project.updatedAtMs ||
+          occurredAtMs < ownership.updatedAtMs ||
+          occurredAtMs < task.updatedAtMs
+        ) {
+          throw new ProjectTaskServiceError("conflict");
+        }
+      }
+
+      const revised = this.#tasks.reviseRequirements({
+        eventId: params.commandId,
+        taskId: params.taskId,
+        occurredAtMs,
+        expectedTaskVersion: params.expectedTaskVersion,
+        previousRequirementRevisionId: params.previousRequirementRevisionId,
+        requirement: {
+          revisionId: params.commandId,
+          sourceText: params.sourceText,
+          objective: params.sourceText,
+          constraints: [],
+          acceptanceCriteria: [],
+        },
+        metadata: {
+          actor: "desktop.project_task.requirement",
+          correlationId: params.projectId,
+        },
+      });
+      return validateRequirementRevisionResult({
+        schemaVersion: 1,
+        status: revised.duplicate ? "existing" : "revised",
+        taskId: params.taskId,
+      });
+    } catch (error: unknown) {
+      throw mapServiceError(error);
+    }
+  }
+
   #assertAvailable(): void {
     if (this.#stateStore.state !== "ready") {
       throw new ProjectTaskServiceError("unavailable");
@@ -186,6 +278,27 @@ function taskSummary(task: TaskPlanRecord, projectId: string): HarnessTaskSummar
     title: task.title,
     objective: task.activeRequirement.objective,
     stage: taskStage(task),
+  });
+}
+
+function taskDetail(
+  task: TaskPlanRecord,
+  projectId: string,
+  ownershipVersion: number,
+): HarnessTaskDetailResult {
+  return Object.freeze({
+    schemaVersion: 1,
+    projectId,
+    ownershipVersion,
+    taskId: task.taskId,
+    taskVersion: task.taskVersion,
+    title: task.title,
+    stage: taskStage(task),
+    activeRequirement: Object.freeze({
+      ...task.activeRequirement,
+      constraints: Object.freeze([...task.activeRequirement.constraints]),
+      acceptanceCriteria: Object.freeze([...task.activeRequirement.acceptanceCriteria]),
+    }),
   });
 }
 
@@ -246,6 +359,36 @@ function validateCreateResult(input: unknown): HarnessTaskCreateResult {
     throw new ProjectTaskServiceError("unavailable");
   }
   return Object.freeze(decoded.value as unknown as HarnessTaskCreateResult);
+}
+
+function validateDetailResult(
+  input: unknown,
+  expected: HarnessTaskDetailParams,
+): HarnessTaskDetailResult {
+  const decoded = decodeResponseResult("task.detail", input);
+  if (!decoded.ok) {
+    throw new ProjectTaskServiceError("unavailable");
+  }
+  const result = decoded.value as unknown as HarnessTaskDetailResult;
+  if (result.projectId !== expected.projectId || result.taskId !== expected.taskId) {
+    throw new ProjectTaskServiceError("unavailable");
+  }
+  return Object.freeze({
+    ...result,
+    activeRequirement: Object.freeze({
+      ...result.activeRequirement,
+      constraints: Object.freeze([...result.activeRequirement.constraints]),
+      acceptanceCriteria: Object.freeze([...result.activeRequirement.acceptanceCriteria]),
+    }),
+  });
+}
+
+function validateRequirementRevisionResult(input: unknown): HarnessTaskRequirementReviseResult {
+  const decoded = decodeResponseResult("task.requirement.revise", input);
+  if (!decoded.ok) {
+    throw new ProjectTaskServiceError("unavailable");
+  }
+  return Object.freeze(decoded.value as unknown as HarnessTaskRequirementReviseResult);
 }
 
 function requireTimestamp(input: number): number {

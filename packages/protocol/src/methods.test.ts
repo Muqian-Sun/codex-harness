@@ -608,6 +608,98 @@ describe("method contracts", () => {
     ).toBe(false);
   });
 
+  it("strictly validates Project Task detail and Requirement revision", () => {
+    const commandId = "00000000-0000-4000-8000-000000000931";
+    const projectId = "00000000-0000-4000-8000-000000000932";
+    const taskId = "00000000-0000-4000-8000-000000000933";
+    const previousRequirementRevisionId = "00000000-0000-4000-8000-000000000934";
+    const detailParams = { projectId, taskId } as const;
+    const requirement = {
+      revisionId: previousRequirementRevisionId,
+      revisionNumber: 2,
+      sourceText: "保留新需求原文。",
+      objective: "保留新需求原文。",
+      constraints: ["不自动执行。"],
+      acceptanceCriteria: ["重启后恢复。"],
+    } as const;
+    const detail = {
+      schemaVersion: 1,
+      projectId,
+      ownershipVersion: 1,
+      taskId,
+      taskVersion: 2,
+      title: "可修订 Task",
+      stage: "requirements_only",
+      activeRequirement: requirement,
+    } as const;
+    const revise = {
+      commandId,
+      projectId,
+      taskId,
+      expectedTaskVersion: 2,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId,
+      sourceText: "用户澄清后的需求。",
+    } as const;
+
+    expect(decodeRequestParams("task.detail", detailParams).ok).toBe(true);
+    expect(decodeResponseResult("task.detail", detail).ok).toBe(true);
+    expect(decodeRequestParams("task.requirement.revise", revise).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.requirement.revise", {
+        schemaVersion: 1,
+        status: "revised",
+        taskId,
+      }).ok,
+    ).toBe(true);
+
+    for (const invalid of [
+      { ...detailParams, extra: true },
+      { projectId, taskId: "bad" },
+    ]) {
+      expect(decodeRequestParams("task.detail", invalid).ok).toBe(false);
+    }
+    for (const invalid of [
+      { ...detail, ownershipVersion: 0 },
+      { ...detail, activeRequirement: { ...requirement, revisionNumber: 0 } },
+      { ...detail, activeRequirement: { ...requirement, constraints: [" "] } },
+      {
+        ...detail,
+        activeRequirement: {
+          ...requirement,
+          acceptanceCriteria: Array.from({ length: 101 }, () => "item"),
+        },
+      },
+      {
+        ...detail,
+        activeRequirement: {
+          ...requirement,
+          constraints: ["x".repeat(4_000)],
+          acceptanceCriteria: Array.from({ length: 65 }, () => "x".repeat(4_000)),
+        },
+      },
+      { ...detail, extra: true },
+    ]) {
+      expect(decodeResponseResult("task.detail", invalid).ok).toBe(false);
+    }
+    for (const invalid of [
+      { ...revise, commandId: taskId },
+      { ...revise, commandId: previousRequirementRevisionId },
+      { ...revise, expectedTaskVersion: 0 },
+      { ...revise, expectedOwnershipVersion: 0 },
+      { ...revise, sourceText: " " },
+      { ...revise, extra: true },
+    ]) {
+      expect(decodeRequestParams("task.requirement.revise", invalid).ok).toBe(false);
+    }
+    for (const invalid of [
+      { schemaVersion: 1, status: "created", taskId },
+      { schemaVersion: 1, status: "revised", taskId: projectId, extra: true },
+    ]) {
+      expect(decodeResponseResult("task.requirement.revise", invalid).ok).toBe(false);
+    }
+  });
+
   it("rejects unknown methods and method-specific mismatches", () => {
     expect(decodeRequestParams("unknown.method", {}).ok).toBe(false);
     expect(decodeResponseResult("system.health", { status: "bad" }).ok).toBe(false);

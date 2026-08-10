@@ -4,7 +4,7 @@ const PROJECT_ID = "00000000-0000-4000-8000-000000000891";
 const hooks = vi.hoisted(() => ({
   cursor: 0,
   effects: [] as Array<() => void | (() => void)>,
-  setters: [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()],
+  setters: [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()],
   values: [] as unknown[],
 }));
 
@@ -25,7 +25,7 @@ vi.mock("react", () => ({
   },
 }));
 
-import { ProjectRegistryPanel, ProjectTaskPanel } from "./bootstrap-screen.js";
+import { ProjectRegistryPanel, ProjectTaskPanel, RequirementItems } from "./bootstrap-screen.js";
 
 const PROJECTS = {
   projects: [
@@ -95,7 +95,13 @@ function findTaskCreateButton(root: unknown): Readonly<{ props: Record<string, u
 
 function findTaskControl(
   root: unknown,
-  attribute: "data-task-project-select" | "data-task-source" | "data-task-title",
+  attribute:
+    | "data-task-open"
+    | "data-task-project-select"
+    | "data-task-revise"
+    | "data-task-revision-source"
+    | "data-task-source"
+    | "data-task-title",
 ): Readonly<{ props: Record<string, unknown> }> {
   const queue = [root];
   while (queue.length > 0) {
@@ -124,9 +130,13 @@ function renderTaskPanel(mutationStatus: unknown = "idle") {
       status: "loaded",
       catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
     },
+    undefined,
+    { status: "idle" },
     "Task title",
     "Persist this requirement.",
+    "",
     mutationStatus,
+    "idle",
   ];
   return ProjectTaskPanel({
     projects: PROJECTS,
@@ -223,11 +233,12 @@ describe("Project Task interaction", () => {
       title: "Task title",
       sourceText: "Persist this requirement.",
     });
-    expect(hooks.setters[4]).toHaveBeenNthCalledWith(1, "creating");
+    expect(hooks.setters[7]).toHaveBeenNthCalledWith(1, "creating");
     expect(hooks.setters[1]).toHaveBeenCalledWith({ status: "loaded", catalog });
-    expect(hooks.setters[2]).toHaveBeenCalledWith("");
-    expect(hooks.setters[3]).toHaveBeenCalledWith("");
-    expect(hooks.setters[4]).toHaveBeenLastCalledWith("created");
+    expect(hooks.setters[2]).toHaveBeenCalledWith(catalog.tasks[0]!.taskId);
+    expect(hooks.setters[4]).toHaveBeenCalledWith("");
+    expect(hooks.setters[5]).toHaveBeenCalledWith("");
+    expect(hooks.setters[7]).toHaveBeenLastCalledWith("created");
 
     const pending = findTaskCreateButton(renderTaskPanel("creating"));
     expect(pending.props.disabled).toBe(true);
@@ -239,8 +250,12 @@ describe("Project Task interaction", () => {
     hooks.values = [
       PROJECT_ID,
       { status: "loaded", catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false } },
+      undefined,
+      { status: "idle" },
       "中".repeat(100),
       "Persist this requirement.",
+      "",
+      "idle",
       "idle",
     ];
     const oversized = ProjectTaskPanel({
@@ -289,15 +304,27 @@ describe("Project Task interaction", () => {
 
     hooks.cursor = 0;
     hooks.effects = [];
-    hooks.values = [undefined, { status: "idle" }, "", "", "idle"];
+    hooks.values = [
+      undefined,
+      { status: "idle" },
+      undefined,
+      { status: "idle" },
+      "",
+      "",
+      "",
+      "idle",
+      "idle",
+    ];
     ProjectTaskPanel({
       projects: { projects: [], hasMore: false },
       projectRoutingBindings: { bindings: [] },
     });
     hooks.effects[0]!();
     hooks.effects[1]!();
+    hooks.effects[2]!();
     expect(hooks.setters[0]).toHaveBeenCalledWith(undefined);
     expect(hooks.setters[1]).toHaveBeenLastCalledWith({ status: "idle" });
+    expect(hooks.setters[3]).toHaveBeenLastCalledWith({ status: "idle" });
   });
 
   it("contains creation outcomes and exercises the bounded form controls", async () => {
@@ -322,19 +349,19 @@ describe("Project Task interaction", () => {
       currentTarget: { value: "Updated source" },
     });
     expect(hooks.setters[0]).toHaveBeenCalledWith(PROJECT_ID);
-    expect(hooks.setters[2]).toHaveBeenCalledWith("Updated title");
-    expect(hooks.setters[3]).toHaveBeenCalledWith("Updated source");
+    expect(hooks.setters[4]).toHaveBeenCalledWith("Updated title");
+    expect(hooks.setters[5]).toHaveBeenCalledWith("Updated source");
     const button = findTaskCreateButton(conflict);
     (button.props.onClick as () => void)();
     await Promise.resolve();
     await Promise.resolve();
-    expect(hooks.setters[4]).toHaveBeenLastCalledWith("conflict");
+    expect(hooks.setters[7]).toHaveBeenLastCalledWith("conflict");
 
     const failure = renderTaskPanel("unavailable");
     (findTaskCreateButton(failure).props.onClick as () => void)();
     await Promise.resolve();
     await Promise.resolve();
-    expect(hooks.setters[4]).toHaveBeenLastCalledWith("unavailable");
+    expect(hooks.setters[7]).toHaveBeenLastCalledWith("unavailable");
 
     for (const status of ["existing", "routing_unbound"] as const) {
       renderTaskPanel(status);
@@ -361,8 +388,12 @@ describe("Project Task interaction", () => {
           hasMore: true,
         },
       },
+      "00000000-0000-4000-8000-000000000892",
+      { status: "idle" },
       "",
       "",
+      "",
+      "idle",
       "idle",
     ];
     ProjectTaskPanel({
@@ -371,5 +402,219 @@ describe("Project Task interaction", () => {
         bindings: [{ projectId: PROJECT_ID, status: "unbound", bindingVersion: null }],
       },
     });
+  });
+
+  it("loads Task detail and preserves explicit Requirement revision outcomes", async () => {
+    const taskId = "00000000-0000-4000-8000-000000000896";
+    const detail = {
+      projectId: PROJECT_ID,
+      taskId,
+      taskVersion: 1,
+      title: "Revisable Task",
+      stage: "requirements_only" as const,
+      activeRequirement: {
+        revisionNumber: 1,
+        sourceText: "Initial requirement.",
+        objective: "Initial requirement.",
+        constraints: ["Do not execute."],
+        acceptanceCriteria: ["Persist the revision."],
+      },
+    };
+    const revisedDetail = {
+      ...detail,
+      taskVersion: 2,
+      activeRequirement: {
+        ...detail.activeRequirement,
+        revisionNumber: 2,
+        sourceText: "Revised requirement.",
+        objective: "Revised requirement.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+    };
+    const catalog = {
+      projectId: PROJECT_ID,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT_ID,
+          taskVersion: 2,
+          title: detail.title,
+          objective: revisedDetail.activeRequirement.objective,
+          stage: "requirements_only" as const,
+        },
+      ],
+      hasMore: false,
+    };
+    const readProjectTaskDetail = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "loaded", detail })
+      .mockResolvedValueOnce({ status: "unavailable" })
+      .mockRejectedValueOnce(new Error("contained"));
+    const reviseProjectTaskRequirement = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: "revised",
+        taskId,
+        detail: revisedDetail,
+        catalog,
+      })
+      .mockResolvedValueOnce({ status: "conflict" })
+      .mockRejectedValueOnce(new Error("contained"));
+    Object.assign(globalThis, {
+      codexHarness: {
+        createProjectTask: vi.fn(),
+        readProjectTaskCatalog: vi.fn(),
+        readProjectTaskDetail,
+        reviseProjectTaskRequirement,
+      },
+    });
+
+    const values = (detailState: unknown, requirementSource: string, revisionStatus = "idle") => [
+      PROJECT_ID,
+      {
+        status: "loaded",
+        catalog: {
+          projectId: PROJECT_ID,
+          tasks: [
+            {
+              taskId,
+              projectId: PROJECT_ID,
+              taskVersion: 1,
+              title: detail.title,
+              objective: detail.activeRequirement.objective,
+              stage: "requirements_only",
+            },
+          ],
+          hasMore: false,
+        },
+      },
+      taskId,
+      detailState,
+      "",
+      "",
+      requirementSource,
+      "idle",
+      revisionStatus,
+    ];
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loading" }, "");
+    ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    const detailCleanup = hooks.effects[2]!();
+    await Promise.resolve();
+    expect(readProjectTaskDetail).toHaveBeenCalledWith({ projectId: PROJECT_ID, taskId });
+    expect(hooks.setters[3]).toHaveBeenNthCalledWith(1, { status: "loading" });
+    expect(hooks.setters[3]).toHaveBeenLastCalledWith({ status: "loaded", detail });
+    expect(hooks.setters[6]).toHaveBeenCalledWith("Initial requirement.");
+    detailCleanup?.();
+
+    for (const expectedCalls of [2, 3]) {
+      hooks.cursor = 0;
+      hooks.effects = [];
+      hooks.values = values({ status: "loading" }, "");
+      ProjectTaskPanel({
+        projects: PROJECTS,
+        projectRoutingBindings: {
+          bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+        },
+      });
+      hooks.effects[2]!();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(readProjectTaskDetail).toHaveBeenCalledTimes(expectedCalls);
+      expect(hooks.setters[3]).toHaveBeenLastCalledWith({ status: "unavailable" });
+    }
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loaded", detail }, "Revised requirement.");
+    const panel = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    (findTaskControl(panel, "data-task-open").props.onClick as () => void)();
+    expect(hooks.setters[2]).toHaveBeenCalledWith(taskId);
+    (
+      findTaskControl(panel, "data-task-revision-source").props.onChange as (event: unknown) => void
+    )({ currentTarget: { value: "Draft update." } });
+    expect(hooks.setters[6]).toHaveBeenCalledWith("Draft update.");
+    const revise = findTaskControl(panel, "data-task-revise");
+    expect(revise.props.disabled).toBe(false);
+    (revise.props.onClick as () => void)();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reviseProjectTaskRequirement).toHaveBeenCalledWith({
+      projectId: PROJECT_ID,
+      taskId,
+      expectedTaskVersion: 1,
+      sourceText: "Revised requirement.",
+    });
+    expect(hooks.setters[8]).toHaveBeenCalledWith("revising");
+    expect(hooks.setters[1]).toHaveBeenCalledWith({ status: "loaded", catalog });
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: revisedDetail });
+    expect(hooks.setters[6]).toHaveBeenCalledWith("Revised requirement.");
+    expect(hooks.setters[8]).toHaveBeenLastCalledWith("revised");
+
+    for (const expected of ["conflict", "unavailable"] as const) {
+      hooks.cursor = 0;
+      hooks.effects = [];
+      hooks.values = values({ status: "loaded", detail }, "Revised requirement.", expected);
+      const next = ProjectTaskPanel({
+        projects: PROJECTS,
+        projectRoutingBindings: {
+          bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+        },
+      });
+      (findTaskControl(next, "data-task-revise").props.onClick as () => void)();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(hooks.setters[8]).toHaveBeenLastCalledWith("unavailable");
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loaded", detail }, "Initial requirement.", "revising");
+    const disabled = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    expect(findTaskControl(disabled, "data-task-revise").props.disabled).toBe(true);
+    expect(findTaskControl(disabled, "data-task-project-select").props.disabled).toBe(true);
+    expect(findTaskControl(disabled, "data-task-open").props.disabled).toBe(true);
+    expect(findTaskControl(disabled, "data-task-title").props.disabled).toBe(true);
+    expect(findTaskControl(disabled, "data-task-source").props.disabled).toBe(true);
+    expect(findTaskControl(disabled, "data-task-revision-source").props.disabled).toBe(true);
+    expect(findTaskCreateButton(disabled).props.disabled).toBe(true);
+    (findTaskControl(disabled, "data-task-revise").props.onClick as () => void)();
+    expect(reviseProjectTaskRequirement).toHaveBeenCalledTimes(3);
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loaded", detail }, "Revised requirement.");
+    hooks.values[7] = "creating";
+    const creating = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    expect(findTaskControl(creating, "data-task-revise").props.disabled).toBe(true);
+    expect(findTaskControl(creating, "data-task-project-select").props.disabled).toBe(true);
+    expect(findTaskControl(creating, "data-task-open").props.disabled).toBe(true);
+    expect(findTaskControl(creating, "data-task-revision-source").props.disabled).toBe(true);
+
+    const items = RequirementItems({ title: "Constraints", items: ["One", "Two"] });
+    expect(items.props.children).toBeDefined();
   });
 });

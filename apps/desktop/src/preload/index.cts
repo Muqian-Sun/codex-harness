@@ -7,6 +7,8 @@ const CHOOSE_PROJECT_WORKSPACE_CHANNEL = "desktop.project.choose";
 const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_default";
 const READ_PROJECT_TASK_CATALOG_CHANNEL = "desktop.task.catalog_page";
 const CREATE_PROJECT_TASK_CHANNEL = "desktop.task.create";
+const READ_PROJECT_TASK_DETAIL_CHANNEL = "desktop.task.detail";
+const REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL = "desktop.task.requirement.revise";
 const FAILURE_CODES = new Set([
   "unsupported_platform",
   "resource_configuration_missing",
@@ -57,6 +59,9 @@ const MAX_PROJECT_PATH_BYTES = 4_096;
 const MAX_TASK_CATALOG_PAGE_SIZE = 12;
 const MAX_TASK_TITLE_BYTES = 256;
 const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
+const MAX_TASK_REQUIREMENT_ITEM_BYTES = 4 * 1_024;
+const MAX_TASK_REQUIREMENT_ITEMS = 100;
+const MAX_TASK_REQUIREMENT_TOTAL_BYTES = 256 * 1_024;
 
 type PreloadAccountStatus = Readonly<{
   status: "authenticated" | "authentication_required" | "not_required";
@@ -171,6 +176,39 @@ type PreloadProjectTaskMutationResult =
       catalog: PreloadProjectTaskCatalog;
     }>
   | Readonly<{ status: "conflict" | "routing_unbound" | "unavailable" }>;
+type PreloadProjectTaskRequirement = Readonly<{
+  revisionNumber: number;
+  sourceText: string;
+  objective: string;
+  constraints: readonly string[];
+  acceptanceCriteria: readonly string[];
+}>;
+type PreloadProjectTaskDetail = Readonly<{
+  projectId: string;
+  taskId: string;
+  taskVersion: number;
+  title: string;
+  stage: PreloadProjectTaskSummary["stage"];
+  activeRequirement: PreloadProjectTaskRequirement;
+}>;
+type PreloadProjectTaskSelection = Readonly<{ projectId: string; taskId: string }>;
+type PreloadProjectTaskDetailResult =
+  | Readonly<{ status: "loaded"; detail: PreloadProjectTaskDetail }>
+  | Readonly<{ status: "unavailable" }>;
+type PreloadProjectTaskRequirementRevision = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  sourceText: string;
+}>;
+type PreloadProjectTaskRequirementMutationResult =
+  | Readonly<{
+      status: "revised" | "existing";
+      taskId: string;
+      detail: PreloadProjectTaskDetail;
+      catalog: PreloadProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
 
 type PreloadBootstrapState =
   | Readonly<{ phase: "starting" | "stopping" }>
@@ -433,6 +471,144 @@ function decodeProjectTaskMutationResult(
     throw new Error("The desktop Project Task creation result is invalid.");
   }
   return Object.freeze({ status: record.status, taskId: record.taskId, catalog });
+}
+
+function decodeProjectTaskSelection(input: unknown): PreloadProjectTaskSelection | undefined {
+  const record = exactRecord(input, ["projectId", "taskId"]);
+  return isUuid(record?.projectId) && isUuid(record.taskId)
+    ? Object.freeze({ projectId: record.projectId, taskId: record.taskId })
+    : undefined;
+}
+
+function decodeProjectTaskDetailResult(
+  input: unknown,
+  expected: PreloadProjectTaskSelection,
+): PreloadProjectTaskDetailResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "unavailable") {
+    return Object.freeze({ status: "unavailable" });
+  }
+  const record = exactRecord(input, ["detail", "status"]);
+  const detail = decodeProjectTaskDetail(record?.detail);
+  if (
+    record?.status !== "loaded" ||
+    detail === undefined ||
+    detail.projectId !== expected.projectId ||
+    detail.taskId !== expected.taskId
+  ) {
+    throw new Error("The desktop Project Task detail result is invalid.");
+  }
+  return Object.freeze({ status: "loaded", detail });
+}
+
+function decodeProjectTaskRequirementRevision(
+  input: unknown,
+): PreloadProjectTaskRequirementRevision | undefined {
+  const record = exactRecord(input, ["expectedTaskVersion", "projectId", "sourceText", "taskId"]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !validTaskSourceText(record.sourceText)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    sourceText: record.sourceText,
+  });
+}
+
+function decodeProjectTaskRequirementMutationResult(
+  input: unknown,
+  expected: PreloadProjectTaskSelection,
+): PreloadProjectTaskRequirementMutationResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  const detail = decodeProjectTaskDetail(record?.detail);
+  const catalog = decodeProjectTaskCatalog(record?.catalog);
+  if (
+    record === undefined ||
+    (record.status !== "revised" && record.status !== "existing") ||
+    record.taskId !== expected.taskId ||
+    detail?.projectId !== expected.projectId ||
+    detail.taskId !== expected.taskId ||
+    catalog?.projectId !== expected.projectId
+  ) {
+    throw new Error("The desktop Project Task Requirement result is invalid.");
+  }
+  return Object.freeze({ status: record.status, taskId: expected.taskId, detail, catalog });
+}
+
+function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | undefined {
+  const record = exactRecord(input, [
+    "activeRequirement",
+    "projectId",
+    "stage",
+    "taskId",
+    "taskVersion",
+    "title",
+  ]);
+  const requirement = decodeProjectTaskRequirement(record?.activeRequirement);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.taskVersion) ||
+    !validTaskTitle(record.title) ||
+    typeof record.stage !== "string" ||
+    !TASK_STAGES.has(record.stage) ||
+    requirement === undefined
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    taskVersion: record.taskVersion,
+    title: record.title,
+    stage: record.stage as PreloadProjectTaskSummary["stage"],
+    activeRequirement: requirement,
+  });
+}
+
+function decodeProjectTaskRequirement(input: unknown): PreloadProjectTaskRequirement | undefined {
+  const record = exactRecord(input, [
+    "acceptanceCriteria",
+    "constraints",
+    "objective",
+    "revisionNumber",
+    "sourceText",
+  ]);
+  if (
+    record === undefined ||
+    !isPositiveSafeInteger(record.revisionNumber) ||
+    !validTaskSourceText(record.sourceText) ||
+    !validTaskSourceText(record.objective) ||
+    !validTaskRequirementItems(record.constraints) ||
+    !validTaskRequirementItems(record.acceptanceCriteria) ||
+    utf8ByteLength(
+      [
+        record.sourceText,
+        record.objective,
+        ...record.constraints,
+        ...record.acceptanceCriteria,
+      ].join(""),
+    ) > MAX_TASK_REQUIREMENT_TOTAL_BYTES
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    revisionNumber: record.revisionNumber,
+    sourceText: record.sourceText,
+    objective: record.objective,
+    constraints: Object.freeze([...record.constraints]),
+    acceptanceCriteria: Object.freeze([...record.acceptanceCriteria]),
+  });
 }
 
 function decodeProjectTaskCatalog(input: unknown): PreloadProjectTaskCatalog | undefined {
@@ -880,6 +1056,20 @@ function validTaskSourceText(input: unknown): input is string {
   );
 }
 
+function validTaskRequirementItems(input: unknown): input is string[] {
+  return (
+    Array.isArray(input) &&
+    input.length <= MAX_TASK_REQUIREMENT_ITEMS &&
+    input.every(
+      (item) =>
+        typeof item === "string" &&
+        item.trim().length > 0 &&
+        utf8ByteLength(item) <= MAX_TASK_REQUIREMENT_ITEM_BYTES &&
+        !item.includes("\0"),
+    )
+  );
+}
+
 const desktopApi = Object.freeze({
   async getBootstrapState(): Promise<PreloadBootstrapState> {
     return decodeBootstrapState(await ipcRenderer.invoke(GET_BOOTSTRAP_STATE_CHANNEL));
@@ -927,6 +1117,30 @@ const desktopApi = Object.freeze({
     return decodeProjectTaskMutationResult(
       await ipcRenderer.invoke(CREATE_PROJECT_TASK_CHANNEL, creation),
       creation.projectId,
+    );
+  },
+  async readProjectTaskDetail(
+    input: PreloadProjectTaskSelection,
+  ): Promise<PreloadProjectTaskDetailResult> {
+    const selection = decodeProjectTaskSelection(input);
+    if (selection === undefined) {
+      throw new TypeError("A valid desktop Project Task selection is required.");
+    }
+    return decodeProjectTaskDetailResult(
+      await ipcRenderer.invoke(READ_PROJECT_TASK_DETAIL_CHANNEL, selection),
+      selection,
+    );
+  },
+  async reviseProjectTaskRequirement(
+    input: PreloadProjectTaskRequirementRevision,
+  ): Promise<PreloadProjectTaskRequirementMutationResult> {
+    const revision = decodeProjectTaskRequirementRevision(input);
+    if (revision === undefined) {
+      throw new TypeError("A valid desktop Project Task Requirement revision is required.");
+    }
+    return decodeProjectTaskRequirementMutationResult(
+      await ipcRenderer.invoke(REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL, revision),
+      revision,
     );
   },
   onBootstrapState(listener: (state: PreloadBootstrapState) => void): () => void {

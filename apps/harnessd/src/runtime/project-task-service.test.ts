@@ -15,6 +15,8 @@ import { ProjectTaskService, ProjectTaskServiceError } from "./project-task-serv
 
 const PROJECT_ID = "00000000-0000-4000-8000-000000000931";
 const PROJECT_EVENT_ID = "00000000-0000-4000-8000-000000000932";
+const OTHER_PROJECT_ID = "00000000-0000-4000-8000-000000000942";
+const OTHER_PROJECT_EVENT_ID = "00000000-0000-4000-8000-000000000943";
 const PROFILE_REVISION_ID = "00000000-0000-4000-8000-000000000933";
 const BINDING_EVENT_ID = "00000000-0000-4000-8000-000000000934";
 const TASK_ID = "00000000-0000-4000-8000-000000000935";
@@ -26,6 +28,8 @@ const CANDIDATE_AFTER_GRAPH_ID = "00000000-0000-4000-8000-00000000093a";
 const STEP_ID = "00000000-0000-4000-8000-00000000093b";
 const GRAPH_ID = "00000000-0000-4000-8000-00000000093c";
 const NODE_ID = "00000000-0000-4000-8000-00000000093d";
+const REQUIREMENT_REVISION_ID = "00000000-0000-4000-8000-00000000093e";
+const LATER_REQUIREMENT_REVISION_ID = "00000000-0000-4000-8000-00000000093f";
 const temporaryDirectories: string[] = [];
 const stores: DaemonStateStore[] = [];
 
@@ -55,12 +59,16 @@ function configuration(): ModelRoutingConfiguration {
   };
 }
 
-function registerProject(store: DaemonStateStore): void {
+function registerProject(
+  store: DaemonStateStore,
+  projectId = PROJECT_ID,
+  eventId = PROJECT_EVENT_ID,
+): void {
   new ProjectRegistryRepository(store.events).registerProject({
-    eventId: PROJECT_EVENT_ID,
-    projectId: PROJECT_ID,
+    eventId,
+    projectId,
     displayName: "workspace",
-    workspace: { platform: "macos", absolutePath: "/Users/example/workspace" },
+    workspace: { platform: "macos", absolutePath: `/Users/example/${projectId}` },
     occurredAtMs: 100,
   });
 }
@@ -95,6 +103,19 @@ function createParams(overrides: Readonly<Record<string, unknown>> = {}) {
     expectedRoutingBindingVersion: 1,
     title: "持久 Task",
     sourceText: "保存初始需求，但不调用模型。",
+    ...overrides,
+  };
+}
+
+function reviseParams(overrides: Readonly<Record<string, unknown>> = {}) {
+  return {
+    commandId: REQUIREMENT_REVISION_ID,
+    projectId: PROJECT_ID,
+    taskId: TASK_ID,
+    expectedTaskVersion: 1,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: TASK_COMMAND_ID,
+    sourceText: "用户澄清后的需求。",
     ...overrides,
   };
 }
@@ -241,6 +262,127 @@ describe("ProjectTaskService", () => {
     );
   });
 
+  it("reads, revises, and recovers a Project-bound Task Requirement", async () => {
+    const path = await databasePath();
+    const store = await openStore(path);
+    registerProject(store);
+    bindDefaultProfile(store);
+    const service = new ProjectTaskService(store, { now: () => 104 });
+    service.create(createParams());
+
+    const initial = service.detail({ projectId: PROJECT_ID, taskId: TASK_ID });
+    expect(initial).toEqual({
+      schemaVersion: 1,
+      projectId: PROJECT_ID,
+      ownershipVersion: 1,
+      taskId: TASK_ID,
+      taskVersion: 1,
+      title: "持久 Task",
+      stage: "requirements_only",
+      activeRequirement: {
+        revisionId: TASK_COMMAND_ID,
+        revisionNumber: 1,
+        sourceText: "保存初始需求，但不调用模型。",
+        objective: "保存初始需求，但不调用模型。",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+    });
+    expect(Object.isFrozen(initial.activeRequirement.constraints)).toBe(true);
+    expect(service.reviseRequirement(reviseParams())).toEqual({
+      schemaVersion: 1,
+      status: "revised",
+      taskId: TASK_ID,
+    });
+
+    const revised = service.detail({ projectId: PROJECT_ID, taskId: TASK_ID });
+    expect(revised).toMatchObject({
+      taskVersion: 2,
+      stage: "requirements_only",
+      activeRequirement: {
+        revisionId: REQUIREMENT_REVISION_ID,
+        revisionNumber: 2,
+        sourceText: "用户澄清后的需求。",
+        objective: "用户澄清后的需求。",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+    });
+    expect(service.list({ projectId: PROJECT_ID, cursor: null, limit: 12 }).tasks[0]).toMatchObject(
+      {
+        taskVersion: 2,
+        objective: "用户澄清后的需求。",
+      },
+    );
+    expect(store.events.readByEventId(REQUIREMENT_REVISION_ID)).toMatchObject({
+      eventType: "task.requirements_revised",
+      metadata: {
+        actor: "desktop.project_task.requirement",
+        correlationId: PROJECT_ID,
+      },
+    });
+    store.close();
+
+    const reopened = await openStore(path);
+    expect(
+      new ProjectTaskService(reopened).detail({ projectId: PROJECT_ID, taskId: TASK_ID }),
+    ).toEqual(revised);
+  });
+
+  it("retries exact Requirement history and rejects stale or cross-Project commands", async () => {
+    const store = await openStore();
+    registerProject(store);
+    bindDefaultProfile(store);
+    const now = vi.fn(() => 104);
+    const service = new ProjectTaskService(store, { now });
+    service.create(createParams());
+    registerProject(store, OTHER_PROJECT_ID, OTHER_PROJECT_EVENT_ID);
+    now.mockClear();
+    expect(service.reviseRequirement(reviseParams()).status).toBe("revised");
+
+    new TaskPlanRepository(store.events).reviseRequirements({
+      eventId: LATER_REQUIREMENT_REVISION_ID,
+      taskId: TASK_ID,
+      occurredAtMs: 105,
+      expectedTaskVersion: 2,
+      previousRequirementRevisionId: REQUIREMENT_REVISION_ID,
+      requirement: {
+        revisionId: LATER_REQUIREMENT_REVISION_ID,
+        sourceText: "更晚的需求。",
+        objective: "更晚的需求。",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+    });
+    expect(service.reviseRequirement(reviseParams())).toEqual({
+      schemaVersion: 1,
+      status: "existing",
+      taskId: TASK_ID,
+    });
+    expect(now).toHaveBeenCalledTimes(1);
+
+    expect(() =>
+      service.reviseRequirement(
+        reviseParams({ projectId: "00000000-0000-4000-8000-000000000940" }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(() =>
+      service.reviseRequirement(
+        reviseParams({
+          commandId: "00000000-0000-4000-8000-000000000941",
+          sourceText: "过期写入。",
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(() =>
+      service.detail({
+        projectId: OTHER_PROJECT_ID,
+        taskId: TASK_ID,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(store.events.readByEventId("00000000-0000-4000-8000-000000000941")).toBeUndefined();
+  });
+
   it("accepts exact history before current fences and rejects partial or stale commands", async () => {
     const store = await openStore();
     registerProject(store);
@@ -296,12 +438,21 @@ describe("ProjectTaskService", () => {
     expect(() => service.create(createParams({ title: " " }))).toThrowError(
       expect.objectContaining({ code: "conflict" }),
     );
+    expect(() => service.detail({ projectId: PROJECT_ID, taskId: "bad" })).toThrowError(
+      expect.objectContaining({ code: "conflict" }),
+    );
+    expect(() => service.reviseRequirement(reviseParams({ sourceText: " " }))).toThrowError(
+      expect.objectContaining({ code: "conflict" }),
+    );
     expect(() =>
       service.list({ projectId: "00000000-0000-4000-8000-000000000942", cursor: null, limit: 12 }),
     ).toThrowError(expect.objectContaining({ code: "conflict" }));
 
     unbound.close();
     expect(() => service.list({ projectId: PROJECT_ID, cursor: null, limit: 12 })).toThrowError(
+      expect.objectContaining({ code: "unavailable" }),
+    );
+    expect(() => service.detail({ projectId: PROJECT_ID, taskId: TASK_ID })).toThrowError(
       expect.objectContaining({ code: "unavailable" }),
     );
     expect(
@@ -324,5 +475,13 @@ describe("ProjectTaskService", () => {
     expect(() =>
       new ProjectTaskService(invalidClock, { now: () => -1 }).create(createParams()),
     ).toThrowError(expect.objectContaining({ code: "unavailable" }));
+
+    const regressingClock = await openStore();
+    registerProject(regressingClock);
+    bindDefaultProfile(regressingClock);
+    new ProjectTaskService(regressingClock, { now: () => 103 }).create(createParams());
+    expect(() =>
+      new ProjectTaskService(regressingClock, { now: () => 102 }).reviseRequirement(reviseParams()),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
   });
 });

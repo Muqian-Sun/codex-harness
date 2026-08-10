@@ -169,6 +169,42 @@ export type DesktopProjectTaskMutationResult =
       catalog: DesktopProjectTaskCatalog;
     }>
   | Readonly<{ status: "conflict" | "routing_unbound" | "unavailable" }>;
+export type DesktopProjectTaskRequirement = Readonly<{
+  revisionNumber: number;
+  sourceText: string;
+  objective: string;
+  constraints: readonly string[];
+  acceptanceCriteria: readonly string[];
+}>;
+export type DesktopProjectTaskDetail = Readonly<{
+  projectId: string;
+  taskId: string;
+  taskVersion: number;
+  title: string;
+  stage: DesktopTaskStage;
+  activeRequirement: DesktopProjectTaskRequirement;
+}>;
+export type DesktopProjectTaskDetailResult =
+  | Readonly<{ status: "loaded"; detail: DesktopProjectTaskDetail }>
+  | Readonly<{ status: "unavailable" }>;
+export type DesktopProjectTaskSelection = Readonly<{
+  projectId: string;
+  taskId: string;
+}>;
+export type DesktopProjectTaskRequirementRevision = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  sourceText: string;
+}>;
+export type DesktopProjectTaskRequirementMutationResult =
+  | Readonly<{
+      status: "revised" | "existing";
+      taskId: string;
+      detail: DesktopProjectTaskDetail;
+      catalog: DesktopProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
 
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
@@ -199,6 +235,9 @@ const MAX_PROJECT_PATH_BYTES = 4_096;
 const MAX_TASK_CATALOG_PAGE_SIZE = 12;
 const MAX_TASK_TITLE_BYTES = 256;
 const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
+const MAX_TASK_REQUIREMENT_ITEM_BYTES = 4 * 1_024;
+const MAX_TASK_REQUIREMENT_ITEMS = 100;
+const MAX_TASK_REQUIREMENT_TOTAL_BYTES = 256 * 1_024;
 const taskStages = new Set<string>(DESKTOP_TASK_STAGES);
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
@@ -496,6 +535,129 @@ export function decodeDesktopProjectTaskMutationResult(
   try {
     const catalog = decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId);
     return Object.freeze({ status: record.status, taskId: record.taskId, catalog });
+  } catch {
+    return undefined;
+  }
+}
+
+export function projectDesktopProjectTaskDetail(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskDetail {
+  const record = exactRecord(input, [
+    "activeRequirement",
+    "ownershipVersion",
+    "projectId",
+    "schemaVersion",
+    "stage",
+    "taskId",
+    "taskVersion",
+    "title",
+  ]);
+  const requirement = decodeDesktopProjectTaskRequirement(record?.activeRequirement);
+  if (
+    !isUuid(expectedProjectId) ||
+    !isUuid(expectedTaskId) ||
+    record?.schemaVersion !== 1 ||
+    record.projectId !== expectedProjectId ||
+    record.taskId !== expectedTaskId ||
+    !isPositiveSafeInteger(record.ownershipVersion) ||
+    !isPositiveSafeInteger(record.taskVersion) ||
+    !validTaskTitle(record.title) ||
+    typeof record.stage !== "string" ||
+    !taskStages.has(record.stage) ||
+    requirement === undefined
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({
+    projectId: expectedProjectId,
+    taskId: expectedTaskId,
+    taskVersion: record.taskVersion,
+    title: record.title,
+    stage: record.stage as DesktopTaskStage,
+    activeRequirement: requirement,
+  });
+}
+
+export function decodeDesktopProjectTaskDetailResult(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskDetailResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "unavailable") {
+    return Object.freeze({ status: "unavailable" });
+  }
+  const record = exactRecord(input, ["detail", "status"]);
+  if (record?.status !== "loaded") {
+    return undefined;
+  }
+  try {
+    return Object.freeze({
+      status: "loaded",
+      detail: decodeProjectedDesktopTaskDetail(record.detail, expectedProjectId, expectedTaskId),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+export function decodeDesktopProjectTaskRequirementRevision(
+  input: unknown,
+): DesktopProjectTaskRequirementRevision | undefined {
+  const record = exactRecord(input, ["expectedTaskVersion", "projectId", "sourceText", "taskId"]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !validTaskSourceText(record.sourceText)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    sourceText: record.sourceText,
+  });
+}
+
+export function decodeDesktopProjectTaskSelection(
+  input: unknown,
+): DesktopProjectTaskSelection | undefined {
+  const record = exactRecord(input, ["projectId", "taskId"]);
+  if (!isUuid(record?.projectId) || !isUuid(record.taskId)) {
+    return undefined;
+  }
+  return Object.freeze({ projectId: record.projectId, taskId: record.taskId });
+}
+
+export function decodeDesktopProjectTaskRequirementMutationResult(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskRequirementMutationResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  if (
+    record === undefined ||
+    (record.status !== "revised" && record.status !== "existing") ||
+    record.taskId !== expectedTaskId
+  ) {
+    return undefined;
+  }
+  try {
+    return Object.freeze({
+      status: record.status,
+      taskId: expectedTaskId,
+      detail: decodeProjectedDesktopTaskDetail(record.detail, expectedProjectId, expectedTaskId),
+      catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
+    });
   } catch {
     return undefined;
   }
@@ -1046,6 +1208,121 @@ function decodeDesktopProjectTaskSummary(
   });
 }
 
+function decodeDesktopProjectTaskRequirement(
+  input: unknown,
+): DesktopProjectTaskRequirement | undefined {
+  const record = exactRecord(input, [
+    "acceptanceCriteria",
+    "constraints",
+    "objective",
+    "revisionId",
+    "revisionNumber",
+    "sourceText",
+  ]);
+  if (
+    record === undefined ||
+    !isUuid(record.revisionId) ||
+    !isPositiveSafeInteger(record.revisionNumber) ||
+    !validTaskSourceText(record.sourceText) ||
+    !validTaskSourceText(record.objective) ||
+    !validTaskRequirementItems(record.constraints) ||
+    !validTaskRequirementItems(record.acceptanceCriteria)
+  ) {
+    return undefined;
+  }
+  const totalBytes = utf8ByteLength(
+    [record.sourceText, record.objective, ...record.constraints, ...record.acceptanceCriteria].join(
+      "",
+    ),
+  );
+  if (totalBytes > MAX_TASK_REQUIREMENT_TOTAL_BYTES) {
+    return undefined;
+  }
+  return Object.freeze({
+    revisionNumber: record.revisionNumber,
+    sourceText: record.sourceText,
+    objective: record.objective,
+    constraints: Object.freeze([...record.constraints]),
+    acceptanceCriteria: Object.freeze([...record.acceptanceCriteria]),
+  });
+}
+
+function decodeProjectedDesktopTaskDetail(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskDetail {
+  const record = exactRecord(input, [
+    "activeRequirement",
+    "projectId",
+    "stage",
+    "taskId",
+    "taskVersion",
+    "title",
+  ]);
+  const requirement = decodeProjectedDesktopTaskRequirement(record?.activeRequirement);
+  if (
+    record?.projectId !== expectedProjectId ||
+    record.taskId !== expectedTaskId ||
+    !isPositiveSafeInteger(record.taskVersion) ||
+    !validTaskTitle(record.title) ||
+    typeof record.stage !== "string" ||
+    !taskStages.has(record.stage) ||
+    requirement === undefined
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({
+    projectId: expectedProjectId,
+    taskId: expectedTaskId,
+    taskVersion: record.taskVersion,
+    title: record.title,
+    stage: record.stage as DesktopTaskStage,
+    activeRequirement: requirement,
+  });
+}
+
+function decodeProjectedDesktopTaskRequirement(
+  input: unknown,
+): DesktopProjectTaskRequirement | undefined {
+  const record = exactRecord(input, [
+    "acceptanceCriteria",
+    "constraints",
+    "objective",
+    "revisionNumber",
+    "sourceText",
+  ]);
+  if (
+    record === undefined ||
+    !isPositiveSafeInteger(record.revisionNumber) ||
+    !validTaskSourceText(record.sourceText) ||
+    !validTaskSourceText(record.objective) ||
+    !validTaskRequirementItems(record.constraints) ||
+    !validTaskRequirementItems(record.acceptanceCriteria)
+  ) {
+    return undefined;
+  }
+  if (
+    utf8ByteLength(
+      [
+        record.sourceText,
+        record.objective,
+        ...record.constraints,
+        ...record.acceptanceCriteria,
+      ].join(""),
+    ) > MAX_TASK_REQUIREMENT_TOTAL_BYTES
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    revisionNumber: record.revisionNumber,
+    sourceText: record.sourceText,
+    objective: record.objective,
+    constraints: Object.freeze([...record.constraints]),
+    acceptanceCriteria: Object.freeze([...record.acceptanceCriteria]),
+  });
+}
+
 function decodeProjectedDesktopTaskCatalog(
   input: unknown,
   expectedProjectId: string,
@@ -1088,6 +1365,20 @@ function validTaskSourceText(input: unknown): input is string {
     input.trim().length > 0 &&
     utf8ByteLength(input) <= MAX_TASK_SOURCE_TEXT_BYTES &&
     !input.includes("\0")
+  );
+}
+
+function validTaskRequirementItems(input: unknown): input is string[] {
+  return (
+    Array.isArray(input) &&
+    input.length <= MAX_TASK_REQUIREMENT_ITEMS &&
+    input.every(
+      (item) =>
+        typeof item === "string" &&
+        item.trim().length > 0 &&
+        utf8ByteLength(item) <= MAX_TASK_REQUIREMENT_ITEM_BYTES &&
+        !item.includes("\0"),
+    )
   );
 }
 
