@@ -24,6 +24,10 @@ import {
   type HarnessProjectCatalogPageResult as ProtocolProjectCatalogPageResult,
   type HarnessProjectRegisterParams as ProtocolProjectRegisterParams,
   type HarnessProjectRegisterResult as ProtocolProjectRegisterResult,
+  type HarnessProjectRoutingBindingBindDefaultParams as ProtocolProjectRoutingBindingBindDefaultParams,
+  type HarnessProjectRoutingBindingBindDefaultResult as ProtocolProjectRoutingBindingBindDefaultResult,
+  type HarnessProjectRoutingBindingStatusBatchParams as ProtocolProjectRoutingBindingStatusBatchParams,
+  type HarnessProjectRoutingBindingStatusBatchResult as ProtocolProjectRoutingBindingStatusBatchResult,
   type HarnessRoutingConfigurationResult as ProtocolRoutingConfigurationResult,
   type HarnessRoutingConfigurationSetParams as ProtocolRoutingConfigurationSetParams,
   type RpcEvent,
@@ -106,6 +110,14 @@ export type HarnessProjectCatalogPageParams = Readonly<ProtocolProjectCatalogPag
 export type HarnessProjectCatalogPageResult = Readonly<ProtocolProjectCatalogPageResult>;
 export type HarnessProjectRegisterParams = Readonly<ProtocolProjectRegisterParams>;
 export type HarnessProjectRegisterResult = Readonly<ProtocolProjectRegisterResult>;
+export type HarnessProjectRoutingBindingStatusBatchParams =
+  Readonly<ProtocolProjectRoutingBindingStatusBatchParams>;
+export type HarnessProjectRoutingBindingStatusBatchResult =
+  Readonly<ProtocolProjectRoutingBindingStatusBatchResult>;
+export type HarnessProjectRoutingBindingBindDefaultParams =
+  Readonly<ProtocolProjectRoutingBindingBindDefaultParams>;
+export type HarnessProjectRoutingBindingBindDefaultResult =
+  Readonly<ProtocolProjectRoutingBindingBindDefaultResult>;
 export type HarnessRoutingConfigurationResult = Readonly<ProtocolRoutingConfigurationResult>;
 export type HarnessRoutingConfigurationSetParams = Readonly<ProtocolRoutingConfigurationSetParams>;
 export type HarnessAccountStatusObservation = Readonly<{
@@ -321,6 +333,24 @@ export class HarnessRpcClient {
       "project.register",
       params as JsonValue,
     )) as unknown as HarnessProjectRegisterResult;
+  }
+
+  async projectRoutingBindingStatuses(
+    params: HarnessProjectRoutingBindingStatusBatchParams,
+  ): Promise<HarnessProjectRoutingBindingStatusBatchResult> {
+    return (await this.request(
+      "project.routing_binding.status_batch",
+      params as unknown as JsonValue,
+    )) as unknown as HarnessProjectRoutingBindingStatusBatchResult;
+  }
+
+  async bindProjectDefaultRouting(
+    params: HarnessProjectRoutingBindingBindDefaultParams,
+  ): Promise<HarnessProjectRoutingBindingBindDefaultResult> {
+    return (await this.request(
+      "project.routing_binding.bind_default",
+      params as JsonValue,
+    )) as unknown as HarnessProjectRoutingBindingBindDefaultResult;
   }
 
   async setRoutingConfiguration(

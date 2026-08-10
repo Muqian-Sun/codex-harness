@@ -7,6 +7,7 @@ import {
   MAX_MODEL_CATALOG_PAGE_SIZE,
   MAX_MODEL_REASONING_EFFORTS,
   MAX_PROJECT_CATALOG_PAGE_SIZE,
+  MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE,
   decodeEventParams,
   decodeRequestParams,
   decodeResponseResult,
@@ -392,6 +393,130 @@ describe("method contracts", () => {
       { schemaVersion: 1, status: "registered", project: { ...project, createdAtMs: 1 } },
     ]) {
       const method = "status" in invalid ? "project.register" : "project.catalog_page";
+      expect(decodeResponseResult(method, invalid).ok).toBe(false);
+    }
+  });
+
+  it("strictly validates Project routing binding status and default binding contracts", () => {
+    const projectId = "00000000-0000-4000-8000-000000000871";
+    const projectId2 = "00000000-0000-4000-8000-000000000872";
+    const commandId = "00000000-0000-4000-8000-000000000873";
+    const profileId = "00000000-0000-4000-8000-000000000874";
+    const revisionId = "00000000-0000-4000-8000-000000000875";
+    const binding = {
+      projectId,
+      bindingVersion: 1,
+      profileId,
+      profileVersionAtBinding: 2,
+      configurationRevisionIdAtBinding: revisionId,
+    } as const;
+
+    expect(
+      decodeRequestParams("project.routing_binding.status_batch", {
+        projectIds: [projectId, projectId2],
+      }).ok,
+    ).toBe(true);
+    expect(decodeRequestParams("project.routing_binding.status_batch", { projectIds: [] }).ok).toBe(
+      true,
+    );
+    expect(
+      decodeResponseResult("project.routing_binding.status_batch", {
+        schemaVersion: 1,
+        statuses: [
+          { projectId, status: "default_bound", binding },
+          { projectId: projectId2, status: "unbound", binding: null },
+        ],
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeRequestParams("project.routing_binding.bind_default", {
+        commandId,
+        projectId,
+        expectedBindingVersion: 0,
+        previousProfileId: null,
+        expectedProfileVersion: 2,
+        expectedConfigurationRevisionId: revisionId,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeResponseResult("project.routing_binding.bind_default", {
+        schemaVersion: 1,
+        status: "bound",
+        binding,
+      }).ok,
+    ).toBe(true);
+
+    for (const invalid of [
+      { projectIds: [projectId, projectId] },
+      {
+        projectIds: Array.from(
+          { length: MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE + 1 },
+          (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        ),
+      },
+      { projectIds: [projectId], extra: true },
+    ]) {
+      expect(decodeRequestParams("project.routing_binding.status_batch", invalid).ok).toBe(false);
+    }
+
+    for (const invalid of [
+      {
+        commandId,
+        projectId,
+        expectedBindingVersion: 1,
+        previousProfileId: null,
+        expectedProfileVersion: 2,
+        expectedConfigurationRevisionId: revisionId,
+      },
+      {
+        commandId: revisionId,
+        projectId,
+        expectedBindingVersion: 1,
+        previousProfileId: profileId,
+        expectedProfileVersion: 2,
+        expectedConfigurationRevisionId: revisionId,
+      },
+      {
+        commandId,
+        projectId,
+        expectedBindingVersion: 1,
+        previousProfileId: profileId,
+        expectedProfileVersion: 0,
+        expectedConfigurationRevisionId: revisionId,
+      },
+    ]) {
+      expect(decodeRequestParams("project.routing_binding.bind_default", invalid).ok).toBe(false);
+    }
+
+    for (const invalid of [
+      {
+        schemaVersion: 1,
+        statuses: [
+          { projectId, status: "default_bound", binding },
+          { projectId, status: "unbound", binding: null },
+        ],
+      },
+      {
+        schemaVersion: 1,
+        statuses: [
+          {
+            projectId,
+            status: "default_bound",
+            binding: { ...binding, projectId: projectId2 },
+          },
+        ],
+      },
+      {
+        schemaVersion: 1,
+        statuses: [{ projectId, status: "unbound", binding }],
+      },
+      { schemaVersion: 1, status: "future", binding },
+      { schemaVersion: 1, status: "bound", binding: { ...binding, createdAtMs: 1 } },
+    ]) {
+      const method =
+        "statuses" in invalid
+          ? "project.routing_binding.status_batch"
+          : "project.routing_binding.bind_default";
       expect(decodeResponseResult(method, invalid).ok).toBe(false);
     }
   });

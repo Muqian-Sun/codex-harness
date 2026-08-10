@@ -6,6 +6,8 @@ import {
   advanceDesktopBootstrapState,
   decodeDesktopBootstrapState,
   decodeDesktopProjectSelectionResult,
+  decodeDesktopProjectRoutingBindingMutationResult,
+  decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopProjectWorkspaceRegistration,
   decodeDesktopRoutingConfigurationMutationResult,
   decodeDesktopRoutingConfigurationUpdate,
@@ -13,6 +15,7 @@ import {
   projectDesktopModelCatalogSummary,
   projectDesktopProjectCatalog,
   projectDesktopProjectRegistration,
+  projectDesktopProjectRoutingBindings,
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
 } from "./bootstrap-state.js";
@@ -73,6 +76,23 @@ const PROJECTS = Object.freeze({
   hasMore: false,
 });
 
+const RAW_PROJECT_ROUTING_BINDINGS = Object.freeze({
+  schemaVersion: 1,
+  statuses: Object.freeze([
+    Object.freeze({ projectId: PROJECT.projectId, status: "unbound" as const, binding: null }),
+  ]),
+});
+
+const PROJECT_ROUTING_BINDINGS = Object.freeze({
+  bindings: Object.freeze([
+    Object.freeze({
+      projectId: PROJECT.projectId,
+      status: "unbound" as const,
+      bindingVersion: null,
+    }),
+  ]),
+});
+
 const READY = Object.freeze({
   phase: "ready" as const,
   account: Object.freeze({
@@ -83,6 +103,7 @@ const READY = Object.freeze({
   catalog: CATALOG,
   routing: ROUTING,
   projects: PROJECTS,
+  projectRoutingBindings: PROJECT_ROUTING_BINDINGS,
 });
 
 describe("desktop bootstrap state", () => {
@@ -116,6 +137,7 @@ describe("desktop bootstrap state", () => {
         catalog: READY.catalog,
         routing: READY.routing,
         projects: READY.projects,
+        projectRoutingBindings: READY.projectRoutingBindings,
       }),
     ).toBe(undefined);
     expect(
@@ -125,6 +147,7 @@ describe("desktop bootstrap state", () => {
         catalog: { ...READY.catalog, nextCursor: "private-cursor" },
         routing: READY.routing,
         projects: READY.projects,
+        projectRoutingBindings: READY.projectRoutingBindings,
       }),
     ).toBe(undefined);
     expect(decodeDesktopBootstrapState({ phase: "failed", code: "raw_error" })).toBe(undefined);
@@ -152,15 +175,101 @@ describe("desktop bootstrap state", () => {
       projects: PROJECTS.projects,
       nextCursor: null,
     });
-    const state = readyBootstrapState(account, catalog, routing, projects);
+    const projectRoutingBindings = projectDesktopProjectRoutingBindings(
+      RAW_PROJECT_ROUTING_BINDINGS,
+      [PROJECT.projectId],
+    );
+    const state = readyBootstrapState(account, catalog, routing, projects, projectRoutingBindings);
 
     expect(state).toEqual(READY);
     expect(JSON.stringify(state)).not.toContain("snapshotId");
     expect(JSON.stringify(state)).not.toContain("workerSessionId");
     expect(JSON.stringify(state)).not.toContain("nextCursor");
+    expect(JSON.stringify(state)).not.toContain("profileId");
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.phase === "ready" ? state.account : undefined)).toBe(true);
     expect(JSON.stringify(state)).not.toContain("schemaVersion");
+  });
+
+  it("projects binding status without exposing profile fences and enforces Project alignment", () => {
+    const rawDefault = {
+      schemaVersion: 1,
+      statuses: [
+        {
+          projectId: PROJECT.projectId,
+          status: "default_bound",
+          binding: {
+            projectId: PROJECT.projectId,
+            bindingVersion: 2,
+            profileId: "00000000-0000-4000-8000-000000000901",
+            profileVersionAtBinding: 3,
+            configurationRevisionIdAtBinding: "00000000-0000-4000-8000-000000000861",
+          },
+        },
+      ],
+    };
+
+    expect(projectDesktopProjectRoutingBindings(rawDefault, [PROJECT.projectId])).toEqual({
+      bindings: [{ projectId: PROJECT.projectId, status: "default_bound", bindingVersion: 2 }],
+    });
+    expect(
+      JSON.stringify(projectDesktopProjectRoutingBindings(rawDefault, [PROJECT.projectId])),
+    ).not.toContain("profileId");
+    expect(() => projectDesktopProjectRoutingBindings(rawDefault, [])).toThrow(
+      BootstrapStateTransitionError,
+    );
+    expect(() =>
+      projectDesktopProjectRoutingBindings(
+        {
+          ...rawDefault,
+          statuses: [{ ...rawDefault.statuses[0], privateField: "secret" }],
+        },
+        [PROJECT.projectId],
+      ),
+    ).toThrow(BootstrapStateTransitionError);
+    expect(() =>
+      projectDesktopProjectRoutingBindings(
+        {
+          ...rawDefault,
+          statuses: [
+            {
+              ...rawDefault.statuses[0],
+              binding: { ...rawDefault.statuses[0]!.binding, bindingVersion: 0 },
+            },
+          ],
+        },
+        [PROJECT.projectId],
+      ),
+    ).toThrow(BootstrapStateTransitionError);
+    expect(decodeDesktopProjectRoutingBindingMutationResult({ status: "bound" })).toEqual({
+      status: "bound",
+    });
+    expect(decodeDesktopProjectRoutingBindingMutationResult({ status: "future" })).toBeUndefined();
+    expect(decodeDesktopProjectRoutingBindingProjectId(PROJECT.projectId)).toBe(PROJECT.projectId);
+    expect(decodeDesktopProjectRoutingBindingProjectId("invalid")).toBeUndefined();
+
+    for (const projectRoutingBindings of [
+      { bindings: [] },
+      {
+        bindings: [{ projectId: PROJECT.projectId, status: "invalid", bindingVersion: null }],
+      },
+      {
+        bindings: [
+          {
+            projectId: PROJECT.projectId,
+            status: "default_bound",
+            bindingVersion: 0,
+          },
+        ],
+      },
+    ]) {
+      expect(
+        decodeDesktopBootstrapState({
+          ...READY,
+          projectRoutingBindings,
+        }),
+      ).toBeUndefined();
+    }
   });
 
   it("projects and validates Project catalog, chooser input, and selection results", () => {

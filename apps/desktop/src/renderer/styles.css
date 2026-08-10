@@ -488,9 +488,72 @@ h1 {
   letter-spacing: 0.08em;
 }
 
-.project-badges span:last-child {
+.project-badges span[data-project-identity] {
   border-color: rgba(217, 164, 65, 0.28);
   color: #b99a5d;
+}
+
+.project-badges span[data-project-routing-status="default_bound"] {
+  border-color: rgba(111, 191, 155, 0.38);
+  color: #79c9a5;
+}
+
+.project-badges span[data-project-routing-status="other_profile_bound"] {
+  border-color: rgba(129, 149, 143, 0.4);
+  color: #aebdb8;
+}
+
+.project-badges span[data-project-routing-status="unbound"] {
+  border-color: rgba(217, 164, 65, 0.28);
+  color: #b99a5d;
+}
+
+.project-routing-action {
+  display: flex;
+  grid-column: 2;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.project-routing-action > span {
+  color: #637873;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 7px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.project-routing-action button {
+  min-width: 118px;
+  padding: 6px 8px 5px;
+  border: 1px solid rgba(111, 191, 155, 0.34);
+  border-radius: 0;
+  color: #bcd6ca;
+  background: rgba(43, 85, 68, 0.26);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.project-routing-action button:hover:not(:disabled) {
+  border-color: #79c9a5;
+  color: #e4eee9;
+  background: rgba(56, 119, 91, 0.42);
+}
+
+.project-routing-action button:focus-visible {
+  outline: 2px solid #8ed5b4;
+  outline-offset: 2px;
+}
+
+.project-routing-action button:disabled {
+  border-color: rgba(195, 211, 203, 0.12);
+  color: #5f746f;
+  background: rgba(24, 39, 43, 0.28);
+  cursor: not-allowed;
 }
 
 .project-selection {

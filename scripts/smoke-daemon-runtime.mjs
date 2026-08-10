@@ -100,6 +100,16 @@ export async function smokeDaemonRuntime() {
     ) {
       throw new Error("The supervised daemon did not persist a valid Project.");
     }
+    const initialBindings = await supervisor.readProjectRoutingBindingStatuses({
+      projectIds: [projectId],
+    });
+    if (
+      initialBindings.statuses.length !== 1 ||
+      initialBindings.statuses[0]?.status !== "unbound" ||
+      initialBindings.statuses[0]?.binding !== null
+    ) {
+      throw new Error("The supervised daemon initial Project routing binding was invalid.");
+    }
     const routingRevisionId = "00000000-0000-4000-8000-000000000941";
     const savedRouting = await supervisor.setRoutingConfiguration({
       commandId: routingRevisionId,
@@ -120,6 +130,42 @@ export async function smokeDaemonRuntime() {
       )
     ) {
       throw new Error("The supervised daemon did not persist a valid routing configuration.");
+    }
+    const bindingCommandId = "00000000-0000-4000-8000-000000000953";
+    const bound = await supervisor.bindProjectDefaultRouting({
+      commandId: bindingCommandId,
+      projectId,
+      expectedBindingVersion: 0,
+      previousProfileId: null,
+      expectedProfileVersion: savedRouting.profileVersion,
+      expectedConfigurationRevisionId: routingRevisionId,
+    });
+    if (
+      bound.status !== "bound" ||
+      bound.binding.projectId !== projectId ||
+      bound.binding.bindingVersion !== 1 ||
+      bound.binding.profileVersionAtBinding !== 1 ||
+      bound.binding.configurationRevisionIdAtBinding !== routingRevisionId
+    ) {
+      throw new Error("The supervised daemon did not persist a valid Project routing binding.");
+    }
+    const updatedRoutingRevisionId = "00000000-0000-4000-8000-000000000942";
+    const updatedRouting = await supervisor.setRoutingConfiguration({
+      commandId: updatedRoutingRevisionId,
+      expectedProfileVersion: 1,
+      previousConfigurationRevisionId: routingRevisionId,
+      tiers: savedRouting.tiers,
+    });
+    const bindingAfterUpdate = await supervisor.readProjectRoutingBindingStatuses({
+      projectIds: [projectId],
+    });
+    if (
+      updatedRouting.profileVersion !== 2 ||
+      updatedRouting.configurationRevisionId !== updatedRoutingRevisionId ||
+      bindingAfterUpdate.statuses[0]?.status !== "default_bound" ||
+      bindingAfterUpdate.statuses[0]?.binding?.profileVersionAtBinding !== 1
+    ) {
+      throw new Error("A routing update changed the Project profile binding semantics.");
     }
     const accountEvent = await Promise.race([
       accountEventPromise,
@@ -155,7 +201,7 @@ export async function smokeDaemonRuntime() {
       codexExecutable,
       runtimeRoot,
       stateDatabasePath,
-      routingRevisionId,
+      updatedRoutingRevisionId,
       projectId,
     );
     const recoveredStateIdentity = await verifyStateDatabase(stateRoot);
@@ -195,7 +241,7 @@ async function smokeSupervisorRpcLoss(
   });
   const recoveredRouting = await supervisor.readRoutingConfiguration();
   if (
-    recoveredRouting.profileVersion !== 1 ||
+    recoveredRouting.profileVersion !== 2 ||
     recoveredRouting.configurationRevisionId !== routingRevisionId ||
     recoveredRouting.tiers?.fast.model !== "smoke-a" ||
     recoveredRouting.tiers?.deep.model !== "smoke-b"
@@ -209,6 +255,16 @@ async function smokeSupervisorRpcLoss(
     recoveredProjects.projects[0]?.workspace.identityStatus !== "unverified"
   ) {
     throw new Error("The supervised daemon did not recover its Project registry.");
+  }
+  const recoveredBindings = await supervisor.readProjectRoutingBindingStatuses({
+    projectIds: [projectId],
+  });
+  if (
+    recoveredBindings.statuses[0]?.status !== "default_bound" ||
+    recoveredBindings.statuses[0]?.binding?.bindingVersion !== 1 ||
+    recoveredBindings.statuses[0]?.binding?.profileVersionAtBinding !== 1
+  ) {
+    throw new Error("The supervised daemon did not recover its Project routing binding.");
   }
   supervisor.client.close();
   const closed = await supervisor.closed;

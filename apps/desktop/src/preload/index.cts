@@ -4,6 +4,7 @@ const GET_BOOTSTRAP_STATE_CHANNEL = "desktop.bootstrap.get";
 const BOOTSTRAP_STATE_CHANGED_CHANNEL = "desktop.bootstrap.changed";
 const SET_ROUTING_CONFIGURATION_CHANNEL = "desktop.routing.set";
 const CHOOSE_PROJECT_WORKSPACE_CHANNEL = "desktop.project.choose";
+const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_default";
 const FAILURE_CODES = new Set([
   "unsupported_platform",
   "resource_configuration_missing",
@@ -114,6 +115,17 @@ type PreloadProjectSelectionResult =
       project: PreloadProjectSummary;
       projects: PreloadProjectCatalog;
     }>;
+type PreloadProjectRoutingBindingStatus = Readonly<{
+  projectId: string;
+  status: "unbound" | "default_bound" | "other_profile_bound";
+  bindingVersion: number | null;
+}>;
+type PreloadProjectRoutingBindings = Readonly<{
+  bindings: readonly PreloadProjectRoutingBindingStatus[];
+}>;
+type PreloadProjectRoutingBindingMutationResult = Readonly<{
+  status: "bound" | "existing" | "conflict" | "routing_unconfigured" | "unavailable";
+}>;
 
 type PreloadBootstrapState =
   | Readonly<{ phase: "starting" | "stopping" }>
@@ -123,6 +135,7 @@ type PreloadBootstrapState =
       catalog: PreloadModelCatalogSummary;
       routing: PreloadRoutingConfiguration;
       projects: PreloadProjectCatalog;
+      projectRoutingBindings: PreloadProjectRoutingBindings;
     }>
   | Readonly<{ phase: "failed"; code: string }>;
 
@@ -134,24 +147,37 @@ function decodeBootstrapState(input: unknown): PreloadBootstrapState {
   const keys = Object.keys(record);
   if (
     record.phase === "ready" &&
-    keys.length === 5 &&
+    keys.length === 6 &&
     keys.includes("phase") &&
     keys.includes("account") &&
     keys.includes("catalog") &&
     keys.includes("routing") &&
-    keys.includes("projects")
+    keys.includes("projects") &&
+    keys.includes("projectRoutingBindings")
   ) {
     const account = decodeAccountStatus(record.account);
     const catalog = decodeModelCatalogSummary(record.catalog);
     const routing = decodeRoutingConfiguration(record.routing);
     const projects = decodeProjectCatalog(record.projects);
+    const projectRoutingBindings = decodeProjectRoutingBindings(
+      record.projectRoutingBindings,
+      projects?.projects.map((project) => project.projectId),
+    );
     if (
       account !== undefined &&
       catalog !== undefined &&
       routing !== undefined &&
-      projects !== undefined
+      projects !== undefined &&
+      projectRoutingBindings !== undefined
     ) {
-      return Object.freeze({ phase: "ready", account, catalog, routing, projects });
+      return Object.freeze({
+        phase: "ready",
+        account,
+        catalog,
+        routing,
+        projects,
+        projectRoutingBindings,
+      });
     }
   }
   if (
@@ -283,6 +309,23 @@ function decodeProjectSelectionResult(input: unknown): PreloadProjectSelectionRe
     project,
     projects,
   });
+}
+
+function decodeProjectRoutingBindingMutationResult(
+  input: unknown,
+): PreloadProjectRoutingBindingMutationResult {
+  const record = exactRecord(input, ["status"]);
+  if (
+    record === undefined ||
+    (record.status !== "bound" &&
+      record.status !== "existing" &&
+      record.status !== "conflict" &&
+      record.status !== "routing_unconfigured" &&
+      record.status !== "unavailable")
+  ) {
+    throw new Error("The desktop Project routing binding result is invalid.");
+  }
+  return Object.freeze({ status: record.status });
 }
 
 function decodeRoutingTargets(input: unknown): PreloadRoutingTargets | undefined {
@@ -532,6 +575,49 @@ function decodeProjectSummary(input: unknown): PreloadProjectSummary | undefined
   });
 }
 
+function decodeProjectRoutingBindings(
+  input: unknown,
+  expectedProjectIds: readonly string[] | undefined,
+): PreloadProjectRoutingBindings | undefined {
+  const record = exactRecord(input, ["bindings"]);
+  if (
+    record === undefined ||
+    expectedProjectIds === undefined ||
+    !Array.isArray(record.bindings) ||
+    record.bindings.length !== expectedProjectIds.length ||
+    record.bindings.length > MAX_PROJECT_CATALOG_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  const bindings = record.bindings.map((binding, index) => {
+    const decoded = exactRecord(binding, ["bindingVersion", "projectId", "status"]);
+    const expectedProjectId = expectedProjectIds[index];
+    if (
+      decoded === undefined ||
+      expectedProjectId === undefined ||
+      decoded.projectId !== expectedProjectId ||
+      (decoded.status !== "unbound" &&
+        decoded.status !== "default_bound" &&
+        decoded.status !== "other_profile_bound") ||
+      (decoded.status === "unbound"
+        ? decoded.bindingVersion !== null
+        : !isPositiveSafeInteger(decoded.bindingVersion))
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      projectId: expectedProjectId,
+      status: decoded.status,
+      bindingVersion: decoded.bindingVersion as number | null,
+    });
+  });
+  return bindings.some((binding) => binding === undefined)
+    ? undefined
+    : Object.freeze({
+        bindings: Object.freeze(bindings as PreloadProjectRoutingBindingStatus[]),
+      });
+}
+
 function isProjectPlatform(input: unknown): input is PreloadProjectPlatform {
   return input === "macos" || input === "windows" || input === "linux";
 }
@@ -628,6 +714,16 @@ const desktopApi = Object.freeze({
   },
   async chooseProjectWorkspace(): Promise<PreloadProjectSelectionResult> {
     return decodeProjectSelectionResult(await ipcRenderer.invoke(CHOOSE_PROJECT_WORKSPACE_CHANNEL));
+  },
+  async bindProjectToDefaultRouting(
+    projectId: string,
+  ): Promise<PreloadProjectRoutingBindingMutationResult> {
+    if (!isUuid(projectId)) {
+      throw new TypeError("A valid desktop Project identifier is required.");
+    }
+    return decodeProjectRoutingBindingMutationResult(
+      await ipcRenderer.invoke(BIND_PROJECT_DEFAULT_ROUTING_CHANNEL, projectId),
+    );
   },
   onBootstrapState(listener: (state: PreloadBootstrapState) => void): () => void {
     if (typeof listener !== "function") {

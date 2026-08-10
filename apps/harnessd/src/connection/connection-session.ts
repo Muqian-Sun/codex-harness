@@ -45,6 +45,8 @@ export type ConnectionSessionConfig = Readonly<{
   readModelCatalogPage?: (params: JsonValue) => unknown;
   readProjectCatalogPage?: (params: JsonValue) => unknown;
   registerProject?: (params: JsonValue) => unknown;
+  readProjectRoutingBindingStatuses?: (params: JsonValue) => unknown;
+  bindProjectDefaultRouting?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
@@ -118,6 +120,8 @@ export class ConnectionSession {
   readonly #readModelCatalogPage: (params: JsonValue) => unknown;
   readonly #readProjectCatalogPage: (params: JsonValue) => unknown;
   readonly #registerProject: (params: JsonValue) => unknown;
+  readonly #readProjectRoutingBindingStatuses: (params: JsonValue) => unknown;
+  readonly #bindProjectDefaultRouting: (params: JsonValue) => unknown;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
@@ -143,7 +147,11 @@ export class ConnectionSession {
     if (
       (config.readProjectCatalogPage !== undefined &&
         typeof config.readProjectCatalogPage !== "function") ||
-      (config.registerProject !== undefined && typeof config.registerProject !== "function")
+      (config.registerProject !== undefined && typeof config.registerProject !== "function") ||
+      (config.readProjectRoutingBindingStatuses !== undefined &&
+        typeof config.readProjectRoutingBindingStatuses !== "function") ||
+      (config.bindProjectDefaultRouting !== undefined &&
+        typeof config.bindProjectDefaultRouting !== "function")
     ) {
       throw new Error("Invalid connection session configuration.");
     }
@@ -163,6 +171,9 @@ export class ConnectionSession {
     this.#readModelCatalogPage = config.readModelCatalogPage ?? (() => null);
     this.#readProjectCatalogPage = config.readProjectCatalogPage ?? (() => null);
     this.#registerProject = config.registerProject ?? (() => null);
+    this.#readProjectRoutingBindingStatuses =
+      config.readProjectRoutingBindingStatuses ?? (() => null);
+    this.#bindProjectDefaultRouting = config.bindProjectDefaultRouting ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
     this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
@@ -336,6 +347,8 @@ export class ConnectionSession {
       readModelCatalogPage: this.#readModelCatalogPage,
       readProjectCatalogPage: this.#readProjectCatalogPage,
       registerProject: this.#registerProject,
+      readProjectRoutingBindingStatuses: this.#readProjectRoutingBindingStatuses,
+      bindProjectDefaultRouting: this.#bindProjectDefaultRouting,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
     });

@@ -478,6 +478,66 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
     expect(client.state).toBe("closed");
   });
 
+  it("reads and writes strictly validated Project routing bindings", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000861";
+    const profileId = "00000000-0000-4000-8000-000000000901";
+    const revisionId = "00000000-0000-4000-8000-000000000871";
+    const binding = {
+      projectId,
+      bindingVersion: 1,
+      profileId,
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: revisionId,
+    } as const;
+    const observedMethods: string[] = [];
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      const method = String(record(value).method);
+      observedMethods.push(method);
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result:
+          method === "project.routing_binding.status_batch"
+            ? {
+                schemaVersion: 1,
+                statuses: [{ projectId, status: "default_bound", binding }],
+              }
+            : { schemaVersion: 1, status: "bound", binding },
+      });
+    });
+    const client = await createClient(endpoint);
+
+    await expect(
+      client.projectRoutingBindingStatuses({ projectIds: [projectId] }),
+    ).resolves.toEqual({
+      schemaVersion: 1,
+      statuses: [{ projectId, status: "default_bound", binding }],
+    });
+    await expect(
+      client.bindProjectDefaultRouting({
+        commandId: "00000000-0000-4000-8000-000000000862",
+        projectId,
+        expectedBindingVersion: 0,
+        previousProfileId: null,
+        expectedProfileVersion: 1,
+        expectedConfigurationRevisionId: revisionId,
+      }),
+    ).resolves.toEqual({ schemaVersion: 1, status: "bound", binding });
+    expect(observedMethods).toEqual([
+      "project.routing_binding.status_batch",
+      "project.routing_binding.bind_default",
+    ]);
+    await expect(
+      client.projectRoutingBindingStatuses({ projectIds: [projectId, projectId] }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
   it("captures the event sequence barrier at the exact account response position", async () => {
     const receivedSequences: number[] = [];
     let order: "event-first" | "response-first" = "event-first";

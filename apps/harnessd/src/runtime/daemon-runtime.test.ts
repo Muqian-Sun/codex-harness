@@ -16,6 +16,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { DaemonRuntime } from "./daemon-runtime.js";
 import { DaemonStateStore } from "./daemon-state-store.js";
+import { DESKTOP_DEFAULT_ROUTING_PROFILE_ID } from "./desktop-default-routing-profile.js";
+import { ModelRoutingProfileRepository } from "../domain/model-routing-profile-repository.js";
+import { ProjectRegistryRepository } from "../domain/project-registry-repository.js";
 import type {
   AppServerWorkerCloseResult,
   AppServerWorkerConfig,
@@ -40,6 +43,7 @@ const sockets: Socket[] = [];
 async function createRuntime(options?: {
   drainTimeoutMs?: number;
   handshakeTimeoutMs?: number;
+  stateStore?: DaemonStateStore;
   workerManager?: AppServerWorkerManager;
 }): Promise<{ endpoint: string; runtime: DaemonRuntime }> {
   const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-"));
@@ -53,6 +57,7 @@ async function createRuntime(options?: {
     platform: "posix",
     drainTimeoutMs: options?.drainTimeoutMs ?? 100,
     handshakeTimeoutMs: options?.handshakeTimeoutMs ?? 100,
+    ...(options?.stateStore === undefined ? {} : { stateStore: options.stateStore }),
     ...(options?.workerManager === undefined ? {} : { workerManager: options.workerManager }),
   });
   runtimes.push(runtime);
@@ -277,6 +282,37 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       error: { code: "service.unavailable" },
     });
 
+    const bindingStatusPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("binding-status-1", "project.routing_binding.status_batch", {
+        projectIds: ["00000000-0000-4000-8000-000000000941"],
+      }),
+    );
+    await expect(bindingStatusPromise).resolves.toMatchObject({
+      kind: "error",
+      id: "binding-status-1",
+      error: { code: "service.unavailable" },
+    });
+
+    const bindingWritePromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("binding-write-1", "project.routing_binding.bind_default", {
+        commandId: "00000000-0000-4000-8000-000000000961",
+        projectId: "00000000-0000-4000-8000-000000000941",
+        expectedBindingVersion: 0,
+        previousProfileId: null,
+        expectedProfileVersion: 1,
+        expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000951",
+      }),
+    );
+    await expect(bindingWritePromise).resolves.toMatchObject({
+      kind: "error",
+      id: "binding-write-1",
+      error: { code: "service.unavailable" },
+    });
+
     const closePromise = once(socket, "close");
     const shutdownResponsePromise = readFrame(socket);
     sendFrame(socket, rpc("shutdown-1", "system.shutdown", { reason: "user.requested" }));
@@ -481,6 +517,93 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
     expect(JSON.stringify(response)).not.toContain("id-runtime");
     expect(JSON.stringify(response)).not.toContain(SNAPSHOT_ID);
     expect(JSON.stringify(response)).not.toContain(WORKER_SESSION_ID);
+  });
+
+  it("serves Project routing binding reads, writes, and conflicts through the real runtime", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-binding-"));
+    temporaryDirectories.push(directory);
+    await chmod(directory, 0o700);
+    const stateStore = await DaemonStateStore.open({
+      databasePath: join(directory, "harness.db"),
+    });
+    const projectId = "00000000-0000-4000-8000-000000000941";
+    const configurationRevisionId = "00000000-0000-4000-8000-000000000951";
+    new ProjectRegistryRepository(stateStore.events).registerProject({
+      eventId: "00000000-0000-4000-8000-000000000943",
+      projectId,
+      displayName: "workspace",
+      workspace: { platform: "macos", absolutePath: "/Users/example/workspace" },
+      occurredAtMs: 1_750_000_000_001,
+    });
+    new ModelRoutingProfileRepository(stateStore.events).setConfiguration({
+      profileId: DESKTOP_DEFAULT_ROUTING_PROFILE_ID,
+      expectedProfileVersion: 0,
+      previousConfigurationRevisionId: null,
+      occurredAtMs: 1_750_000_000_002,
+      configuration: {
+        schemaVersion: 1,
+        revisionId: configurationRevisionId,
+        revisionNumber: 1,
+        tiers: {
+          fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+          standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+          deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+        },
+      },
+    });
+    const { endpoint } = await createRuntime({ stateStore });
+    const socket = await connect(endpoint);
+    await authenticate(socket);
+
+    const statusPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("binding-status", "project.routing_binding.status_batch", { projectIds: [projectId] }),
+    );
+    await expect(statusPromise).resolves.toMatchObject({
+      kind: "response",
+      result: { statuses: [{ projectId, status: "unbound", binding: null }] },
+    });
+
+    const bindParams = {
+      commandId: "00000000-0000-4000-8000-000000000961",
+      projectId,
+      expectedBindingVersion: 0,
+      previousProfileId: null,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: configurationRevisionId,
+    };
+    const bindPromise = readFrame(socket);
+    sendFrame(socket, rpc("binding-bind", "project.routing_binding.bind_default", bindParams));
+    await expect(bindPromise).resolves.toMatchObject({
+      kind: "response",
+      result: { status: "bound", binding: { projectId, bindingVersion: 1 } },
+    });
+
+    const missingPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("binding-missing", "project.routing_binding.status_batch", {
+        projectIds: ["00000000-0000-4000-8000-000000000942"],
+      }),
+    );
+    await expect(missingPromise).resolves.toMatchObject({
+      kind: "error",
+      error: { code: "rpc.conflict" },
+    });
+
+    const stalePromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("binding-stale", "project.routing_binding.bind_default", {
+        ...bindParams,
+        commandId: "00000000-0000-4000-8000-000000000962",
+      }),
+    );
+    await expect(stalePromise).resolves.toMatchObject({
+      kind: "error",
+      error: { code: "rpc.conflict" },
+    });
   });
 
   it("publishes a strictly sequenced account event after the manager installs a new snapshot", async () => {

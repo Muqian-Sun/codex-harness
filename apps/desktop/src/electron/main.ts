@@ -22,6 +22,8 @@ import {
   DESKTOP_ACCOUNT_PLAN_TYPES,
   decodeDesktopRoutingConfigurationMutationResult,
   decodeDesktopRoutingConfigurationUpdate,
+  decodeDesktopProjectRoutingBindingMutationResult,
+  decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopProjectSelectionResult,
   decodeDesktopProjectWorkspaceRegistration,
   failedBootstrapState,
@@ -44,12 +46,14 @@ const GET_BOOTSTRAP_STATE_CHANNEL = "desktop.bootstrap.get";
 const BOOTSTRAP_STATE_CHANGED_CHANNEL = "desktop.bootstrap.changed";
 const SET_ROUTING_CONFIGURATION_CHANNEL = "desktop.routing.set";
 const CHOOSE_PROJECT_WORKSPACE_CHANNEL = "desktop.project.choose";
+const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_default";
 const DEVELOPMENT_CODEX_ENVIRONMENT = "CODEX_HARNESS_CODEX_EXECUTABLE";
 const DEVELOPMENT_SMOKE_EXPECTED_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_EXPECTED";
 const DEVELOPMENT_SMOKE_USER_DATA_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_USER_DATA";
 const DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_ROUTING";
 const DEVELOPMENT_SMOKE_PROJECT_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_PROJECT";
 const DEVELOPMENT_SMOKE_PROJECT_PATH_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_PROJECT_PATH";
+const DEVELOPMENT_SMOKE_BINDING_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_BINDING";
 const preloadPath = fileURLToPath(new URL("../preload/index.cjs", import.meta.url));
 const rendererRoot = fileURLToPath(new URL("../renderer", import.meta.url));
 const developmentDaemonEntry = fileURLToPath(
@@ -148,6 +152,7 @@ async function runDesktopApplication(): Promise<void> {
   };
   stateStore.subscribe(broadcastState);
   let projectWorkspaceSelectionActive = false;
+  const activeProjectRoutingBindings = new Set<string>();
 
   ipcMain.handle(
     GET_BOOTSTRAP_STATE_CHANNEL,
@@ -214,6 +219,38 @@ async function runDesktopApplication(): Promise<void> {
     },
   );
 
+  ipcMain.handle(
+    BIND_PROJECT_DEFAULT_ROUTING_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      if (args.length !== 1 || !isManagedRenderer(event, windows)) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      const projectId = decodeDesktopProjectRoutingBindingProjectId(args[0]);
+      const state = stateStore.current;
+      if (
+        projectId === undefined ||
+        state.phase !== "ready" ||
+        !state.projects.projects.some((project) => project.projectId === projectId)
+      ) {
+        throw new Error("The desktop Project routing binding request is invalid.");
+      }
+      if (activeProjectRoutingBindings.has(projectId)) {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      activeProjectRoutingBindings.add(projectId);
+      try {
+        const result = decodeDesktopProjectRoutingBindingMutationResult(
+          await controller.bindProjectToDefaultRouting(projectId),
+        );
+        return result ?? Object.freeze({ status: "unavailable" as const });
+      } catch {
+        return Object.freeze({ status: "unavailable" as const });
+      } finally {
+        activeProjectRoutingBindings.delete(projectId);
+      }
+    },
+  );
+
   const createWindow = (): BrowserWindow => {
     const window = new BrowserWindow(createSecureWindowOptions(preloadPath));
     windows.add(window);
@@ -271,6 +308,7 @@ async function runDesktopApplication(): Promise<void> {
     if (expected === "ready" || expected === "failed") {
       const routingMode = process.env[DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT];
       const projectMode = process.env[DEVELOPMENT_SMOKE_PROJECT_ENVIRONMENT];
+      const bindingMode = process.env[DEVELOPMENT_SMOKE_BINDING_ENVIRONMENT];
       installSmokeObservation(
         mainWindow,
         stateStore,
@@ -280,6 +318,7 @@ async function runDesktopApplication(): Promise<void> {
         },
         routingMode === "configure" || routingMode === "recover" ? routingMode : undefined,
         projectMode === "register" || projectMode === "recover" ? projectMode : undefined,
+        bindingMode === "bind" || bindingMode === "recover" ? bindingMode : undefined,
       );
     }
   }
@@ -468,6 +507,9 @@ function desktopSmokeBootstrapProgress(state: DesktopBootstrapState): unknown {
       routingConfigured: state.routing.configured,
       routingProfileVersion: state.routing.profileVersion,
       projectCount: state.projects.projects.length,
+      projectRoutingBindings: state.projectRoutingBindings.bindings.map(
+        (binding) => binding.status,
+      ),
     });
   }
   return Object.freeze({ phase: state.phase });
@@ -480,6 +522,7 @@ function installSmokeObservation(
   markFailure: () => void,
   routingMode: "configure" | "recover" | undefined,
   projectMode: "register" | "recover" | undefined,
+  bindingMode: "bind" | "recover" | undefined,
 ): void {
   let finished = false;
   let inspecting = false;
@@ -526,6 +569,7 @@ function installSmokeObservation(
             `(() => {
             const routingMode = ${JSON.stringify(routingMode)};
             const projectMode = ${JSON.stringify(projectMode)};
+            const bindingMode = ${JSON.stringify(bindingMode)};
             const matrix = document.querySelector("[data-routing-configured]");
             if (routingMode === "configure" && matrix?.dataset.routingConfigured === "false" && !window.__codexHarnessRoutingSmokeSubmitted) {
               const values = ${JSON.stringify(ROUTING_SMOKE_DRAFT)};
@@ -550,6 +594,14 @@ function installSmokeObservation(
               if (choose instanceof HTMLButtonElement && !choose.disabled) {
                 window.__codexHarnessProjectSmokeSubmitted = true;
                 choose.click();
+              }
+            }
+            const projectRouting = document.querySelector("[data-project-routing]");
+            if (bindingMode === "bind" && projectRouting?.dataset.projectRouting === "unbound" && !window.__codexHarnessBindingSmokeSubmitted) {
+              const bind = projectRouting.querySelector("[data-project-routing-bind]");
+              if (bind instanceof HTMLButtonElement && !bind.disabled) {
+                window.__codexHarnessBindingSmokeSubmitted = true;
+                bind.click();
               }
             }
             const text = document.body?.textContent ?? "";
@@ -579,6 +631,9 @@ function installSmokeObservation(
               projectFeedback: document.querySelector("[data-project-feedback]")?.textContent,
               projectSubmitted: window.__codexHarnessProjectSmokeSubmitted === true,
               projectSelected: document.querySelector("[data-project-selected]") !== null,
+              projectRouting: Array.from(document.querySelectorAll("[data-project-routing]"), (element) => element.dataset.projectRouting),
+              projectRoutingButtonDisabled: document.querySelector("[data-project-routing-bind]")?.disabled,
+              bindingSubmitted: window.__codexHarnessBindingSmokeSubmitted === true,
               containsSensitiveText: ["private@example.com", "must-not-survive", "snapshotId", "workerSessionId", "nextCursor", "id-smoke"].some((value) => text.includes(value))
             };
           })()`,
@@ -609,6 +664,9 @@ function installSmokeObservation(
             projectFeedback?: unknown;
             projectSubmitted?: unknown;
             projectSelected?: unknown;
+            projectRouting?: unknown;
+            projectRoutingButtonDisabled?: unknown;
+            bindingSubmitted?: unknown;
             containsSensitiveText?: unknown;
           };
           lastRendererProgress = Object.freeze({
@@ -630,6 +688,9 @@ function installSmokeObservation(
             projectFeedback: rendered.projectFeedback,
             projectSubmitted: rendered.projectSubmitted,
             projectSelected: rendered.projectSelected,
+            projectRouting: rendered.projectRouting,
+            projectRoutingButtonDisabled: rendered.projectRoutingButtonDisabled,
+            bindingSubmitted: rendered.bindingSubmitted,
           });
           if (
             routingMode === "configure" &&
@@ -676,18 +737,33 @@ function installSmokeObservation(
                 (projectMode !== "register" ||
                   (rendered.projectSubmitted === true &&
                     rendered.projectSelected === true &&
-                    rendered.projectFeedback === "工作区已持久化；Task 与执行仍未开放。"))));
+                    (bindingMode === "bind" ||
+                      rendered.projectFeedback === "工作区已持久化；Task 与执行仍未开放。")))));
+          const bindingObserved =
+            expected === "ready" &&
+            (bindingMode === undefined ||
+              (Array.isArray(rendered.projectRouting) &&
+                rendered.projectRouting.length === 1 &&
+                rendered.projectRouting[0] === "default_bound" &&
+                rendered.projectRoutingButtonDisabled === true &&
+                (bindingMode !== "bind" ||
+                  (rendered.bindingSubmitted === true &&
+                    rendered.projectFeedback === "Project 已绑定默认路由；执行权限仍未开放。"))));
           if (
             rendered.phase === expected &&
             (expected !== "failed" ||
               (typeof rendered.code === "string" && rendered.code.length > 0)) &&
             (expected !== "ready" ||
-              (accountObserved && modelCatalogObserved && routingObserved && projectObserved))
+              (accountObserved &&
+                modelCatalogObserved &&
+                routingObserved &&
+                projectObserved &&
+                bindingObserved))
           ) {
             finished = true;
             clearTimeout(timeout);
             process.stdout.write(
-              `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true, routingObserved: true, projectObserved: true } : {}) })}\n`,
+              `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true, routingObserved: true, projectObserved: true, bindingObserved: true } : {}) })}\n`,
             );
             app.quit();
             return;

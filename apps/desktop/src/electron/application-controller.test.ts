@@ -113,6 +113,18 @@ const EMPTY_PROJECT_CATALOG_PAGE = Object.freeze({
 });
 
 const EMPTY_PROJECTS = Object.freeze({ projects: Object.freeze([]), hasMore: false });
+const EMPTY_PROJECT_ROUTING_BINDINGS = Object.freeze({ bindings: Object.freeze([]) });
+
+function routingBindingStatusPage(projectIds: readonly string[]) {
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    statuses: Object.freeze(
+      projectIds.map((projectId) =>
+        Object.freeze({ projectId, status: "unbound" as const, binding: null }),
+      ),
+    ),
+  });
+}
 
 function routingMethods(): Pick<
   DesktopSupervisorHandle,
@@ -126,7 +138,10 @@ function routingMethods(): Pick<
 
 function projectMethods(): Pick<
   DesktopSupervisorHandle,
-  "readProjectCatalogPage" | "registerProject"
+  | "readProjectCatalogPage"
+  | "registerProject"
+  | "readProjectRoutingBindingStatuses"
+  | "bindProjectDefaultRouting"
 > {
   return {
     readProjectCatalogPage: vi.fn(async () => EMPTY_PROJECT_CATALOG_PAGE),
@@ -134,6 +149,20 @@ function projectMethods(): Pick<
       schemaVersion: 1 as const,
       status: "registered" as const,
       project: PROJECT,
+    })),
+    readProjectRoutingBindingStatuses: vi.fn(async ({ projectIds }) =>
+      routingBindingStatusPage(projectIds),
+    ),
+    bindProjectDefaultRouting: vi.fn(async (params) => ({
+      schemaVersion: 1 as const,
+      status: "bound" as const,
+      binding: {
+        projectId: params.projectId,
+        bindingVersion: params.expectedBindingVersion + 1,
+        profileId: "00000000-0000-4000-8000-000000000901",
+        profileVersionAtBinding: params.expectedProfileVersion,
+        configurationRevisionIdAtBinding: params.expectedConfigurationRevisionId,
+      },
     })),
   };
 }
@@ -201,6 +230,7 @@ describe("desktop application controller", () => {
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
       projects: EMPTY_PROJECTS,
+      projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
     });
 
     closed.resolve(closeResult("graceful"));
@@ -302,6 +332,7 @@ describe("desktop application controller", () => {
         closed: new Promise(() => undefined),
         readAccountStatusObservation: vi.fn(async () => accountObservation()),
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
         readProjectCatalogPage,
         registerProject,
         ...routingMethods(),
@@ -339,6 +370,278 @@ describe("desktop application controller", () => {
       }),
     ).resolves.toEqual({ status: "unavailable" });
     expect(registerProject).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds a visible Project with main-owned fences and publishes only the minimal status", async () => {
+    const stateStore = new BootstrapStateStore();
+    const projectPage = {
+      schemaVersion: 1 as const,
+      projects: Object.freeze([PROJECT]),
+      nextCursor: null,
+    };
+    const defaultBinding = Object.freeze({
+      projectId: PROJECT.projectId,
+      bindingVersion: 1,
+      profileId: "00000000-0000-4000-8000-000000000901",
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+    });
+    const readProjectRoutingBindingStatuses = vi
+      .fn()
+      .mockResolvedValueOnce(routingBindingStatusPage([PROJECT.projectId]))
+      .mockResolvedValueOnce(routingBindingStatusPage([PROJECT.projectId]))
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        statuses: [
+          { projectId: PROJECT.projectId, status: "default_bound", binding: defaultBinding },
+        ],
+      });
+    const bindProjectDefaultRouting = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      status: "bound" as const,
+      binding: defaultBinding,
+    }));
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage: vi.fn(async () => projectPage),
+        registerProject: projectMethods().registerProject,
+        readProjectRoutingBindingStatuses,
+        bindProjectDefaultRouting,
+        readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
+        setRoutingConfiguration: routingMethods().setRoutingConfiguration,
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
+      status: "bound",
+    });
+    expect(bindProjectDefaultRouting).toHaveBeenCalledWith({
+      commandId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      projectId: PROJECT.projectId,
+      expectedBindingVersion: 0,
+      previousProfileId: null,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: CONFIGURED_ROUTING.configurationRevisionId,
+    });
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT.projectId, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    const projectedBindings =
+      stateStore.current.phase === "ready" ? stateStore.current.projectRoutingBindings : undefined;
+    expect(JSON.stringify(projectedBindings)).not.toContain(defaultBinding.profileId);
+    expect(JSON.stringify(projectedBindings)).not.toContain(
+      defaultBinding.configurationRevisionIdAtBinding,
+    );
+  });
+
+  it("fails closed when a binding result does not match the requested routing fence", async () => {
+    const stateStore = new BootstrapStateStore();
+    const projectPage = {
+      schemaVersion: 1 as const,
+      projects: Object.freeze([PROJECT]),
+      nextCursor: null,
+    };
+    const readProjectRoutingBindingStatuses = vi.fn(async () =>
+      routingBindingStatusPage([PROJECT.projectId]),
+    );
+    const bindProjectDefaultRouting = vi
+      .fn()
+      .mockResolvedValueOnce({
+        schemaVersion: 1 as const,
+        status: "bound" as const,
+        binding: {
+          projectId: PROJECT.projectId,
+          bindingVersion: 1,
+          profileId: "00000000-0000-4000-8000-000000000901",
+          profileVersionAtBinding: 2,
+          configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+        },
+      })
+      .mockRejectedValueOnce(new Error("contained binding failure"));
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage: vi.fn(async () => projectPage),
+        registerProject: projectMethods().registerProject,
+        readProjectRoutingBindingStatuses,
+        bindProjectDefaultRouting,
+        readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
+        setRoutingConfiguration: routingMethods().setRoutingConfiguration,
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
+      status: "unavailable",
+    });
+    await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
+      status: "unavailable",
+    });
+    expect(readProjectRoutingBindingStatuses).toHaveBeenCalledTimes(3);
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      projectRoutingBindings: { bindings: [{ status: "unbound" }] },
+    });
+  });
+
+  it("fails closed when the refreshed binding is not the acknowledged default binding", async () => {
+    const stateStore = new BootstrapStateStore();
+    const projectPage = {
+      schemaVersion: 1 as const,
+      projects: Object.freeze([PROJECT]),
+      nextCursor: null,
+    };
+    const defaultBinding = {
+      projectId: PROJECT.projectId,
+      bindingVersion: 1,
+      profileId: "00000000-0000-4000-8000-000000000901",
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+    };
+    const otherBinding = {
+      ...defaultBinding,
+      profileId: "00000000-0000-4000-8000-000000000902",
+    };
+    const readProjectRoutingBindingStatuses = vi
+      .fn()
+      .mockResolvedValueOnce(routingBindingStatusPage([PROJECT.projectId]))
+      .mockResolvedValueOnce(routingBindingStatusPage([PROJECT.projectId]))
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        statuses: [
+          { projectId: PROJECT.projectId, status: "other_profile_bound", binding: otherBinding },
+        ],
+      });
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage: vi.fn(async () => projectPage),
+        registerProject: projectMethods().registerProject,
+        readProjectRoutingBindingStatuses,
+        bindProjectDefaultRouting: vi.fn(async () => ({
+          schemaVersion: 1 as const,
+          status: "bound" as const,
+          binding: defaultBinding,
+        })),
+        readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
+        setRoutingConfiguration: routingMethods().setRoutingConfiguration,
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
+      status: "unavailable",
+    });
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      projectRoutingBindings: { bindings: [{ status: "unbound" }] },
+    });
+  });
+
+  it("rejects invisible Projects and reports an unconfigured default without writing", async () => {
+    const stateStore = new BootstrapStateStore();
+    const bindProjectDefaultRouting = vi.fn();
+    const projectPage = {
+      schemaVersion: 1 as const,
+      projects: Object.freeze([PROJECT]),
+      nextCursor: null,
+    };
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage: vi.fn(async () => projectPage),
+        registerProject: projectMethods().registerProject,
+        readProjectRoutingBindingStatuses: vi.fn(async () =>
+          routingBindingStatusPage([PROJECT.projectId]),
+        ),
+        bindProjectDefaultRouting,
+        ...routingMethods(),
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(
+      controller.bindProjectToDefaultRouting("00000000-0000-4000-8000-000000000882"),
+    ).resolves.toEqual({ status: "unavailable" });
+    await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
+      status: "routing_unconfigured",
+    });
+    expect(bindProjectDefaultRouting).not.toHaveBeenCalled();
+  });
+
+  it("refreshes routing and binding state after an optimistic binding conflict", async () => {
+    const stateStore = new BootstrapStateStore();
+    const projectPage = {
+      schemaVersion: 1 as const,
+      projects: Object.freeze([PROJECT]),
+      nextCursor: null,
+    };
+    const otherBinding = {
+      projectId: PROJECT.projectId,
+      bindingVersion: 1,
+      profileId: "00000000-0000-4000-8000-000000000902",
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: "00000000-0000-4000-8000-000000000872",
+    };
+    const readProjectRoutingBindingStatuses = vi
+      .fn()
+      .mockResolvedValueOnce(routingBindingStatusPage([PROJECT.projectId]))
+      .mockResolvedValueOnce(routingBindingStatusPage([PROJECT.projectId]))
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        statuses: [
+          { projectId: PROJECT.projectId, status: "other_profile_bound", binding: otherBinding },
+        ],
+      });
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage: vi.fn(async () => projectPage),
+        registerProject: projectMethods().registerProject,
+        readProjectRoutingBindingStatuses,
+        bindProjectDefaultRouting: vi.fn(async () => {
+          throw new HarnessRpcClientError("rpc_error", "rpc.conflict");
+        }),
+        readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
+        setRoutingConfiguration: routingMethods().setRoutingConfiguration,
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
+      status: "conflict",
+    });
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      projectRoutingBindings: {
+        bindings: [{ status: "other_profile_bound", bindingVersion: 1 }],
+      },
+    });
   });
 
   it("waits for an in-flight start before stopping and never publishes transient readiness", async () => {
@@ -458,6 +761,29 @@ describe("desktop application controller", () => {
     expect(stateStore.current).toEqual({ phase: "failed", code: "daemon_startup_failed" });
   });
 
+  it("never publishes partial readiness when Project binding status is unavailable", async () => {
+    const stateStore = new BootstrapStateStore();
+    const stop = vi.fn(async () => closeResult("graceful"));
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
+        readProjectRoutingBindingStatuses: vi.fn(async () => {
+          throw new HarnessRpcClientError("rpc_error", "service.unavailable");
+        }),
+        ...routingMethods(),
+        stop,
+      }),
+    });
+
+    await controller.start();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stateStore.current).toEqual({ phase: "failed", code: "daemon_startup_failed" });
+  });
+
   it("uses the RPC snapshot when a cached startup event is already covered by its sequence barrier", async () => {
     const stateStore = new BootstrapStateStore();
     const controller = new DesktopApplicationController({
@@ -483,6 +809,7 @@ describe("desktop application controller", () => {
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
       projects: EMPTY_PROJECTS,
+      projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
     });
   });
 
@@ -511,6 +838,37 @@ describe("desktop application controller", () => {
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
       projects: EMPTY_PROJECTS,
+      projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
+    });
+  });
+
+  it("keeps an account event received during the second bootstrap stage", async () => {
+    const stateStore = new BootstrapStateStore();
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async (onAccountStatusChanged) => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: async () => accountObservation(ACCOUNT_STATUS, 1),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
+        readProjectRoutingBindingStatuses: vi.fn(async () => {
+          onAccountStatusChanged(Object.freeze({ sequence: 2, account: UPDATED_ACCOUNT_STATUS }));
+          return routingBindingStatusPage([]);
+        }),
+        ...routingMethods(),
+        stop: async () => closeResult("graceful"),
+      }),
+    });
+
+    await controller.start();
+
+    expect(stateStore.current).toEqual({
+      phase: "ready",
+      account: { status: "authenticated", credentialKind: "chatgpt", planType: "pro" },
+      catalog: CATALOG_SUMMARY,
+      routing: ROUTING_SUMMARY,
+      projects: EMPTY_PROJECTS,
+      projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
     });
   });
 
@@ -541,6 +899,7 @@ describe("desktop application controller", () => {
       catalog: CATALOG_SUMMARY,
       routing: ROUTING_SUMMARY,
       projects: EMPTY_PROJECTS,
+      projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
     });
 
     await controller.stop();

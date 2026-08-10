@@ -1,6 +1,7 @@
 import type {
   DesktopBootstrapState,
   DesktopProjectSelectionResult,
+  DesktopProjectRoutingBindingMutationResult,
   DesktopRoutingConfigurationMutationResult,
   DesktopRoutingConfigurationUpdate,
 } from "../shared/bootstrap-state.js";
@@ -10,6 +11,9 @@ declare global {
     readonly codexHarness: Readonly<{
       getBootstrapState(): Promise<DesktopBootstrapState>;
       chooseProjectWorkspace(): Promise<DesktopProjectSelectionResult>;
+      bindProjectToDefaultRouting(
+        projectId: string,
+      ): Promise<DesktopProjectRoutingBindingMutationResult>;
       setRoutingConfiguration(
         update: DesktopRoutingConfigurationUpdate,
       ): Promise<DesktopRoutingConfigurationMutationResult>;
