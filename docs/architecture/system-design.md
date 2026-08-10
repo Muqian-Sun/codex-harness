@@ -323,8 +323,11 @@ pnpm format:check
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm test:coverage:changed --coverage.changed=<目标分支或基准 SHA>
 pnpm build
 pnpm smoke:build
 ```
+
+覆盖率命令使用 Vitest V8 provider，要求唯一且可解析为 Git commit 的显式基准，运行完整单元测试集合，并把相对该基准发生变化的 `apps/**/src`、`packages/**/src` 和 `scripts/**/*.mjs` 可执行文件限制为报告集合；测试/声明文件与仅数据的生成目录不计入。`coverage.include` 保证未被测试导入的变更源码仍以零覆盖出现，所有变更文件的可执行行聚合覆盖率必须至少为 90%。Pull Request CI 使用不可变 base SHA，纯文档或配置 PR 不适用该指标；不得通过扩大 exclude、自动更新阈值或省略未导入文件规避门禁。
 
 每个 PR 还必须完成与风险相称的安全、兼容性、集成和故障验证，并针对同一个 head SHA 连续完成两轮无新增可执行问题的审查。合并使用 squash，校验预期 head SHA；合并完成后确认目标提交，再删除远程和本地功能分支。
