@@ -372,10 +372,14 @@ export class DaemonRuntime {
       if (socket !== this.#activeSocket) {
         return;
       }
+      socket.pause();
       this.#enqueueSocketInput(inputQueue, async () => {
         this.#applyActions(socket, await session.receive(chunk));
         if (session.state !== "awaiting_hello") {
           this.#clearHandshakeTimer();
+        }
+        if (inputQueue === this.#activeInputQueue && socket === this.#activeSocket) {
+          socket.resume();
         }
       });
     });
