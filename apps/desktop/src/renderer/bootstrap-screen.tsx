@@ -167,7 +167,7 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
   );
 }
 
-function ProjectRegistryPanel({
+export function ProjectRegistryPanel({
   projects,
   projectRoutingBindings,
   routingConfigured,
@@ -332,7 +332,7 @@ function projectRoutingBindingLabel(
   }
 }
 
-function projectBindingFeedback(
+export function projectBindingFeedback(
   status: "idle" | "binding" | DesktopProjectRoutingBindingMutationResult["status"],
   routingConfigured: boolean,
 ): string | undefined {

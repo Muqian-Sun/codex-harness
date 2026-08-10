@@ -511,6 +511,12 @@ describe("RPC dispatcher Project routing binding", () => {
     for (const candidate of [
       dispatchRpcRequest(request("project.routing_binding.status_batch", statusParams), {
         ...base,
+        readProjectRoutingBindingStatuses: () => {
+          throw new Error("private storage detail");
+        },
+      }),
+      dispatchRpcRequest(request("project.routing_binding.status_batch", statusParams), {
+        ...base,
         readProjectRoutingBindingStatuses: () => ({
           ...PROJECT_ROUTING_BINDING_STATUSES,
           private: true,

@@ -1,7 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { BootstrapScreen, createRoutingDraftInputUpdate } from "./bootstrap-screen.js";
+import {
+  BootstrapScreen,
+  createRoutingDraftInputUpdate,
+  projectBindingFeedback,
+} from "./bootstrap-screen.js";
 
 const CATALOG = Object.freeze({
   provider: "openai",
@@ -79,6 +83,19 @@ const PROJECT_ROUTING_BINDINGS = Object.freeze({
 });
 
 describe("desktop bootstrap screen", () => {
+  it.each([
+    ["idle", true, undefined],
+    ["idle", false, "请先保存完整三级模型配置，再为 Project 绑定默认路由。"],
+    ["binding", true, "正在校验 Project、绑定版本与当前路由配置。"],
+    ["bound", true, "Project 已绑定默认路由；执行权限仍未开放。"],
+    ["existing", true, "Project 已处于相同默认路由绑定，无需重复写入。"],
+    ["conflict", true, "绑定或路由配置已变化，已刷新权威状态，请重新确认。"],
+    ["routing_unconfigured", true, "默认路由尚未配置，请先保存完整三级模型配置。"],
+    ["unavailable", true, "当前无法确认绑定结果，请刷新或重启后核对。"],
+  ] as const)("formats stable %s binding feedback", (status, configured, expected) => {
+    expect(projectBindingFeedback(status, configured)).toBe(expected);
+  });
+
   it("captures routing input before React runs the state updater", () => {
     const draft = Object.freeze({
       fast: Object.freeze({ model: "", reasoningEffort: "" }),

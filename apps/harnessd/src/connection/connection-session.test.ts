@@ -327,6 +327,23 @@ describe("daemon connection session", () => {
     expect(bindProjectDefaultRouting).toHaveBeenCalledWith(bindParams);
   });
 
+  it("fails closed when Project routing binding providers are absent", () => {
+    const session = createSession();
+    authenticate(session);
+
+    expect(
+      sentValues(
+        session.receive(
+          frame(
+            rpc("binding-get", "project.routing_binding.status_batch", {
+              projectIds: ["00000000-0000-4000-8000-000000000861"],
+            }),
+          ),
+        ),
+      )[0],
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+  });
+
   it("fails closed on authentication failure without echoing secrets", () => {
     const session = createSession();
     const wrongCapability = `${"B".repeat(42)}A`;

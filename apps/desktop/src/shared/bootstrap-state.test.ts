@@ -227,12 +227,49 @@ describe("desktop bootstrap state", () => {
         [PROJECT.projectId],
       ),
     ).toThrow(BootstrapStateTransitionError);
+    expect(() =>
+      projectDesktopProjectRoutingBindings(
+        {
+          ...rawDefault,
+          statuses: [
+            {
+              ...rawDefault.statuses[0],
+              binding: { ...rawDefault.statuses[0]!.binding, bindingVersion: 0 },
+            },
+          ],
+        },
+        [PROJECT.projectId],
+      ),
+    ).toThrow(BootstrapStateTransitionError);
     expect(decodeDesktopProjectRoutingBindingMutationResult({ status: "bound" })).toEqual({
       status: "bound",
     });
     expect(decodeDesktopProjectRoutingBindingMutationResult({ status: "future" })).toBeUndefined();
     expect(decodeDesktopProjectRoutingBindingProjectId(PROJECT.projectId)).toBe(PROJECT.projectId);
     expect(decodeDesktopProjectRoutingBindingProjectId("invalid")).toBeUndefined();
+
+    for (const projectRoutingBindings of [
+      { bindings: [] },
+      {
+        bindings: [{ projectId: PROJECT.projectId, status: "invalid", bindingVersion: null }],
+      },
+      {
+        bindings: [
+          {
+            projectId: PROJECT.projectId,
+            status: "default_bound",
+            bindingVersion: 0,
+          },
+        ],
+      },
+    ]) {
+      expect(
+        decodeDesktopBootstrapState({
+          ...READY,
+          projectRoutingBindings,
+        }),
+      ).toBeUndefined();
+    }
   });
 
   it("projects and validates Project catalog, chooser input, and selection results", () => {

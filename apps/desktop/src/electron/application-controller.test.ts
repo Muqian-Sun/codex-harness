@@ -453,6 +453,20 @@ describe("desktop application controller", () => {
     const readProjectRoutingBindingStatuses = vi.fn(async () =>
       routingBindingStatusPage([PROJECT.projectId]),
     );
+    const bindProjectDefaultRouting = vi
+      .fn()
+      .mockResolvedValueOnce({
+        schemaVersion: 1 as const,
+        status: "bound" as const,
+        binding: {
+          projectId: PROJECT.projectId,
+          bindingVersion: 1,
+          profileId: "00000000-0000-4000-8000-000000000901",
+          profileVersionAtBinding: 2,
+          configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+        },
+      })
+      .mockRejectedValueOnce(new Error("contained binding failure"));
     const controller = new DesktopApplicationController({
       stateStore,
       createSupervisor: async () => ({
@@ -462,17 +476,7 @@ describe("desktop application controller", () => {
         readProjectCatalogPage: vi.fn(async () => projectPage),
         registerProject: projectMethods().registerProject,
         readProjectRoutingBindingStatuses,
-        bindProjectDefaultRouting: vi.fn(async () => ({
-          schemaVersion: 1 as const,
-          status: "bound" as const,
-          binding: {
-            projectId: PROJECT.projectId,
-            bindingVersion: 1,
-            profileId: "00000000-0000-4000-8000-000000000901",
-            profileVersionAtBinding: 2,
-            configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
-          },
-        })),
+        bindProjectDefaultRouting,
         readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
         setRoutingConfiguration: routingMethods().setRoutingConfiguration,
         stop: vi.fn(async () => closeResult("graceful")),
@@ -483,7 +487,10 @@ describe("desktop application controller", () => {
     await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
       status: "unavailable",
     });
-    expect(readProjectRoutingBindingStatuses).toHaveBeenCalledTimes(2);
+    await expect(controller.bindProjectToDefaultRouting(PROJECT.projectId)).resolves.toEqual({
+      status: "unavailable",
+    });
+    expect(readProjectRoutingBindingStatuses).toHaveBeenCalledTimes(3);
     expect(stateStore.current).toMatchObject({
       phase: "ready",
       projectRoutingBindings: { bindings: [{ status: "unbound" }] },

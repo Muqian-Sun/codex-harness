@@ -121,6 +121,7 @@ function seedOtherBinding(store: DaemonStateStore): void {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const store of stores.splice(0)) {
     store.close();
   }
@@ -295,5 +296,65 @@ describe("ProjectRoutingBindingService", () => {
     expect(() => service.bindDefault(bindParams())).toThrowError(
       expect.objectContaining({ code: "unavailable" }),
     );
+  });
+
+  it("fails closed on malformed requests and invalid construction dependencies", async () => {
+    const store = await openStore();
+    const service = new ProjectRoutingBindingService(store);
+
+    expect(() => service.readStatuses(null)).toThrowError(
+      expect.objectContaining({ code: "conflict" }),
+    );
+    expect(() => service.bindDefault(null)).toThrowError(
+      expect.objectContaining({ code: "conflict" }),
+    );
+    expect(
+      () =>
+        new ProjectRoutingBindingService(store, {
+          now: undefined,
+        } as unknown as Readonly<{ now(): number }>),
+    ).toThrowError(expect.objectContaining({ code: "unavailable" }));
+    expect(
+      () =>
+        new ProjectRoutingBindingService({
+          state: "ready",
+          get events(): never {
+            throw new Error("unavailable event store");
+          },
+        } as unknown as DaemonStateStore),
+    ).toThrowError(expect.objectContaining({ code: "unavailable" }));
+  });
+
+  it("uses the production clock and rejects stale idempotency and invalid timestamps", async () => {
+    const store = await openStore();
+    registerProject(store);
+    createProfile(store);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_750_000_000_003);
+    const service = new ProjectRoutingBindingService(store);
+
+    expect(service.bindDefault(bindParams())).toMatchObject({ status: "bound" });
+    expect(() =>
+      service.bindDefault(
+        bindParams(BIND_COMMAND_2, {
+          expectedBindingVersion: 2,
+          previousProfileId: DESKTOP_DEFAULT_ROUTING_PROFILE_ID,
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    clock.mockRestore();
+
+    const secondStore = await openStore();
+    registerProject(secondStore);
+    createProfile(secondStore);
+    expect(() =>
+      new ProjectRoutingBindingService(secondStore, { now: () => -1 }).bindDefault(bindParams()),
+    ).toThrowError(expect.objectContaining({ code: "unavailable" }));
+    expect(() =>
+      new ProjectRoutingBindingService(secondStore, {
+        now: () => {
+          throw new Error("clock unavailable");
+        },
+      }).bindDefault(bindParams(BIND_COMMAND_2)),
+    ).toThrowError(expect.objectContaining({ code: "unavailable" }));
   });
 });
