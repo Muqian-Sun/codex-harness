@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { decodeDesktopProjectTaskCreation } from "../shared/bootstrap-state.js";
 import type {
   DesktopAccountPlanType,
   DesktopAccountStatus,
@@ -10,6 +11,11 @@ import type {
   DesktopProjectRoutingBindings,
   DesktopProjectSelectionResult,
   DesktopProjectSummary,
+  DesktopProjectTaskCatalog,
+  DesktopProjectTaskCatalogResult,
+  DesktopProjectTaskCreation,
+  DesktopProjectTaskMutationResult,
+  DesktopTaskStage,
   DesktopRoutingAvailabilityStatus,
   DesktopRoutingConfiguration,
   DesktopRoutingConfigurationMutationResult,
@@ -61,6 +67,14 @@ const availabilityLabels: Readonly<Record<DesktopRoutingAvailabilityStatus, stri
     model_unavailable: "模型不可用",
     reasoning_effort_unsupported: "推理强度不支持",
   });
+
+const taskStageLabels: Readonly<Record<DesktopTaskStage, string>> = Object.freeze({
+  requirements_only: "需求已持久化",
+  candidate_plan: "候选计划待确认",
+  confirmed_plan: "计划已确认·待建图",
+  active_graph: "DAG 已建立",
+  active_graph_with_candidate: "DAG 活动·新计划待确认",
+});
 
 const phasePresentation = Object.freeze({
   starting: Object.freeze({
@@ -150,6 +164,13 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
         ) : null}
 
         {state.phase === "ready" ? (
+          <ProjectTaskPanel
+            projects={state.projects}
+            projectRoutingBindings={state.projectRoutingBindings}
+          />
+        ) : null}
+
+        {state.phase === "ready" ? (
           <RoutingConfigurationPanel routing={state.routing} catalog={state.catalog} />
         ) : null}
 
@@ -158,7 +179,8 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
 
       <footer className="footer-note">
         <span>
-          工作区与路由配置可持久化；任务、TODO / DAG、实际模型选择与执行仍由后续安全门禁控制。
+          工作区、路由配置与 Task 初始需求可持久化；TODO /
+          DAG、实际模型选择与执行仍由后续安全门禁控制。
         </span>
         <span className="footer-rule" aria-hidden="true" />
         <span>LOCAL ONLY</span>
@@ -319,6 +341,242 @@ export function ProjectRegistryPanel({
   );
 }
 
+type TaskCatalogViewState =
+  | Readonly<{ status: "idle" | "loading" | "unavailable" }>
+  | Readonly<{ status: "loaded"; catalog: DesktopProjectTaskCatalog }>;
+
+export function ProjectTaskPanel({
+  projects,
+  projectRoutingBindings,
+}: Readonly<{
+  projects: DesktopProjectCatalog;
+  projectRoutingBindings: DesktopProjectRoutingBindings;
+}>) {
+  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(() =>
+    preferredTaskProjectId(projects, projectRoutingBindings),
+  );
+  const [catalogState, setCatalogState] = useState<TaskCatalogViewState>({ status: "idle" });
+  const [title, setTitle] = useState("");
+  const [sourceText, setSourceText] = useState("");
+  const [mutationStatus, setMutationStatus] = useState<
+    "idle" | "creating" | DesktopProjectTaskMutationResult["status"]
+  >("idle");
+
+  useEffect(() => {
+    if (
+      selectedProjectId === undefined ||
+      !projects.projects.some((project) => project.projectId === selectedProjectId)
+    ) {
+      setSelectedProjectId(preferredTaskProjectId(projects, projectRoutingBindings));
+    }
+  }, [projectRoutingBindings, projects, selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId === undefined) {
+      setCatalogState({ status: "idle" });
+      return;
+    }
+    let active = true;
+    setCatalogState({ status: "loading" });
+    void desktopTaskApi()
+      .readProjectTaskCatalog(selectedProjectId)
+      .then((result) => {
+        if (active) {
+          setCatalogState(
+            result.status === "loaded"
+              ? { status: "loaded", catalog: result.catalog }
+              : { status: "unavailable" },
+          );
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setCatalogState({ status: "unavailable" });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId]);
+
+  const selectedProject = projects.projects.find(
+    (project) => project.projectId === selectedProjectId,
+  );
+  const selectedBinding = projectRoutingBindings.bindings.find(
+    (binding) => binding.projectId === selectedProjectId,
+  );
+  const creation =
+    selectedProject === undefined
+      ? undefined
+      : decodeDesktopProjectTaskCreation({
+          projectId: selectedProject.projectId,
+          title,
+          sourceText,
+        });
+  const canCreate =
+    creation !== undefined &&
+    selectedBinding?.status === "default_bound" &&
+    mutationStatus !== "creating";
+
+  const createTask = async (): Promise<void> => {
+    if (!canCreate || creation === undefined) {
+      return;
+    }
+    setMutationStatus("creating");
+    try {
+      const result = await desktopTaskApi().createProjectTask(creation);
+      if (result.status === "created" || result.status === "existing") {
+        setCatalogState({ status: "loaded", catalog: result.catalog });
+        setTitle("");
+        setSourceText("");
+      }
+      setMutationStatus(result.status);
+    } catch {
+      setMutationStatus("unavailable");
+    }
+  };
+
+  const tasks = catalogState.status === "loaded" ? catalogState.catalog.tasks : [];
+  return (
+    <section
+      className="project-tasks"
+      aria-label="Project Task 目录"
+      data-task-project={selectedProjectId ?? "none"}
+      data-task-catalog-status={catalogState.status}
+      data-task-count={String(tasks.length)}
+    >
+      <header className="task-header">
+        <div>
+          <p className="card-index">04 / TASK INTAKE</p>
+          <h2>持久 Task 入口</h2>
+          <p>这里只保存目标原文与 Project 归属；计划、TODO / DAG、模型调用和执行仍保持关闭。</p>
+        </div>
+        <label>
+          <span>目标 Project</span>
+          <select
+            data-task-project-select
+            value={selectedProjectId ?? ""}
+            disabled={projects.projects.length === 0 || mutationStatus === "creating"}
+            onChange={(event) => {
+              setSelectedProjectId(readInputValue(event.currentTarget) || undefined);
+              setMutationStatus("idle");
+            }}
+          >
+            {projects.projects.length === 0 ? <option value="">尚无 Project</option> : null}
+            {projects.projects.map((project) => (
+              <option key={project.projectId} value={project.projectId}>
+                {project.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+      </header>
+
+      <div className="task-workspace">
+        <div className="task-intake-form">
+          <label>
+            <span>Task 标题</span>
+            <input
+              data-task-title
+              value={title}
+              maxLength={256}
+              disabled={selectedProject === undefined || mutationStatus === "creating"}
+              onChange={(event) => setTitle(readInputValue(event.currentTarget))}
+              placeholder="例如：设计并实现持久计划恢复"
+            />
+          </label>
+          <label>
+            <span>需求原文</span>
+            <textarea
+              data-task-source
+              value={sourceText}
+              maxLength={16 * 1_024}
+              disabled={selectedProject === undefined || mutationStatus === "creating"}
+              onChange={(event) => setSourceText(readInputValue(event.currentTarget))}
+              placeholder="描述目标、约束和验收预期；Harness 会原样持久化。"
+            />
+          </label>
+          <button
+            type="button"
+            data-task-create
+            disabled={!canCreate}
+            onClick={() => void createTask()}
+          >
+            {mutationStatus === "creating" ? "正在原子提交" : "创建持久 Task"}
+          </button>
+          <span data-task-feedback aria-live="polite">
+            {taskMutationFeedback(mutationStatus, selectedBinding?.status)}
+          </span>
+        </div>
+
+        <div className="task-catalog">
+          {catalogState.status === "loading" ? <p>正在读取本地 Task 目录…</p> : null}
+          {catalogState.status === "unavailable" ? (
+            <p>当前无法确认 Task 目录；请重启后核对，系统不会据此自动重放写入。</p>
+          ) : null}
+          {catalogState.status === "loaded" && tasks.length === 0 ? (
+            <p>该 Project 尚无 Task。</p>
+          ) : null}
+          {tasks.length > 0 ? (
+            <ol>
+              {tasks.map((task, index) => (
+                <li key={task.taskId} data-task-id={task.taskId} data-task-stage={task.stage}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <div>
+                    <strong>{task.title}</strong>
+                    <p>{task.objective}</p>
+                  </div>
+                  <small>
+                    V{task.taskVersion} · {taskStageLabels[task.stage]}
+                  </small>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+          {catalogState.status === "loaded" && catalogState.catalog.hasMore ? (
+            <small>另有 Task 未在首屏展开</small>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function preferredTaskProjectId(
+  projects: DesktopProjectCatalog,
+  bindings: DesktopProjectRoutingBindings,
+): string | undefined {
+  return (
+    bindings.bindings.find((binding) => binding.status === "default_bound")?.projectId ??
+    projects.projects[0]?.projectId
+  );
+}
+
+function taskMutationFeedback(
+  status: "idle" | "creating" | DesktopProjectTaskMutationResult["status"],
+  bindingStatus: "unbound" | "default_bound" | "other_profile_bound" | undefined,
+): string {
+  if (status === "idle" && bindingStatus !== "default_bound") {
+    return "请先为 Project 绑定默认路由；这仍不会开放执行权限。";
+  }
+  switch (status) {
+    case "idle":
+      return "创建后只进入 Requirement 阶段，不会自动调用模型。";
+    case "creating":
+      return "正在原子提交 Task 与 Project 归属。";
+    case "created":
+      return "Task 与初始需求已持久化；计划和执行仍未开始。";
+    case "existing":
+      return "相同命令已经提交，已重新读取当前目录。";
+    case "conflict":
+      return "Project 或绑定状态已变化，请核对后重试。";
+    case "routing_unbound":
+      return "Project 尚未绑定默认路由。";
+    case "unavailable":
+      return "结果当前未知；请先重启核对目录，不要盲目重复创建。";
+  }
+}
+
 function projectRoutingBindingLabel(
   status: "unbound" | "default_bound" | "other_profile_bound",
 ): string {
@@ -422,7 +680,7 @@ function RoutingConfigurationPanel({
     >
       <header className="routing-header">
         <div>
-          <p className="card-index">04 / ROUTING MATRIX</p>
+          <p className="card-index">05 / ROUTING MATRIX</p>
           <h2>三级模型控制台</h2>
           <p>模型与推理强度由用户明确配置；Harness 只保存精确映射，不根据名称猜测能力。</p>
         </div>
@@ -622,6 +880,24 @@ function desktopProjectApi(): Readonly<{
   ).codexHarness;
 }
 
+function desktopTaskApi(): Readonly<{
+  readProjectTaskCatalog(projectId: string): Promise<DesktopProjectTaskCatalogResult>;
+  createProjectTask(
+    creation: DesktopProjectTaskCreation,
+  ): Promise<DesktopProjectTaskMutationResult>;
+}> {
+  return (
+    globalThis as unknown as {
+      codexHarness: Readonly<{
+        readProjectTaskCatalog(projectId: string): Promise<DesktopProjectTaskCatalogResult>;
+        createProjectTask(
+          creation: DesktopProjectTaskCreation,
+        ): Promise<DesktopProjectTaskMutationResult>;
+      }>;
+    }
+  ).codexHarness;
+}
+
 function readInputValue(input: unknown): string {
   return (input as { value: string }).value;
 }
@@ -637,7 +913,7 @@ function ModelCatalogSummary({ catalog }: Readonly<{ catalog: DesktopModelCatalo
     >
       <header className="catalog-header">
         <div>
-          <p className="card-index">05 / MODEL ROSTER</p>
+          <p className="card-index">06 / MODEL ROSTER</p>
           <h2>可见模型目录</h2>
         </div>
         <div className="catalog-summary">

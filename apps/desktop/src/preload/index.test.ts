@@ -25,6 +25,8 @@ const electron = {
 type ExposedApi = Readonly<{
   getBootstrapState(): Promise<unknown>;
   bindProjectToDefaultRouting(projectId: string): Promise<unknown>;
+  readProjectTaskCatalog(projectId: string): Promise<unknown>;
+  createProjectTask(input: unknown): Promise<unknown>;
 }>;
 
 function readyState(binding: unknown): unknown {
@@ -130,6 +132,107 @@ describe("desktop preload Project routing binding boundary", () => {
     harness.invoke.mockResolvedValueOnce({ status: "unexpected" });
     await expect(api.bindProjectToDefaultRouting(PROJECT_ID)).rejects.toThrow(
       "routing binding result is invalid",
+    );
+
+    const taskId = "00000000-0000-4000-8000-000000000893";
+    const catalog = {
+      projectId: PROJECT_ID,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT_ID,
+          taskVersion: 1,
+          title: "Persist Task",
+          objective: "Persist without execution.",
+          stage: "requirements_only",
+        },
+      ],
+      hasMore: false,
+    };
+    await expect(api.readProjectTaskCatalog("invalid")).rejects.toThrow(
+      "valid desktop Project identifier",
+    );
+    harness.invoke.mockResolvedValueOnce({ status: "loaded", catalog });
+    await expect(api.readProjectTaskCatalog(PROJECT_ID)).resolves.toEqual({
+      status: "loaded",
+      catalog,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith("desktop.task.catalog_page", PROJECT_ID);
+    harness.invoke.mockResolvedValueOnce({ status: "unavailable" });
+    await expect(api.readProjectTaskCatalog(PROJECT_ID)).resolves.toEqual({
+      status: "unavailable",
+    });
+    harness.invoke.mockResolvedValueOnce({ status: "unexpected" });
+    await expect(api.readProjectTaskCatalog(PROJECT_ID)).rejects.toThrow(
+      "Project Task catalog result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "loaded",
+      catalog: {
+        projectId: "00000000-0000-4000-8000-000000000894",
+        tasks: [],
+        hasMore: false,
+      },
+    });
+    await expect(api.readProjectTaskCatalog(PROJECT_ID)).rejects.toThrow(
+      "Project Task catalog result is invalid",
+    );
+
+    const creation = {
+      projectId: PROJECT_ID,
+      title: "Persist Task",
+      sourceText: "Persist without execution.",
+    };
+    await expect(api.createProjectTask({ ...creation, title: " " })).rejects.toThrow(
+      "valid desktop Project Task",
+    );
+    harness.invoke.mockResolvedValueOnce({ status: "created", taskId, catalog });
+    await expect(api.createProjectTask(creation)).resolves.toEqual({
+      status: "created",
+      taskId,
+      catalog,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith("desktop.task.create", creation);
+    harness.invoke.mockResolvedValueOnce({ status: "conflict" });
+    await expect(api.createProjectTask(creation)).resolves.toEqual({ status: "conflict" });
+    harness.invoke.mockResolvedValueOnce({
+      status: "created",
+      taskId,
+      catalog: { ...catalog, privateCursor: "secret" },
+    });
+    await expect(api.createProjectTask(creation)).rejects.toThrow(
+      "Project Task creation result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "created",
+      taskId,
+      catalog: { ...catalog, tasks: [catalog.tasks[0], catalog.tasks[0]] },
+    });
+    await expect(api.createProjectTask(creation)).rejects.toThrow(
+      "Project Task creation result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "created",
+      taskId,
+      catalog: {
+        ...catalog,
+        tasks: [{ ...catalog.tasks[0], stage: "unknown_stage" }],
+      },
+    });
+    await expect(api.createProjectTask(creation)).rejects.toThrow(
+      "Project Task creation result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "created",
+      taskId,
+      catalog: {
+        projectId: "00000000-0000-4000-8000-000000000894",
+        tasks: [],
+        hasMore: false,
+      },
+    });
+    await expect(api.createProjectTask(creation)).rejects.toThrow(
+      "Project Task creation result is invalid",
     );
   });
 });

@@ -40,6 +40,7 @@ export async function smokeDesktopApplication() {
       routingMode: "configure",
       projectMode: "register",
       bindingMode: "bind",
+      taskMode: "create",
     });
     await runScenario({
       directory: join(directory, "ready"),
@@ -50,6 +51,7 @@ export async function smokeDesktopApplication() {
       routingMode: "recover",
       projectMode: "recover",
       bindingMode: "recover",
+      taskMode: "recover",
     });
     await runScenario({
       directory: join(directory, "failed"),
@@ -74,6 +76,7 @@ async function runScenario({
   routingMode,
   projectMode,
   bindingMode,
+  taskMode,
 }) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const projectPath = join(directory, "workspace");
@@ -94,6 +97,7 @@ async function runScenario({
             CODEX_HARNESS_DESKTOP_SMOKE_PROJECT_PATH: projectPath,
           }),
       ...(bindingMode === undefined ? {} : { CODEX_HARNESS_DESKTOP_SMOKE_BINDING: bindingMode }),
+      ...(taskMode === undefined ? {} : { CODEX_HARNESS_DESKTOP_SMOKE_TASK: taskMode }),
       ELECTRON_ENABLE_SECURITY_WARNINGS: "true",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -129,12 +133,14 @@ async function runScenario({
       (expected === "ready" && result.routingObserved !== true) ||
       (expected === "ready" && result.projectObserved !== true) ||
       (expected === "ready" && result.bindingObserved !== true) ||
+      (expected === "ready" && result.taskObserved !== true) ||
       (expected !== "ready" &&
         ("accountObserved" in result ||
           "modelCatalogObserved" in result ||
           "routingObserved" in result ||
           "projectObserved" in result ||
-          "bindingObserved" in result))
+          "bindingObserved" in result ||
+          "taskObserved" in result))
     ) {
       throw new Error(`The Electron desktop ${expected} rendered state was invalid.`);
     }

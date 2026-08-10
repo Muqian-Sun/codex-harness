@@ -5,6 +5,8 @@ const BOOTSTRAP_STATE_CHANGED_CHANNEL = "desktop.bootstrap.changed";
 const SET_ROUTING_CONFIGURATION_CHANNEL = "desktop.routing.set";
 const CHOOSE_PROJECT_WORKSPACE_CHANNEL = "desktop.project.choose";
 const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_default";
+const READ_PROJECT_TASK_CATALOG_CHANNEL = "desktop.task.catalog_page";
+const CREATE_PROJECT_TASK_CHANNEL = "desktop.task.create";
 const FAILURE_CODES = new Set([
   "unsupported_platform",
   "resource_configuration_missing",
@@ -36,6 +38,13 @@ const ROUTING_AVAILABILITY_STATUSES = new Set([
   "provider_unobserved",
   "reasoning_effort_unsupported",
 ]);
+const TASK_STAGES = new Set([
+  "requirements_only",
+  "candidate_plan",
+  "confirmed_plan",
+  "active_graph",
+  "active_graph_with_candidate",
+]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_PROVIDER_CHARACTERS = 256;
 const MAX_MODEL_CHARACTERS = 4_096;
@@ -45,6 +54,9 @@ const MAX_MODEL_REASONING_EFFORTS = 64;
 const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
 const MAX_PROJECT_DISPLAY_NAME_BYTES = 256;
 const MAX_PROJECT_PATH_BYTES = 4_096;
+const MAX_TASK_CATALOG_PAGE_SIZE = 12;
+const MAX_TASK_TITLE_BYTES = 256;
+const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
 
 type PreloadAccountStatus = Readonly<{
   status: "authenticated" | "authentication_required" | "not_required";
@@ -126,6 +138,39 @@ type PreloadProjectRoutingBindings = Readonly<{
 type PreloadProjectRoutingBindingMutationResult = Readonly<{
   status: "bound" | "existing" | "conflict" | "routing_unconfigured" | "unavailable";
 }>;
+type PreloadProjectTaskSummary = Readonly<{
+  taskId: string;
+  projectId: string;
+  taskVersion: number;
+  title: string;
+  objective: string;
+  stage:
+    | "requirements_only"
+    | "candidate_plan"
+    | "confirmed_plan"
+    | "active_graph"
+    | "active_graph_with_candidate";
+}>;
+type PreloadProjectTaskCatalog = Readonly<{
+  projectId: string;
+  tasks: readonly PreloadProjectTaskSummary[];
+  hasMore: boolean;
+}>;
+type PreloadProjectTaskCatalogResult =
+  | Readonly<{ status: "loaded"; catalog: PreloadProjectTaskCatalog }>
+  | Readonly<{ status: "unavailable" }>;
+type PreloadProjectTaskCreation = Readonly<{
+  projectId: string;
+  title: string;
+  sourceText: string;
+}>;
+type PreloadProjectTaskMutationResult =
+  | Readonly<{
+      status: "created" | "existing";
+      taskId: string;
+      catalog: PreloadProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "routing_unbound" | "unavailable" }>;
 
 type PreloadBootstrapState =
   | Readonly<{ phase: "starting" | "stopping" }>
@@ -326,6 +371,129 @@ function decodeProjectRoutingBindingMutationResult(
     throw new Error("The desktop Project routing binding result is invalid.");
   }
   return Object.freeze({ status: record.status });
+}
+
+function decodeProjectTaskCatalogResult(
+  input: unknown,
+  expectedProjectId: string,
+): PreloadProjectTaskCatalogResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "unavailable") {
+    return Object.freeze({ status: "unavailable" });
+  }
+  const record = exactRecord(input, ["catalog", "status"]);
+  if (record?.status !== "loaded") {
+    throw new Error("The desktop Project Task catalog result is invalid.");
+  }
+  const catalog = decodeProjectTaskCatalog(record.catalog);
+  if (catalog === undefined || catalog.projectId !== expectedProjectId) {
+    throw new Error("The desktop Project Task catalog result is invalid.");
+  }
+  return Object.freeze({ status: "loaded", catalog });
+}
+
+function decodeProjectTaskCreation(input: unknown): PreloadProjectTaskCreation | undefined {
+  const record = exactRecord(input, ["projectId", "sourceText", "title"]);
+  if (
+    !isUuid(record?.projectId) ||
+    !validTaskTitle(record.title) ||
+    !validTaskSourceText(record.sourceText)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    title: record.title,
+    sourceText: record.sourceText,
+  });
+}
+
+function decodeProjectTaskMutationResult(
+  input: unknown,
+  expectedProjectId: string,
+): PreloadProjectTaskMutationResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (
+    terminal !== undefined &&
+    (terminal.status === "conflict" ||
+      terminal.status === "routing_unbound" ||
+      terminal.status === "unavailable")
+  ) {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "status", "taskId"]);
+  const catalog = decodeProjectTaskCatalog(record?.catalog);
+  if (
+    record === undefined ||
+    (record.status !== "created" && record.status !== "existing") ||
+    !isUuid(record.taskId) ||
+    catalog === undefined ||
+    catalog.projectId !== expectedProjectId
+  ) {
+    throw new Error("The desktop Project Task creation result is invalid.");
+  }
+  return Object.freeze({ status: record.status, taskId: record.taskId, catalog });
+}
+
+function decodeProjectTaskCatalog(input: unknown): PreloadProjectTaskCatalog | undefined {
+  const record = exactRecord(input, ["hasMore", "projectId", "tasks"]);
+  if (
+    record === undefined ||
+    !isUuid(record.projectId) ||
+    typeof record.hasMore !== "boolean" ||
+    !Array.isArray(record.tasks) ||
+    record.tasks.length > MAX_TASK_CATALOG_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  const tasks = record.tasks.map((task) =>
+    decodeProjectTaskSummary(task, record.projectId as string),
+  );
+  if (
+    tasks.some((task) => task === undefined) ||
+    new Set(tasks.map((task) => task?.taskId)).size !== tasks.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    tasks: Object.freeze(tasks as PreloadProjectTaskSummary[]),
+    hasMore: record.hasMore,
+  });
+}
+
+function decodeProjectTaskSummary(
+  input: unknown,
+  expectedProjectId: string,
+): PreloadProjectTaskSummary | undefined {
+  const record = exactRecord(input, [
+    "objective",
+    "projectId",
+    "stage",
+    "taskId",
+    "taskVersion",
+    "title",
+  ]);
+  if (
+    record === undefined ||
+    record.projectId !== expectedProjectId ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.taskVersion) ||
+    !validTaskTitle(record.title) ||
+    !validTaskSourceText(record.objective) ||
+    typeof record.stage !== "string" ||
+    !TASK_STAGES.has(record.stage)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    taskId: record.taskId,
+    projectId: expectedProjectId,
+    taskVersion: record.taskVersion,
+    title: record.title,
+    objective: record.objective,
+    stage: record.stage as PreloadProjectTaskSummary["stage"],
+  });
 }
 
 function decodeRoutingTargets(input: unknown): PreloadRoutingTargets | undefined {
@@ -697,6 +865,21 @@ function validBoundedText(input: unknown, maxCharacters: number): input is strin
   return true;
 }
 
+function validTaskTitle(input: unknown): input is string {
+  return (
+    validBoundedText(input, MAX_TASK_TITLE_BYTES) && utf8ByteLength(input) <= MAX_TASK_TITLE_BYTES
+  );
+}
+
+function validTaskSourceText(input: unknown): input is string {
+  return (
+    typeof input === "string" &&
+    input.trim().length > 0 &&
+    utf8ByteLength(input) <= MAX_TASK_SOURCE_TEXT_BYTES &&
+    !input.includes("\0")
+  );
+}
+
 const desktopApi = Object.freeze({
   async getBootstrapState(): Promise<PreloadBootstrapState> {
     return decodeBootstrapState(await ipcRenderer.invoke(GET_BOOTSTRAP_STATE_CHANNEL));
@@ -723,6 +906,27 @@ const desktopApi = Object.freeze({
     }
     return decodeProjectRoutingBindingMutationResult(
       await ipcRenderer.invoke(BIND_PROJECT_DEFAULT_ROUTING_CHANNEL, projectId),
+    );
+  },
+  async readProjectTaskCatalog(projectId: string): Promise<PreloadProjectTaskCatalogResult> {
+    if (!isUuid(projectId)) {
+      throw new TypeError("A valid desktop Project identifier is required.");
+    }
+    return decodeProjectTaskCatalogResult(
+      await ipcRenderer.invoke(READ_PROJECT_TASK_CATALOG_CHANNEL, projectId),
+      projectId,
+    );
+  },
+  async createProjectTask(
+    input: PreloadProjectTaskCreation,
+  ): Promise<PreloadProjectTaskMutationResult> {
+    const creation = decodeProjectTaskCreation(input);
+    if (creation === undefined) {
+      throw new TypeError("A valid desktop Project Task is required.");
+    }
+    return decodeProjectTaskMutationResult(
+      await ipcRenderer.invoke(CREATE_PROJECT_TASK_CHANNEL, creation),
+      creation.projectId,
     );
   },
   onBootstrapState(listener: (state: PreloadBootstrapState) => void): () => void {

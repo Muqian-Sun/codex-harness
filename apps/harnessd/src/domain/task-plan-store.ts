@@ -5,6 +5,7 @@ import {
   HarnessEventStore,
   type EventMetadata,
   type EventStoreInspection,
+  type EventToAppend,
   type ProjectionDefinition,
   type StoredEvent,
 } from "../persistence/event-store.js";
@@ -233,6 +234,24 @@ export const TASK_PLAN_PROJECTION: ProjectionDefinition = Object.freeze({
   }),
 });
 
+export function prepareTaskCreatedEvent(input: CreateTaskInput): EventToAppend {
+  const normalized = normalizeCreateTaskInput(input);
+  return Object.freeze({
+    eventId: normalized.eventId,
+    streamType: TASK_STREAM_TYPE,
+    streamId: normalized.taskId,
+    eventType: TASK_CREATED,
+    eventVersion: 1,
+    occurredAtMs: normalized.occurredAtMs,
+    payload: {
+      taskId: normalized.taskId,
+      title: normalized.title,
+      requirement: requireJsonValue(normalized.requirement),
+    },
+    ...(normalized.metadata === undefined ? {} : { metadata: normalized.metadata }),
+  });
+}
+
 export class TaskPlanRepository {
   readonly #events: HarnessEventStore;
 
@@ -247,21 +266,7 @@ export class TaskPlanRepository {
 
   createTask(input: CreateTaskInput): TaskCommandResult {
     this.assertAvailable();
-    const normalized = normalizeCreateTaskInput(input);
-    return this.#appendAndRead({
-      eventId: normalized.eventId,
-      streamType: TASK_STREAM_TYPE,
-      streamId: normalized.taskId,
-      eventType: TASK_CREATED,
-      eventVersion: 1,
-      occurredAtMs: normalized.occurredAtMs,
-      payload: {
-        taskId: normalized.taskId,
-        title: normalized.title,
-        requirement: requireJsonValue(normalized.requirement),
-      },
-      ...(normalized.metadata === undefined ? {} : { metadata: normalized.metadata }),
-    });
+    return this.#appendAndRead(prepareTaskCreatedEvent(input));
   }
 
   reviseRequirements(input: ReviseRequirementsInput): TaskCommandResult {

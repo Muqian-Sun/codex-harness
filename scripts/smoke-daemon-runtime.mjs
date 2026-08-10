@@ -149,6 +149,48 @@ export async function smokeDaemonRuntime() {
     ) {
       throw new Error("The supervised daemon did not persist a valid Project routing binding.");
     }
+    const initialTasks = await supervisor.readProjectTaskCatalogPage({
+      projectId,
+      cursor: null,
+      limit: 12,
+    });
+    if (initialTasks.tasks.length !== 0 || initialTasks.nextCursor !== null) {
+      throw new Error("The supervised daemon initial Project Task catalog was invalid.");
+    }
+    const taskId = "00000000-0000-4000-8000-000000000954";
+    const taskCommand = {
+      commandId: "00000000-0000-4000-8000-000000000955",
+      ownershipCommandId: "00000000-0000-4000-8000-000000000956",
+      taskId,
+      projectId,
+      expectedProjectVersion: registeredProject.project.projectVersion,
+      expectedRoutingBindingVersion: bound.binding.bindingVersion,
+      title: "daemon restart Task",
+      sourceText: "Persist the initial requirement without starting execution.",
+    };
+    const createdTask = await supervisor.createProjectTask(taskCommand);
+    const retriedTask = await supervisor.createProjectTask(taskCommand);
+    const persistedTasks = await supervisor.readProjectTaskCatalogPage({
+      projectId,
+      cursor: null,
+      limit: 12,
+    });
+    if (
+      createdTask.status !== "created" ||
+      createdTask.taskId !== taskId ||
+      retriedTask.status !== "existing" ||
+      retriedTask.taskId !== taskId ||
+      persistedTasks.tasks.length !== 1 ||
+      persistedTasks.tasks[0]?.taskId !== taskId ||
+      persistedTasks.tasks[0]?.projectId !== projectId ||
+      persistedTasks.tasks[0]?.taskVersion !== 1 ||
+      persistedTasks.tasks[0]?.title !== taskCommand.title ||
+      persistedTasks.tasks[0]?.objective !== taskCommand.sourceText ||
+      persistedTasks.tasks[0]?.stage !== "requirements_only" ||
+      persistedTasks.nextCursor !== null
+    ) {
+      throw new Error("The supervised daemon did not atomically persist a valid Project Task.");
+    }
     const updatedRoutingRevisionId = "00000000-0000-4000-8000-000000000942";
     const updatedRouting = await supervisor.setRoutingConfiguration({
       commandId: updatedRoutingRevisionId,
@@ -203,6 +245,9 @@ export async function smokeDaemonRuntime() {
       stateDatabasePath,
       updatedRoutingRevisionId,
       projectId,
+      taskId,
+      taskCommand.title,
+      taskCommand.sourceText,
     );
     const recoveredStateIdentity = await verifyStateDatabase(stateRoot);
     if (
@@ -230,6 +275,9 @@ async function smokeSupervisorRpcLoss(
   stateDatabasePath,
   routingRevisionId,
   projectId,
+  taskId,
+  taskTitle,
+  taskObjective,
 ) {
   const supervisor = await DaemonProcessSupervisor.start({
     command: process.execPath,
@@ -265,6 +313,22 @@ async function smokeSupervisorRpcLoss(
     recoveredBindings.statuses[0]?.binding?.profileVersionAtBinding !== 1
   ) {
     throw new Error("The supervised daemon did not recover its Project routing binding.");
+  }
+  const recoveredTasks = await supervisor.readProjectTaskCatalogPage({
+    projectId,
+    cursor: null,
+    limit: 12,
+  });
+  if (
+    recoveredTasks.tasks.length !== 1 ||
+    recoveredTasks.tasks[0]?.taskId !== taskId ||
+    recoveredTasks.tasks[0]?.projectId !== projectId ||
+    recoveredTasks.tasks[0]?.title !== taskTitle ||
+    recoveredTasks.tasks[0]?.objective !== taskObjective ||
+    recoveredTasks.tasks[0]?.stage !== "requirements_only" ||
+    recoveredTasks.nextCursor !== null
+  ) {
+    throw new Error("The supervised daemon did not recover its Project Task catalog.");
   }
   supervisor.client.close();
   const closed = await supervisor.closed;

@@ -11,12 +11,14 @@ import {
 import {
   failedBootstrapState,
   decodeDesktopProjectRoutingBindingProjectId,
+  decodeDesktopProjectTaskCreation,
   decodeDesktopRoutingConfigurationUpdate,
   decodeDesktopProjectWorkspaceRegistration,
   projectDesktopModelCatalogSummary,
   projectDesktopProjectCatalog,
   projectDesktopProjectRegistration,
   projectDesktopProjectRoutingBindings,
+  projectDesktopProjectTaskCatalog,
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
   type BootstrapStateStore,
@@ -24,6 +26,8 @@ import {
   type DesktopRoutingConfigurationMutationResult,
   type DesktopProjectSelectionResult,
   type DesktopProjectRoutingBindingMutationResult,
+  type DesktopProjectTaskCatalogResult,
+  type DesktopProjectTaskMutationResult,
 } from "../shared/bootstrap-state.js";
 import { DesktopRuntimeResourceError, DesktopRuntimeRootError } from "./runtime-resources.js";
 
@@ -36,6 +40,8 @@ export type DesktopSupervisorHandle = Pick<
   | "registerProject"
   | "readProjectRoutingBindingStatuses"
   | "bindProjectDefaultRouting"
+  | "readProjectTaskCatalogPage"
+  | "createProjectTask"
   | "readRoutingConfiguration"
   | "setRoutingConfiguration"
   | "stop"
@@ -267,6 +273,107 @@ export class DesktopApplicationController {
             current.account,
             current.catalog,
             routing,
+            refreshed.projects,
+            refreshed.projectRoutingBindings,
+          ),
+        );
+        return Object.freeze({ status: "conflict" });
+      } catch {
+        return Object.freeze({ status: "unavailable" });
+      }
+    }
+  }
+
+  async readProjectTaskCatalog(input: unknown): Promise<DesktopProjectTaskCatalogResult> {
+    const projectId = decodeDesktopProjectRoutingBindingProjectId(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (
+      projectId === undefined ||
+      state.phase !== "ready" ||
+      supervisor === undefined ||
+      !state.projects.projects.some((project) => project.projectId === projectId)
+    ) {
+      return Object.freeze({ status: "unavailable" });
+    }
+    try {
+      const catalog = projectDesktopProjectTaskCatalog(
+        await supervisor.readProjectTaskCatalogPage({ projectId, cursor: null, limit: 12 }),
+        projectId,
+      );
+      return this.#stateStore.current.phase === "ready"
+        ? Object.freeze({ status: "loaded", catalog })
+        : Object.freeze({ status: "unavailable" });
+    } catch {
+      return Object.freeze({ status: "unavailable" });
+    }
+  }
+
+  async createProjectTask(input: unknown): Promise<DesktopProjectTaskMutationResult> {
+    const creation = decodeDesktopProjectTaskCreation(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (creation === undefined || state.phase !== "ready" || supervisor === undefined) {
+      return Object.freeze({ status: "unavailable" });
+    }
+    const project = state.projects.projects.find(
+      (candidate) => candidate.projectId === creation.projectId,
+    );
+    const binding = state.projectRoutingBindings.bindings.find(
+      (candidate) => candidate.projectId === creation.projectId,
+    );
+    if (project === undefined || binding === undefined) {
+      return Object.freeze({ status: "unavailable" });
+    }
+    if (binding.status !== "default_bound" || binding.bindingVersion === null) {
+      return Object.freeze({ status: "routing_unbound" });
+    }
+
+    const taskId = randomUUID();
+    try {
+      const result = await supervisor.createProjectTask({
+        commandId: randomUUID(),
+        ownershipCommandId: randomUUID(),
+        taskId,
+        projectId: project.projectId,
+        expectedProjectVersion: project.projectVersion,
+        expectedRoutingBindingVersion: binding.bindingVersion,
+        title: creation.title,
+        sourceText: creation.sourceText,
+      });
+      if (
+        (result.status !== "created" && result.status !== "existing") ||
+        result.taskId !== taskId ||
+        this.#stateStore.current.phase !== "ready"
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const catalog = projectDesktopProjectTaskCatalog(
+        await supervisor.readProjectTaskCatalogPage({
+          projectId: project.projectId,
+          cursor: null,
+          limit: 12,
+        }),
+        project.projectId,
+      );
+      return this.#stateStore.current.phase === "ready"
+        ? Object.freeze({ status: result.status, taskId, catalog })
+        : Object.freeze({ status: "unavailable" });
+    } catch (error: unknown) {
+      if (!(error instanceof HarnessRpcClientError) || error.remoteCode !== "rpc.conflict") {
+        return Object.freeze({ status: "unavailable" });
+      }
+      try {
+        const refreshed = await this.#refreshProjectsAndBindings(supervisor);
+        const current = this.#stateStore.current;
+        if (current.phase !== "ready") {
+          return Object.freeze({ status: "unavailable" });
+        }
+        this.#stateStore.transition(
+          readyBootstrapState(
+            current.account,
+            current.catalog,
+            current.routing,
             refreshed.projects,
             refreshed.projectRoutingBindings,
           ),

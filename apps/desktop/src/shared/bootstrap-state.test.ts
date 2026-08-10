@@ -8,6 +8,9 @@ import {
   decodeDesktopProjectSelectionResult,
   decodeDesktopProjectRoutingBindingMutationResult,
   decodeDesktopProjectRoutingBindingProjectId,
+  decodeDesktopProjectTaskCatalogResult,
+  decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskMutationResult,
   decodeDesktopProjectWorkspaceRegistration,
   decodeDesktopRoutingConfigurationMutationResult,
   decodeDesktopRoutingConfigurationUpdate,
@@ -16,6 +19,7 @@ import {
   projectDesktopProjectCatalog,
   projectDesktopProjectRegistration,
   projectDesktopProjectRoutingBindings,
+  projectDesktopProjectTaskCatalog,
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
 } from "./bootstrap-state.js";
@@ -396,6 +400,129 @@ describe("desktop bootstrap state", () => {
         models: [{ ...CATALOG.models[0], id: "private-id" }, CATALOG.models[1]],
         nextCursor: null,
       }),
+    ).toThrow(BootstrapStateTransitionError);
+  });
+
+  it("strictly projects Project Task catalogs and desktop creation results", () => {
+    const taskId = "00000000-0000-4000-8000-000000000881";
+    const raw = {
+      schemaVersion: 1,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT.projectId,
+          taskVersion: 1,
+          title: "持久 Task",
+          objective: "只保存需求，不执行。",
+          stage: "requirements_only",
+        },
+      ],
+      nextCursor: taskId,
+    };
+    const catalog = projectDesktopProjectTaskCatalog(raw, PROJECT.projectId);
+    expect(catalog).toEqual({
+      projectId: PROJECT.projectId,
+      tasks: raw.tasks,
+      hasMore: true,
+    });
+    expect(Object.isFrozen(catalog.tasks)).toBe(true);
+    expect(
+      decodeDesktopProjectTaskCatalogResult({ status: "loaded", catalog }, PROJECT.projectId),
+    ).toEqual({ status: "loaded", catalog });
+    expect(
+      decodeDesktopProjectTaskCatalogResult({ status: "unavailable" }, PROJECT.projectId),
+    ).toEqual({ status: "unavailable" });
+
+    const creation = {
+      projectId: PROJECT.projectId,
+      title: "持久 Task",
+      sourceText: "只保存需求，不执行。",
+    };
+    expect(decodeDesktopProjectTaskCreation(creation)).toEqual(creation);
+    expect(
+      decodeDesktopProjectTaskMutationResult(
+        {
+          status: "created",
+          taskId,
+          catalog,
+        },
+        PROJECT.projectId,
+      ),
+    ).toEqual({ status: "created", taskId, catalog });
+    expect(
+      decodeDesktopProjectTaskMutationResult({ status: "conflict" }, PROJECT.projectId),
+    ).toEqual({ status: "conflict" });
+    expect(decodeDesktopProjectTaskCatalogResult({ status: "loaded" }, "invalid")).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskCatalogResult({ status: "unexpected" }, PROJECT.projectId),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskMutationResult({ status: "conflict" }, "invalid"),
+    ).toBeUndefined();
+
+    expect(decodeDesktopProjectTaskCreation({ ...creation, title: "a\n" })).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskCreation({ ...creation, sourceText: "中".repeat(5_462) }),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskCatalogResult(
+        {
+          status: "loaded",
+          catalog: { ...catalog, privateCursor: "secret" },
+        },
+        PROJECT.projectId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskCatalogResult(
+        {
+          status: "loaded",
+          catalog: { ...catalog, tasks: [{ ...catalog.tasks[0], title: " invalid" }] },
+        },
+        PROJECT.projectId,
+      ),
+    ).toBeUndefined();
+    const otherProjectId = "00000000-0000-4000-8000-000000000882";
+    expect(
+      decodeDesktopProjectTaskCatalogResult(
+        { status: "loaded", catalog: { ...catalog, projectId: otherProjectId, tasks: [] } },
+        PROJECT.projectId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskMutationResult(
+        {
+          status: "created",
+          taskId,
+          catalog: { ...catalog, projectId: otherProjectId, tasks: [] },
+        },
+        PROJECT.projectId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskMutationResult(
+        {
+          status: "created",
+          taskId,
+          catalog: { ...catalog, tasks: [catalog.tasks[0], catalog.tasks[0]] },
+        },
+        PROJECT.projectId,
+      ),
+    ).toBeUndefined();
+    expect(() =>
+      projectDesktopProjectTaskCatalog(
+        { schemaVersion: 2, tasks: [], nextCursor: null },
+        PROJECT.projectId,
+      ),
+    ).toThrow(BootstrapStateTransitionError);
+    expect(() =>
+      projectDesktopProjectTaskCatalog(
+        {
+          ...raw,
+          tasks: [{ ...raw.tasks[0], projectId: otherProjectId }],
+        },
+        PROJECT.projectId,
+      ),
     ).toThrow(BootstrapStateTransitionError);
   });
 

@@ -90,6 +90,18 @@ const PROJECT_ROUTING_BIND_RESULT = Object.freeze({
   binding: PROJECT_ROUTING_BINDING,
 });
 
+const PROJECT_TASK_CATALOG = Object.freeze({
+  schemaVersion: 1,
+  tasks: Object.freeze([]),
+  nextCursor: null,
+});
+
+const PROJECT_TASK_CREATED = Object.freeze({
+  schemaVersion: 1,
+  status: "created",
+  taskId: "00000000-0000-4000-8000-000000000913",
+});
+
 function request(method: string, params: unknown = {}): RpcRequest {
   return {
     kind: "request",
@@ -115,6 +127,8 @@ function context(
     registerProject: () => PROJECT_REGISTRATION,
     readProjectRoutingBindingStatuses: () => PROJECT_ROUTING_BINDING_STATUSES,
     bindProjectDefaultRouting: () => PROJECT_ROUTING_BIND_RESULT,
+    readProjectTaskCatalogPage: () => PROJECT_TASK_CATALOG,
+    createProjectTask: () => PROJECT_TASK_CREATED,
     readRoutingConfiguration: () => ROUTING_CONFIGURATION,
     setRoutingConfiguration: () => ROUTING_CONFIGURATION,
   };
@@ -534,6 +548,101 @@ describe("RPC dispatcher Project routing binding", () => {
         error: { code: RPC_ERROR_CODES.unavailable },
       });
       expect(JSON.stringify(candidate)).not.toContain("private");
+    }
+  });
+});
+
+describe("RPC dispatcher Project Task methods", () => {
+  const catalogParams = { projectId: PROJECT.projectId, cursor: null, limit: 12 };
+  const createParams = {
+    commandId: "00000000-0000-4000-8000-000000000911",
+    ownershipCommandId: "00000000-0000-4000-8000-000000000912",
+    taskId: PROJECT_TASK_CREATED.taskId,
+    projectId: PROJECT.projectId,
+    expectedProjectVersion: 1,
+    expectedRoutingBindingVersion: 1,
+    title: "Persist Task",
+    sourceText: "Persist the requirement without execution.",
+  };
+
+  it("passes strict catalog and creation inputs to their providers", () => {
+    const readProjectTaskCatalogPage = vi.fn(() => PROJECT_TASK_CATALOG);
+    const createProjectTask = vi.fn(() => PROJECT_TASK_CREATED);
+    const base = context(() => ACCOUNT_STATUS);
+
+    expect(
+      dispatchRpcRequest(request("task.catalog_page", catalogParams), {
+        ...base,
+        readProjectTaskCatalogPage,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: PROJECT_TASK_CATALOG });
+    expect(readProjectTaskCatalogPage).toHaveBeenCalledWith(catalogParams);
+
+    expect(
+      dispatchRpcRequest(request("task.create", createParams), {
+        ...base,
+        createProjectTask,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: PROJECT_TASK_CREATED });
+    expect(createProjectTask).toHaveBeenCalledWith(createParams);
+  });
+
+  it("rejects malformed Task parameters before consulting providers", () => {
+    const readProjectTaskCatalogPage = vi.fn(() => PROJECT_TASK_CATALOG);
+    const createProjectTask = vi.fn(() => PROJECT_TASK_CREATED);
+    const base = context(() => ACCOUNT_STATUS);
+    expect(
+      dispatchRpcRequest(request("task.catalog_page", { ...catalogParams, limit: 13 }), {
+        ...base,
+        readProjectTaskCatalogPage,
+      }).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(
+      dispatchRpcRequest(
+        request("task.create", {
+          ...createParams,
+          ownershipCommandId: createParams.commandId,
+        }),
+        { ...base, createProjectTask },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(readProjectTaskCatalogPage).not.toHaveBeenCalled();
+    expect(createProjectTask).not.toHaveBeenCalled();
+  });
+
+  it("maps Task conflicts and invalid provider results to stable public errors", () => {
+    const base = context(() => ACCOUNT_STATUS);
+    for (const [method, params, provider] of [
+      ["task.catalog_page", catalogParams, "readProjectTaskCatalogPage"],
+      ["task.create", createParams, "createProjectTask"],
+    ] as const) {
+      const conflict = dispatchRpcRequest(request(method, params), {
+        ...base,
+        [provider]: () => {
+          throw new RpcProviderError("conflict");
+        },
+      });
+      expect(conflict.envelope).toMatchObject({
+        kind: "error",
+        error: { code: RPC_ERROR_CODES.conflict },
+      });
+
+      for (const implementation of [
+        () => {
+          throw new Error("private Task storage detail");
+        },
+        () => ({ private: true }),
+      ]) {
+        const unavailable = dispatchRpcRequest(request(method, params), {
+          ...base,
+          [provider]: implementation,
+        });
+        expect(unavailable.envelope).toMatchObject({
+          kind: "error",
+          error: { code: RPC_ERROR_CODES.unavailable },
+        });
+        expect(JSON.stringify(unavailable)).not.toContain("private Task storage detail");
+      }
     }
   });
 });

@@ -8,6 +8,7 @@ import {
   MAX_MODEL_REASONING_EFFORTS,
   MAX_PROJECT_CATALOG_PAGE_SIZE,
   MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE,
+  MAX_TASK_CATALOG_PAGE_SIZE,
   decodeEventParams,
   decodeRequestParams,
   decodeResponseResult,
@@ -519,6 +520,92 @@ describe("method contracts", () => {
           : "project.routing_binding.bind_default";
       expect(decodeResponseResult(method, invalid).ok).toBe(false);
     }
+  });
+
+  it("strictly validates Project Task creation and bounded catalog pages", () => {
+    const commandId = "00000000-0000-4000-8000-000000000921";
+    const ownershipCommandId = "00000000-0000-4000-8000-000000000922";
+    const taskId = "00000000-0000-4000-8000-000000000923";
+    const projectId = "00000000-0000-4000-8000-000000000924";
+    const create = {
+      commandId,
+      ownershipCommandId,
+      taskId,
+      projectId,
+      expectedProjectVersion: 1,
+      expectedRoutingBindingVersion: 2,
+      title: "持久 Task",
+      sourceText: "保存目标，但暂不执行。",
+    } as const;
+    expect(decodeRequestParams("task.create", create).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.create", { schemaVersion: 1, status: "created", taskId }).ok,
+    ).toBe(true);
+    expect(
+      decodeRequestParams("task.catalog_page", {
+        projectId,
+        cursor: null,
+        limit: MAX_TASK_CATALOG_PAGE_SIZE,
+      }).ok,
+    ).toBe(true);
+
+    for (const invalid of [
+      { ...create, ownershipCommandId: commandId },
+      { ...create, taskId: commandId },
+      { ...create, title: " " },
+      { ...create, title: "a\n" },
+      { ...create, title: "中".repeat(86) },
+      { ...create, sourceText: " " },
+      { ...create, sourceText: "a".repeat(16 * 1_024 + 1) },
+      { ...create, sourceText: "bad\0text" },
+      { ...create, expectedRoutingBindingVersion: 0 },
+      { ...create, extra: true },
+    ]) {
+      expect(decodeRequestParams("task.create", invalid).ok).toBe(false);
+    }
+
+    const summary = {
+      taskId,
+      projectId,
+      taskVersion: 1,
+      title: create.title,
+      objective: create.sourceText,
+      stage: "requirements_only",
+    } as const;
+    for (const stage of [
+      "requirements_only",
+      "candidate_plan",
+      "confirmed_plan",
+      "active_graph",
+      "active_graph_with_candidate",
+    ] as const) {
+      expect(
+        decodeResponseResult("task.catalog_page", {
+          schemaVersion: 1,
+          tasks: [{ ...summary, stage }],
+          nextCursor: taskId,
+        }).ok,
+      ).toBe(true);
+    }
+    for (const invalid of [
+      { schemaVersion: 1, tasks: [summary, summary], nextCursor: taskId },
+      {
+        schemaVersion: 1,
+        tasks: [summary],
+        nextCursor: "00000000-0000-4000-8000-000000000925",
+      },
+      { schemaVersion: 1, tasks: [{ ...summary, stage: "running" }], nextCursor: taskId },
+      { schemaVersion: 1, tasks: [{ ...summary, sourceText: "private" }], nextCursor: taskId },
+    ]) {
+      expect(decodeResponseResult("task.catalog_page", invalid).ok).toBe(false);
+    }
+    expect(
+      decodeRequestParams("task.catalog_page", {
+        projectId,
+        cursor: null,
+        limit: MAX_TASK_CATALOG_PAGE_SIZE + 1,
+      }).ok,
+    ).toBe(false);
   });
 
   it("rejects unknown methods and method-specific mismatches", () => {

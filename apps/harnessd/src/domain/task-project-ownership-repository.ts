@@ -13,7 +13,13 @@ import {
   type StoredEvent,
 } from "../persistence/event-store.js";
 import { ProjectRegistryError, ProjectRegistryRepository } from "./project-registry-repository.js";
-import { TaskPlanError, TaskPlanRepository } from "./task-plan-store.js";
+import {
+  TaskPlanError,
+  TaskPlanRepository,
+  prepareTaskCreatedEvent,
+  type CreateTaskInput,
+  type TaskPlanRecord,
+} from "./task-plan-store.js";
 
 const OWNERSHIP_STREAM_TYPE = "task.project_ownership";
 const TASK_ASSIGNED = "task.project_assigned";
@@ -49,6 +55,20 @@ export type AssignTaskToProjectInput = Readonly<{
 export type TaskProjectOwnershipCommandResult = Readonly<{
   duplicate: boolean;
   event: StoredEvent;
+  ownership: TaskProjectOwnershipRecord;
+}>;
+
+export type CreateTaskInProjectInput = Readonly<{
+  task: CreateTaskInput;
+  ownershipEventId: string;
+  projectId: string;
+  expectedProjectVersion: number;
+}>;
+
+export type CreateTaskInProjectResult = Readonly<{
+  duplicate: boolean;
+  events: readonly StoredEvent[];
+  task: TaskPlanRecord;
   ownership: TaskProjectOwnershipRecord;
 }>;
 
@@ -130,6 +150,61 @@ export class TaskProjectOwnershipRepository {
       this.#tasks = new TaskPlanRepository(events);
       this.#projects = new ProjectRegistryRepository(events);
       this.#events = events;
+    } catch (error: unknown) {
+      throw mapRepositoryError(error);
+    }
+  }
+
+  createTaskInProject(input: CreateTaskInProjectInput): CreateTaskInProjectResult {
+    const normalized = normalizeCreateTaskInProjectInput(input);
+    const taskEvent = prepareTaskCreatedEvent(normalized.task);
+    const ownership = freezeOwnership({
+      schemaVersion: 1,
+      taskId: taskEvent.streamId,
+      ownershipVersion: 1,
+      projectId: normalized.projectId,
+      taskVersionAtAssignment: 1,
+      projectVersionAtAssignment: normalized.expectedProjectVersion,
+      createdAtMs: taskEvent.occurredAtMs,
+      updatedAtMs: taskEvent.occurredAtMs,
+    });
+    const ownershipEvent = eventFromOwnership(
+      normalized.ownershipEventId,
+      taskEvent.occurredAtMs,
+      Object.freeze({
+        expectedOwnershipVersion: 0,
+        previousProjectId: null,
+        ownership,
+      }),
+      chainedOwnershipMetadata(taskEvent.metadata, taskEvent.eventId),
+    );
+
+    try {
+      const existingTaskEvent = this.#events.readByEventId(taskEvent.eventId);
+      const existingOwnershipEvent = this.#events.readByEventId(ownershipEvent.eventId);
+      if ((existingTaskEvent === undefined) !== (existingOwnershipEvent === undefined)) {
+        throw new TaskProjectOwnershipError("conflict");
+      }
+      if (existingTaskEvent === undefined) {
+        const project = this.#projects.readProject(normalized.projectId);
+        if (
+          project.projectVersion !== normalized.expectedProjectVersion ||
+          taskEvent.occurredAtMs < project.updatedAtMs
+        ) {
+          throw new TaskProjectOwnershipError("conflict");
+        }
+      }
+
+      const appended = this.#events.appendBatch([taskEvent, ownershipEvent]);
+      if (existingTaskEvent !== undefined && !appended.duplicate) {
+        throw new TaskProjectOwnershipError("conflict");
+      }
+      return Object.freeze({
+        duplicate: appended.duplicate,
+        events: appended.events,
+        task: this.#tasks.readTask(taskEvent.streamId),
+        ownership,
+      });
     } catch (error: unknown) {
       throw mapRepositoryError(error);
     }
@@ -287,6 +362,52 @@ export class TaskProjectOwnershipRepository {
       ownership: eventData.ownership,
     });
   }
+}
+
+function normalizeCreateTaskInProjectInput(input: unknown): CreateTaskInProjectInput {
+  try {
+    const record = requireExactDataRecord(input, [
+      "expectedProjectVersion",
+      "ownershipEventId",
+      "projectId",
+      "task",
+    ]);
+    const ownershipEventId = requireUuid(record.ownershipEventId);
+    const projectId = requireUuid(record.projectId);
+    const expectedProjectVersion = requirePositiveInteger(record.expectedProjectVersion);
+    const task = record.task as CreateTaskInput;
+    const taskEvent = prepareTaskCreatedEvent(task);
+    if (
+      taskEvent.eventId === taskEvent.streamId ||
+      ownershipEventId === taskEvent.eventId ||
+      ownershipEventId === taskEvent.streamId ||
+      !validateJsonValue({ ownershipEventId, projectId, expectedProjectVersion }).ok
+    ) {
+      throw new TaskProjectOwnershipError("invalid_input");
+    }
+    return Object.freeze({ task, ownershipEventId, projectId, expectedProjectVersion });
+  } catch (error: unknown) {
+    if (error instanceof TaskProjectOwnershipError) {
+      throw error;
+    }
+    if (error instanceof TaskPlanError) {
+      throw new TaskProjectOwnershipError(
+        error.code === "invalid_input" ? "invalid_input" : "storage_failure",
+      );
+    }
+    throw new TaskProjectOwnershipError("invalid_input");
+  }
+}
+
+function chainedOwnershipMetadata(
+  metadata: EventMetadata | undefined,
+  causationEventId: string,
+): EventMetadata {
+  return Object.freeze({
+    ...(metadata?.actor === undefined ? {} : { actor: metadata.actor }),
+    causationEventId,
+    ...(metadata?.correlationId === undefined ? {} : { correlationId: metadata.correlationId }),
+  });
 }
 
 function reduceOwnershipEvent(

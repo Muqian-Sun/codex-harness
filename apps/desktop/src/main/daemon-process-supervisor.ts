@@ -26,6 +26,10 @@ import {
   type HarnessProjectRoutingBindingStatusBatchResult,
   type HarnessRoutingConfigurationResult,
   type HarnessRoutingConfigurationSetParams,
+  type HarnessTaskCatalogPageParams,
+  type HarnessTaskCatalogPageResult,
+  type HarnessTaskCreateParams,
+  type HarnessTaskCreateResult,
   type HarnessRpcClientConfig,
 } from "./harness-rpc-client.js";
 import {
@@ -497,6 +501,16 @@ export class DaemonProcessSupervisor {
     params: HarnessProjectRoutingBindingBindDefaultParams,
   ): Promise<HarnessProjectRoutingBindingBindDefaultResult> {
     return await this.client.bindProjectDefaultRouting(params);
+  }
+
+  async readProjectTaskCatalogPage(
+    params: HarnessTaskCatalogPageParams,
+  ): Promise<HarnessTaskCatalogPageResult> {
+    return await this.client.projectTaskCatalogPage(params);
+  }
+
+  async createProjectTask(params: HarnessTaskCreateParams): Promise<HarnessTaskCreateResult> {
+    return await this.client.createProjectTask(params);
   }
 
   async setRoutingConfiguration(

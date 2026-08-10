@@ -142,6 +142,8 @@ function projectMethods(): Pick<
   | "registerProject"
   | "readProjectRoutingBindingStatuses"
   | "bindProjectDefaultRouting"
+  | "readProjectTaskCatalogPage"
+  | "createProjectTask"
 > {
   return {
     readProjectCatalogPage: vi.fn(async () => EMPTY_PROJECT_CATALOG_PAGE),
@@ -164,6 +166,16 @@ function projectMethods(): Pick<
         configurationRevisionIdAtBinding: params.expectedConfigurationRevisionId,
       },
     })),
+    readProjectTaskCatalogPage: vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      tasks: Object.freeze([]),
+      nextCursor: null,
+    })),
+    createProjectTask: vi.fn(async (params) => ({
+      schemaVersion: 1 as const,
+      status: "created" as const,
+      taskId: params.taskId,
+    })),
   };
 }
 
@@ -172,6 +184,17 @@ function accountObservation(
   observedThroughSequence = 0,
 ): Awaited<ReturnType<DesktopSupervisorHandle["readAccountStatusObservation"]>> {
   return Object.freeze({ account, observedThroughSequence });
+}
+
+function taskMethods(): Pick<
+  DesktopSupervisorHandle,
+  "readProjectTaskCatalogPage" | "createProjectTask"
+> {
+  const methods = projectMethods();
+  return {
+    readProjectTaskCatalogPage: methods.readProjectTaskCatalogPage,
+    createProjectTask: methods.createProjectTask,
+  };
 }
 
 function deferred<T>(): Readonly<{
@@ -409,6 +432,7 @@ describe("desktop application controller", () => {
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         readProjectCatalogPage: vi.fn(async () => projectPage),
         registerProject: projectMethods().registerProject,
+        ...taskMethods(),
         readProjectRoutingBindingStatuses,
         bindProjectDefaultRouting,
         readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
@@ -475,6 +499,7 @@ describe("desktop application controller", () => {
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         readProjectCatalogPage: vi.fn(async () => projectPage),
         registerProject: projectMethods().registerProject,
+        ...taskMethods(),
         readProjectRoutingBindingStatuses,
         bindProjectDefaultRouting,
         readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
@@ -533,6 +558,7 @@ describe("desktop application controller", () => {
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         readProjectCatalogPage: vi.fn(async () => projectPage),
         registerProject: projectMethods().registerProject,
+        ...taskMethods(),
         readProjectRoutingBindingStatuses,
         bindProjectDefaultRouting: vi.fn(async () => ({
           schemaVersion: 1 as const,
@@ -571,6 +597,7 @@ describe("desktop application controller", () => {
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         readProjectCatalogPage: vi.fn(async () => projectPage),
         registerProject: projectMethods().registerProject,
+        ...taskMethods(),
         readProjectRoutingBindingStatuses: vi.fn(async () =>
           routingBindingStatusPage([PROJECT.projectId]),
         ),
@@ -622,6 +649,7 @@ describe("desktop application controller", () => {
         readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
         readProjectCatalogPage: vi.fn(async () => projectPage),
         registerProject: projectMethods().registerProject,
+        ...taskMethods(),
         readProjectRoutingBindingStatuses,
         bindProjectDefaultRouting: vi.fn(async () => {
           throw new HarnessRpcClientError("rpc_error", "rpc.conflict");
@@ -642,6 +670,303 @@ describe("desktop application controller", () => {
         bindings: [{ status: "other_profile_bound", bindingVersion: 1 }],
       },
     });
+  });
+
+  it("reads and atomically creates Project Tasks with main-owned identifiers and fences", async () => {
+    const stateStore = new BootstrapStateStore();
+    const projectPage = {
+      schemaVersion: 1 as const,
+      projects: Object.freeze([PROJECT]),
+      nextCursor: null,
+    };
+    const binding = {
+      projectId: PROJECT.projectId,
+      bindingVersion: 3,
+      profileId: "00000000-0000-4000-8000-000000000901",
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+    };
+    let createdTaskId: string | undefined;
+    const readProjectTaskCatalogPage = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      tasks:
+        createdTaskId === undefined
+          ? []
+          : [
+              {
+                taskId: createdTaskId,
+                projectId: PROJECT.projectId,
+                taskVersion: 1,
+                title: "持久 Task",
+                objective: "保存需求，不执行。",
+                stage: "requirements_only" as const,
+              },
+            ],
+      nextCursor: null,
+    }));
+    const createProjectTask = vi.fn(async (params) => {
+      createdTaskId = params.taskId;
+      return { schemaVersion: 1 as const, status: "created" as const, taskId: params.taskId };
+    });
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage: vi.fn(async () => projectPage),
+        registerProject: projectMethods().registerProject,
+        readProjectRoutingBindingStatuses: vi.fn(async () => ({
+          schemaVersion: 1 as const,
+          statuses: [{ projectId: PROJECT.projectId, status: "default_bound" as const, binding }],
+        })),
+        bindProjectDefaultRouting: projectMethods().bindProjectDefaultRouting,
+        readProjectTaskCatalogPage,
+        createProjectTask,
+        readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
+        setRoutingConfiguration: routingMethods().setRoutingConfiguration,
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(controller.readProjectTaskCatalog(PROJECT.projectId)).resolves.toEqual({
+      status: "loaded",
+      catalog: { projectId: PROJECT.projectId, tasks: [], hasMore: false },
+    });
+    const created = await controller.createProjectTask({
+      projectId: PROJECT.projectId,
+      title: "持久 Task",
+      sourceText: "保存需求，不执行。",
+    });
+    expect(created).toMatchObject({
+      status: "created",
+      taskId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      catalog: {
+        projectId: PROJECT.projectId,
+        tasks: [{ title: "持久 Task", stage: "requirements_only" }],
+      },
+    });
+    const command = createProjectTask.mock.calls[0]![0];
+    expect(command).toMatchObject({
+      projectId: PROJECT.projectId,
+      expectedProjectVersion: 1,
+      expectedRoutingBindingVersion: 3,
+      title: "持久 Task",
+      sourceText: "保存需求，不执行。",
+    });
+    expect(new Set([command.commandId, command.ownershipCommandId, command.taskId]).size).toBe(3);
+    expect(readProjectTaskCatalogPage).toHaveBeenCalledWith({
+      projectId: PROJECT.projectId,
+      cursor: null,
+      limit: 12,
+    });
+  });
+
+  it("keeps Task creation closed for unbound, invisible, or invalid Project input", async () => {
+    const stateStore = new BootstrapStateStore();
+    const createProjectTask = vi.fn();
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        ...projectMethods(),
+        readProjectCatalogPage: vi.fn(async () => ({
+          schemaVersion: 1 as const,
+          projects: [PROJECT],
+          nextCursor: null,
+        })),
+        createProjectTask,
+        ...routingMethods(),
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(
+      controller.createProjectTask({
+        projectId: PROJECT.projectId,
+        title: "Task",
+        sourceText: "Requirement",
+      }),
+    ).resolves.toEqual({ status: "routing_unbound" });
+    await expect(
+      controller.createProjectTask({
+        projectId: "00000000-0000-4000-8000-000000000882",
+        title: "Task",
+        sourceText: "Requirement",
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    await expect(
+      controller.createProjectTask({ projectId: PROJECT.projectId, title: " ", sourceText: "x" }),
+    ).resolves.toEqual({ status: "unavailable" });
+    expect(createProjectTask).not.toHaveBeenCalled();
+  });
+
+  it("refreshes Project binding state after a Task creation conflict", async () => {
+    const stateStore = new BootstrapStateStore();
+    const binding = {
+      projectId: PROJECT.projectId,
+      bindingVersion: 1,
+      profileId: "00000000-0000-4000-8000-000000000901",
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+    };
+    const readProjectRoutingBindingStatuses = vi
+      .fn()
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        statuses: [{ projectId: PROJECT.projectId, status: "default_bound", binding }],
+      })
+      .mockResolvedValueOnce(routingBindingStatusPage([PROJECT.projectId]));
+    const controller = new DesktopApplicationController({
+      stateStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        readAccountStatusObservation: vi.fn(async () => accountObservation()),
+        readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+        readProjectCatalogPage: vi.fn(async () => ({
+          schemaVersion: 1 as const,
+          projects: [PROJECT],
+          nextCursor: null,
+        })),
+        registerProject: projectMethods().registerProject,
+        readProjectRoutingBindingStatuses,
+        bindProjectDefaultRouting: projectMethods().bindProjectDefaultRouting,
+        readProjectTaskCatalogPage: projectMethods().readProjectTaskCatalogPage,
+        createProjectTask: vi.fn(async () => {
+          throw new HarnessRpcClientError("rpc_error", "rpc.conflict");
+        }),
+        ...routingMethods(),
+        stop: vi.fn(async () => closeResult("graceful")),
+      }),
+    });
+    await controller.start();
+
+    await expect(
+      controller.createProjectTask({
+        projectId: PROJECT.projectId,
+        title: "Task",
+        sourceText: "Requirement",
+      }),
+    ).resolves.toEqual({ status: "conflict" });
+    expect(stateStore.current).toMatchObject({
+      phase: "ready",
+      projectRoutingBindings: { bindings: [{ status: "unbound", bindingVersion: null }] },
+    });
+  });
+
+  it("contains Task read, malformed-result, transport, and conflict-refresh failures", async () => {
+    const binding = {
+      projectId: PROJECT.projectId,
+      bindingVersion: 1,
+      profileId: "00000000-0000-4000-8000-000000000901",
+      profileVersionAtBinding: 1,
+      configurationRevisionIdAtBinding: CONFIGURED_ROUTING.configurationRevisionId,
+    };
+    const readyMethods = () => ({
+      readAccountStatusObservation: vi.fn(async () => accountObservation()),
+      readModelCatalogPage: vi.fn(async () => MODEL_CATALOG_PAGE),
+      readProjectCatalogPage: vi.fn(async () => ({
+        schemaVersion: 1 as const,
+        projects: [PROJECT],
+        nextCursor: null,
+      })),
+      registerProject: projectMethods().registerProject,
+      readProjectRoutingBindingStatuses: vi.fn(async () => ({
+        schemaVersion: 1 as const,
+        statuses: [{ projectId: PROJECT.projectId, status: "default_bound" as const, binding }],
+      })),
+      bindProjectDefaultRouting: projectMethods().bindProjectDefaultRouting,
+      readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
+      setRoutingConfiguration: routingMethods().setRoutingConfiguration,
+      stop: vi.fn(async () => closeResult("graceful")),
+    });
+
+    const readStore = new BootstrapStateStore();
+    const readController = new DesktopApplicationController({
+      stateStore: readStore,
+      createSupervisor: async () => ({
+        closed: new Promise(() => undefined),
+        ...readyMethods(),
+        readProjectTaskCatalogPage: vi.fn(async () => {
+          throw new Error("contained");
+        }),
+        createProjectTask: projectMethods().createProjectTask,
+      }),
+    });
+    await expect(readController.readProjectTaskCatalog(PROJECT.projectId)).resolves.toEqual({
+      status: "unavailable",
+    });
+    await readController.start();
+    await expect(readController.readProjectTaskCatalog(PROJECT.projectId)).resolves.toEqual({
+      status: "unavailable",
+    });
+
+    for (const createProjectTask of [
+      vi.fn(async () => ({
+        schemaVersion: 1 as const,
+        status: "created" as const,
+        taskId: "00000000-0000-4000-8000-000000000889",
+      })),
+      vi.fn(async () => {
+        throw new Error("contained");
+      }),
+    ]) {
+      const stateStore = new BootstrapStateStore();
+      const controller = new DesktopApplicationController({
+        stateStore,
+        createSupervisor: async () => ({
+          closed: new Promise(() => undefined),
+          ...readyMethods(),
+          readProjectTaskCatalogPage: projectMethods().readProjectTaskCatalogPage,
+          createProjectTask,
+        }),
+      });
+      await controller.start();
+      await expect(
+        controller.createProjectTask({
+          projectId: PROJECT.projectId,
+          title: "Task",
+          sourceText: "Requirement",
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+    }
+
+    for (const stopBeforeRefresh of [true, false]) {
+      const stateStore = new BootstrapStateStore();
+      const controller = new DesktopApplicationController({
+        stateStore,
+        createSupervisor: async () => ({
+          closed: new Promise(() => undefined),
+          ...readyMethods(),
+          ...(stopBeforeRefresh
+            ? {}
+            : {
+                readProjectCatalogPage: vi.fn(async () => {
+                  throw new Error("contained refresh");
+                }),
+              }),
+          readProjectTaskCatalogPage: projectMethods().readProjectTaskCatalogPage,
+          createProjectTask: vi.fn(async () => {
+            if (stopBeforeRefresh) {
+              stateStore.transition({ phase: "stopping" });
+            }
+            throw new HarnessRpcClientError("rpc_error", "rpc.conflict");
+          }),
+        }),
+      });
+      await controller.start();
+      await expect(
+        controller.createProjectTask({
+          projectId: PROJECT.projectId,
+          title: "Task",
+          sourceText: "Requirement",
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+    }
   });
 
   it("waits for an in-flight start before stopping and never publishes transient readiness", async () => {

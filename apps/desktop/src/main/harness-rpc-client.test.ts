@@ -538,6 +538,64 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
     ).rejects.toMatchObject({ code: "invalid_request" });
   });
 
+  it("reads and creates strictly validated Project Tasks", async () => {
+    const projectId = "00000000-0000-4000-8000-000000000861";
+    const taskId = "00000000-0000-4000-8000-000000000911";
+    const observedMethods: string[] = [];
+    const endpoint = await createScriptedServer((value, socket) => {
+      if (record(value).kind === "bootstrap-request") {
+        acceptHello(socket, value);
+        return;
+      }
+      const method = String(record(value).method);
+      observedMethods.push(method);
+      writeFrame(socket, {
+        kind: "response",
+        wireVersion: BOOTSTRAP_WIRE_VERSION,
+        protocolVersion: APPLICATION_PROTOCOL_VERSION,
+        id: requestId(value),
+        result:
+          method === "task.catalog_page"
+            ? {
+                schemaVersion: 1,
+                tasks: [
+                  {
+                    taskId,
+                    projectId,
+                    taskVersion: 1,
+                    title: "Persist Task",
+                    objective: "Persist without execution.",
+                    stage: "requirements_only",
+                  },
+                ],
+                nextCursor: null,
+              }
+            : { schemaVersion: 1, status: "created", taskId },
+      });
+    });
+    const client = await createClient(endpoint);
+
+    await expect(
+      client.projectTaskCatalogPage({ projectId, cursor: null, limit: 12 }),
+    ).resolves.toMatchObject({ schemaVersion: 1, tasks: [{ taskId }] });
+    await expect(
+      client.createProjectTask({
+        commandId: "00000000-0000-4000-8000-000000000912",
+        ownershipCommandId: "00000000-0000-4000-8000-000000000913",
+        taskId,
+        projectId,
+        expectedProjectVersion: 1,
+        expectedRoutingBindingVersion: 1,
+        title: "Persist Task",
+        sourceText: "Persist without execution.",
+      }),
+    ).resolves.toEqual({ schemaVersion: 1, status: "created", taskId });
+    expect(observedMethods).toEqual(["task.catalog_page", "task.create"]);
+    await expect(
+      client.projectTaskCatalogPage({ projectId, cursor: null, limit: 13 }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+  });
+
   it("captures the event sequence barrier at the exact account response position", async () => {
     const receivedSequences: number[] = [];
     let order: "event-first" | "response-first" = "event-first";

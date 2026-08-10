@@ -16,6 +16,7 @@ import {
   TASK_PROJECT_OWNERSHIP_PROJECTION,
   TaskProjectOwnershipRepository,
   type AssignTaskToProjectInput,
+  type CreateTaskInProjectInput,
 } from "./task-project-ownership-repository.js";
 
 const TASK_1 = "00000000-0000-4000-8000-000000000901";
@@ -150,6 +151,31 @@ function reassignCommand(): AssignTaskToProjectInput {
   };
 }
 
+function createInProjectCommand(
+  overrides: Partial<CreateTaskInProjectInput> = {},
+): CreateTaskInProjectInput {
+  return {
+    task: {
+      eventId: REQUIREMENT_1,
+      taskId: TASK_1,
+      title: "Atomic Task",
+      occurredAtMs: 110,
+      requirement: {
+        revisionId: REQUIREMENT_1,
+        sourceText: "Create and assign this Task atomically.",
+        objective: "Create and assign this Task atomically.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      metadata: { actor: "desktop.project_task" },
+    },
+    ownershipEventId: OWNERSHIP_EVENT_1,
+    projectId: PROJECT_1,
+    expectedProjectVersion: 1,
+    ...overrides,
+  };
+}
+
 afterEach(async () => {
   for (const store of stores.splice(0)) store.close();
   for (const directory of temporaryDirectories.splice(0)) {
@@ -158,6 +184,123 @@ afterEach(async () => {
 });
 
 describe("task project ownership repository", () => {
+  it("creates a Task and its initial Project ownership in one event batch", async () => {
+    const { events, tasks, projects, ownerships } = await openRepositories(await databasePath());
+    registerProject(projects);
+
+    const result = ownerships.createTaskInProject(createInProjectCommand());
+
+    expect(result).toMatchObject({
+      duplicate: false,
+      task: { taskId: TASK_1, taskVersion: 1, title: "Atomic Task" },
+      ownership: {
+        taskId: TASK_1,
+        projectId: PROJECT_1,
+        ownershipVersion: 1,
+        taskVersionAtAssignment: 1,
+        projectVersionAtAssignment: 1,
+        createdAtMs: 110,
+        updatedAtMs: 110,
+      },
+    });
+    expect(result.events).toHaveLength(2);
+    expect(result.events[0]).toMatchObject({
+      eventId: REQUIREMENT_1,
+      eventType: "task.created",
+      sequence: 2,
+    });
+    expect(result.events[1]).toMatchObject({
+      eventId: OWNERSHIP_EVENT_1,
+      eventType: "task.project_assigned",
+      sequence: 3,
+      metadata: {
+        actor: "desktop.project_task",
+        causationEventId: REQUIREMENT_1,
+      },
+    });
+    expect(tasks.readTask(TASK_1)).toEqual(result.task);
+    expect(ownerships.listTasksForProject(PROJECT_1)).toEqual([result.ownership]);
+    expect(events.inspect()).toMatchObject({ eventCount: 3, lastSequence: 3 });
+  });
+
+  it("retries the complete creation batch exactly after current projections advance", async () => {
+    const { events, tasks, projects, ownerships } = await openRepositories(await databasePath());
+    registerProject(projects);
+    registerProject(projects, PROJECT_2, PROJECT_EVENT_2, 102);
+    const input = createInProjectCommand();
+    const first = ownerships.createTaskInProject(input);
+    reviseTask(tasks);
+    ownerships.assignTask(reassignCommand());
+
+    const duplicate = ownerships.createTaskInProject(input);
+
+    expect(duplicate.duplicate).toBe(true);
+    expect(duplicate.events).toEqual(first.events);
+    expect(duplicate.task.taskVersion).toBe(2);
+    expect(duplicate.ownership).toEqual(first.ownership);
+    expect(ownerships.readOwnership(TASK_1).projectId).toBe(PROJECT_2);
+    expect(events.inspect()).toMatchObject({ eventCount: 6, lastSequence: 6 });
+  });
+
+  it("rejects partial history and failed fences without leaving an orphan Task", async () => {
+    const { events, tasks, projects, ownerships } = await openRepositories(await databasePath());
+    registerProject(projects);
+    createTask(tasks);
+
+    expect(() => ownerships.createTaskInProject(createInProjectCommand())).toThrowError(
+      expect.objectContaining({ code: "conflict" }),
+    );
+    expect(() =>
+      ownerships.createTaskInProject(
+        createInProjectCommand({
+          task: {
+            ...createInProjectCommand().task,
+            eventId: REQUIREMENT_2,
+            taskId: TASK_2,
+            requirement: {
+              ...createInProjectCommand().task.requirement,
+              revisionId: REQUIREMENT_2,
+            },
+          },
+          ownershipEventId: OWNERSHIP_EVENT_2,
+          expectedProjectVersion: 2,
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(() => tasks.readTask(TASK_2)).toThrowError(
+      expect.objectContaining({ code: "not_found" }),
+    );
+    expect(events.readByEventId(OWNERSHIP_EVENT_2)).toBeUndefined();
+    expect(events.inspect()).toMatchObject({ eventCount: 2, lastSequence: 2 });
+  });
+
+  it("normalizes atomic creation identifiers and nested Task input fail-closed", async () => {
+    const { projects, ownerships } = await openRepositories(await databasePath());
+    registerProject(projects);
+
+    expect(() =>
+      ownerships.createTaskInProject(
+        createInProjectCommand({
+          task: {
+            ...createInProjectCommand().task,
+            eventId: TASK_1,
+            requirement: { ...createInProjectCommand().task.requirement, revisionId: TASK_1 },
+          },
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "invalid_input" }));
+    expect(() =>
+      ownerships.createTaskInProject(
+        createInProjectCommand({
+          task: { ...createInProjectCommand().task, title: " " },
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "invalid_input" }));
+    expect(() => ownerships.createTaskInProject(null as never)).toThrowError(
+      expect.objectContaining({ code: "invalid_input" }),
+    );
+  });
+
   it("assigns an existing task to a registered project with freshness snapshots", async () => {
     const { events, tasks, projects, ownerships } = await openRepositories(await databasePath());
     createTask(tasks);
