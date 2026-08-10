@@ -18,7 +18,7 @@
     "schema:app-server": "node scripts/update-app-server-schema.mjs",
     "smoke:build": "node scripts/smoke-build.mjs",
     "test": "vitest run",
-    "test:coverage:changed": "vitest run --coverage",
+    "test:coverage:changed": "node scripts/changed-line-coverage.mjs",
     "typecheck": "tsc -p tsconfig.typecheck.json --pretty false"
   },
   "devDependencies": {
@@ -28,6 +28,7 @@
     "eslint": "10.8.0",
     "fast-check": "4.9.0",
     "globals": "17.8.0",
+    "istanbul-lib-coverage": "3.2.2",
     "prettier": "3.9.6",
     "typescript": "6.0.3",
     "typescript-eslint": "8.65.0",

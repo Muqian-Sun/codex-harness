@@ -41,7 +41,7 @@
 - [ ] `pnpm lint`
 - [ ] `pnpm typecheck`
 - [ ] `pnpm test`
-- [ ] `pnpm test:coverage:changed --coverage.changed=<目标分支或基准 SHA>`（可执行代码变更时聚合行覆盖率至少 90%）
+- [ ] `pnpm test:coverage:changed --coverage.changed=<目标分支或基准 SHA>`（新增或修改的可执行行聚合覆盖率至少 90%）
 - [ ] `pnpm build`
 - [ ] `pnpm smoke:build`
 - [ ] 已完成与本 PR 风险相称的安全和兼容性检查
