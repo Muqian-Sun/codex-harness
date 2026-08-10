@@ -30,6 +30,10 @@ import {
   type HarnessProjectRoutingBindingStatusBatchResult as ProtocolProjectRoutingBindingStatusBatchResult,
   type HarnessRoutingConfigurationResult as ProtocolRoutingConfigurationResult,
   type HarnessRoutingConfigurationSetParams as ProtocolRoutingConfigurationSetParams,
+  type HarnessTaskCatalogPageParams as ProtocolTaskCatalogPageParams,
+  type HarnessTaskCatalogPageResult as ProtocolTaskCatalogPageResult,
+  type HarnessTaskCreateParams as ProtocolTaskCreateParams,
+  type HarnessTaskCreateResult as ProtocolTaskCreateResult,
   type RpcEvent,
   type RpcMethodName,
 } from "@codex-harness/protocol";
@@ -120,6 +124,10 @@ export type HarnessProjectRoutingBindingBindDefaultResult =
   Readonly<ProtocolProjectRoutingBindingBindDefaultResult>;
 export type HarnessRoutingConfigurationResult = Readonly<ProtocolRoutingConfigurationResult>;
 export type HarnessRoutingConfigurationSetParams = Readonly<ProtocolRoutingConfigurationSetParams>;
+export type HarnessTaskCatalogPageParams = Readonly<ProtocolTaskCatalogPageParams>;
+export type HarnessTaskCatalogPageResult = Readonly<ProtocolTaskCatalogPageResult>;
+export type HarnessTaskCreateParams = Readonly<ProtocolTaskCreateParams>;
+export type HarnessTaskCreateResult = Readonly<ProtocolTaskCreateResult>;
 export type HarnessAccountStatusObservation = Readonly<{
   account: HarnessAccountStatusResult;
   observedThroughSequence: number;
@@ -351,6 +359,22 @@ export class HarnessRpcClient {
       "project.routing_binding.bind_default",
       params as JsonValue,
     )) as unknown as HarnessProjectRoutingBindingBindDefaultResult;
+  }
+
+  async projectTaskCatalogPage(
+    params: HarnessTaskCatalogPageParams,
+  ): Promise<HarnessTaskCatalogPageResult> {
+    return (await this.request(
+      "task.catalog_page",
+      params as JsonValue,
+    )) as unknown as HarnessTaskCatalogPageResult;
+  }
+
+  async createProjectTask(params: HarnessTaskCreateParams): Promise<HarnessTaskCreateResult> {
+    return (await this.request(
+      "task.create",
+      params as JsonValue,
+    )) as unknown as HarnessTaskCreateResult;
   }
 
   async setRoutingConfiguration(

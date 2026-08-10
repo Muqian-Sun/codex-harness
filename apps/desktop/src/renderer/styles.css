@@ -320,6 +320,7 @@ h1 {
 }
 
 .project-registry,
+.project-tasks,
 .routing-matrix,
 .model-catalog {
   grid-column: 1 / -1;
@@ -333,6 +334,10 @@ h1 {
   animation: reveal 660ms 100ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.project-tasks {
+  animation: reveal 670ms 110ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 .routing-matrix {
   animation: reveal 680ms 120ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -342,6 +347,7 @@ h1 {
 }
 
 .project-header,
+.task-header,
 .routing-header,
 .catalog-header {
   display: flex;
@@ -353,6 +359,7 @@ h1 {
 }
 
 .project-header h2,
+.task-header h2,
 .routing-header h2,
 .catalog-header h2 {
   margin: 8px 0 0;
@@ -364,12 +371,152 @@ h1 {
 }
 
 .project-header > div:first-child > p:last-child,
+.task-header > div:first-child > p:last-child,
 .routing-header > div:first-child > p:last-child {
   max-width: 660px;
   margin: 8px 0 0;
   color: #849792;
   font-size: 11px;
   line-height: 1.6;
+}
+
+.task-header label {
+  display: grid;
+  min-width: 210px;
+  gap: 7px;
+}
+
+.task-header label span,
+.task-intake-form label span {
+  color: #718781;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.task-header select,
+.task-intake-form input,
+.task-intake-form textarea {
+  width: 100%;
+  border: 1px solid rgba(195, 211, 203, 0.18);
+  border-radius: 0;
+  color: #dce5df;
+  background: rgba(8, 18, 22, 0.76);
+  font: inherit;
+}
+
+.task-header select,
+.task-intake-form input {
+  min-height: 36px;
+  padding: 8px 10px;
+}
+
+.task-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.28fr);
+}
+
+.task-intake-form,
+.task-catalog {
+  padding: 22px 24px;
+}
+
+.task-intake-form {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  border-right: 1px solid var(--line);
+}
+
+.task-intake-form label {
+  display: grid;
+  gap: 7px;
+}
+
+.task-intake-form textarea {
+  min-height: 132px;
+  padding: 10px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.task-intake-form button {
+  min-height: 38px;
+  border: 1px solid rgba(111, 191, 155, 0.48);
+  border-radius: 0;
+  color: #dce9e2;
+  background: rgba(51, 105, 83, 0.34);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.task-intake-form button:disabled {
+  border-color: rgba(195, 211, 203, 0.13);
+  color: #5f746f;
+  background: rgba(24, 39, 43, 0.35);
+  cursor: not-allowed;
+}
+
+.task-intake-form > span,
+.task-catalog > p,
+.task-catalog > small {
+  color: #849792;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.task-catalog ol {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-catalog li {
+  display: grid;
+  padding: 14px 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-catalog li > span {
+  color: #718781;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.task-catalog li div {
+  min-width: 0;
+}
+
+.task-catalog li strong {
+  color: #dce5df;
+  font-size: 12px;
+}
+
+.task-catalog li p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 6px 0 0;
+  color: #82958f;
+  font-size: 9px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.task-catalog li small {
+  color: #79c9a5;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 7px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .project-header button {
@@ -1006,6 +1153,15 @@ h1 {
     grid-template-columns: 1fr;
   }
 
+  .task-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .task-intake-form {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
   .project-list li {
     border-right: 0;
   }
@@ -1051,6 +1207,7 @@ h1 {
   }
 
   .project-header,
+  .task-header,
   .routing-header {
     display: grid;
   }

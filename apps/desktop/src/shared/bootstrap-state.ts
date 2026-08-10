@@ -133,6 +133,43 @@ export type DesktopProjectRoutingBindingMutationResult = Readonly<{
   status: "bound" | "existing" | "conflict" | "routing_unconfigured" | "unavailable";
 }>;
 
+export const DESKTOP_TASK_STAGES = Object.freeze([
+  "requirements_only",
+  "candidate_plan",
+  "confirmed_plan",
+  "active_graph",
+  "active_graph_with_candidate",
+] as const);
+export type DesktopTaskStage = (typeof DESKTOP_TASK_STAGES)[number];
+export type DesktopProjectTaskSummary = Readonly<{
+  taskId: string;
+  projectId: string;
+  taskVersion: number;
+  title: string;
+  objective: string;
+  stage: DesktopTaskStage;
+}>;
+export type DesktopProjectTaskCatalog = Readonly<{
+  projectId: string;
+  tasks: readonly DesktopProjectTaskSummary[];
+  hasMore: boolean;
+}>;
+export type DesktopProjectTaskCatalogResult =
+  | Readonly<{ status: "loaded"; catalog: DesktopProjectTaskCatalog }>
+  | Readonly<{ status: "unavailable" }>;
+export type DesktopProjectTaskCreation = Readonly<{
+  projectId: string;
+  title: string;
+  sourceText: string;
+}>;
+export type DesktopProjectTaskMutationResult =
+  | Readonly<{
+      status: "created" | "existing";
+      taskId: string;
+      catalog: DesktopProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "routing_unbound" | "unavailable" }>;
+
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
   | Readonly<{
@@ -159,6 +196,10 @@ const MAX_MODEL_REASONING_EFFORTS = 64;
 const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
 const MAX_PROJECT_DISPLAY_NAME_BYTES = 256;
 const MAX_PROJECT_PATH_BYTES = 4_096;
+const MAX_TASK_CATALOG_PAGE_SIZE = 12;
+const MAX_TASK_TITLE_BYTES = 256;
+const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
+const taskStages = new Set<string>(DESKTOP_TASK_STAGES);
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -343,6 +384,121 @@ export function decodeDesktopProjectRoutingBindingMutationResult(
 
 export function decodeDesktopProjectRoutingBindingProjectId(input: unknown): string | undefined {
   return isUuid(input) ? input : undefined;
+}
+
+export function projectDesktopProjectTaskCatalog(
+  input: unknown,
+  expectedProjectId: string,
+): DesktopProjectTaskCatalog {
+  const record = exactRecord(input, ["nextCursor", "schemaVersion", "tasks"]);
+  if (
+    !isUuid(expectedProjectId) ||
+    record === undefined ||
+    record.schemaVersion !== 1 ||
+    !Array.isArray(record.tasks) ||
+    record.tasks.length > MAX_TASK_CATALOG_PAGE_SIZE ||
+    (record.nextCursor !== null && !isUuid(record.nextCursor))
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  const tasks = record.tasks.map((task) =>
+    decodeDesktopProjectTaskSummary(task, expectedProjectId),
+  );
+  if (
+    tasks.some((task) => task === undefined) ||
+    new Set(tasks.map((task) => task?.taskId)).size !== tasks.length ||
+    (record.nextCursor !== null && record.nextCursor !== tasks.at(-1)?.taskId)
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({
+    projectId: expectedProjectId,
+    tasks: Object.freeze(tasks as DesktopProjectTaskSummary[]),
+    hasMore: record.nextCursor !== null,
+  });
+}
+
+export function decodeDesktopProjectTaskCatalogResult(
+  input: unknown,
+  expectedProjectId: string,
+): DesktopProjectTaskCatalogResult | undefined {
+  if (!isUuid(expectedProjectId)) {
+    return undefined;
+  }
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "unavailable") {
+    return Object.freeze({ status: "unavailable" });
+  }
+  const record = exactRecord(input, ["catalog", "status"]);
+  if (record?.status !== "loaded") {
+    return undefined;
+  }
+  const projectId = exactRecord(record.catalog, ["hasMore", "projectId", "tasks"])?.projectId;
+  if (projectId !== expectedProjectId) {
+    return undefined;
+  }
+  try {
+    return Object.freeze({
+      status: "loaded",
+      catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+export function decodeDesktopProjectTaskCreation(
+  input: unknown,
+): DesktopProjectTaskCreation | undefined {
+  const record = exactRecord(input, ["projectId", "sourceText", "title"]);
+  if (
+    !isUuid(record?.projectId) ||
+    !validTaskTitle(record.title) ||
+    !validTaskSourceText(record.sourceText)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    title: record.title,
+    sourceText: record.sourceText,
+  });
+}
+
+export function decodeDesktopProjectTaskMutationResult(
+  input: unknown,
+  expectedProjectId: string,
+): DesktopProjectTaskMutationResult | undefined {
+  if (!isUuid(expectedProjectId)) {
+    return undefined;
+  }
+  const terminal = exactRecord(input, ["status"]);
+  if (
+    terminal !== undefined &&
+    (terminal.status === "conflict" ||
+      terminal.status === "routing_unbound" ||
+      terminal.status === "unavailable")
+  ) {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "status", "taskId"]);
+  if (
+    record === undefined ||
+    (record.status !== "created" && record.status !== "existing") ||
+    !isUuid(record.taskId)
+  ) {
+    return undefined;
+  }
+  const catalogRecord = exactRecord(record.catalog, ["hasMore", "projectId", "tasks"]);
+  if (catalogRecord?.projectId !== expectedProjectId) {
+    return undefined;
+  }
+  try {
+    const catalog = decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId);
+    return Object.freeze({ status: record.status, taskId: record.taskId, catalog });
+  } catch {
+    return undefined;
+  }
 }
 
 export function decodeDesktopProjectWorkspaceRegistration(
@@ -854,6 +1010,85 @@ function projectRoutingBindingStatus(
     status: record.status,
     bindingVersion: binding.bindingVersion,
   });
+}
+
+function decodeDesktopProjectTaskSummary(
+  input: unknown,
+  expectedProjectId: string,
+): DesktopProjectTaskSummary | undefined {
+  const record = exactRecord(input, [
+    "objective",
+    "projectId",
+    "stage",
+    "taskId",
+    "taskVersion",
+    "title",
+  ]);
+  if (
+    record === undefined ||
+    record.projectId !== expectedProjectId ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.taskVersion) ||
+    !validTaskTitle(record.title) ||
+    !validTaskSourceText(record.objective) ||
+    typeof record.stage !== "string" ||
+    !taskStages.has(record.stage)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    taskId: record.taskId,
+    projectId: expectedProjectId,
+    taskVersion: record.taskVersion,
+    title: record.title,
+    objective: record.objective,
+    stage: record.stage as DesktopTaskStage,
+  });
+}
+
+function decodeProjectedDesktopTaskCatalog(
+  input: unknown,
+  expectedProjectId: string,
+): DesktopProjectTaskCatalog {
+  const record = exactRecord(input, ["hasMore", "projectId", "tasks"]);
+  if (
+    record === undefined ||
+    record.projectId !== expectedProjectId ||
+    typeof record.hasMore !== "boolean" ||
+    !Array.isArray(record.tasks) ||
+    record.tasks.length > MAX_TASK_CATALOG_PAGE_SIZE
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  const tasks = record.tasks.map((task) =>
+    decodeDesktopProjectTaskSummary(task, expectedProjectId),
+  );
+  if (
+    tasks.some((task) => task === undefined) ||
+    new Set(tasks.map((task) => task?.taskId)).size !== tasks.length
+  ) {
+    throw new BootstrapStateTransitionError();
+  }
+  return Object.freeze({
+    projectId: expectedProjectId,
+    tasks: Object.freeze(tasks as DesktopProjectTaskSummary[]),
+    hasMore: record.hasMore,
+  });
+}
+
+function validTaskTitle(input: unknown): input is string {
+  return (
+    validBoundedText(input, MAX_TASK_TITLE_BYTES) && utf8ByteLength(input) <= MAX_TASK_TITLE_BYTES
+  );
+}
+
+function validTaskSourceText(input: unknown): input is string {
+  return (
+    typeof input === "string" &&
+    input.trim().length > 0 &&
+    utf8ByteLength(input) <= MAX_TASK_SOURCE_TEXT_BYTES &&
+    !input.includes("\0")
+  );
 }
 
 function validProjectDisplayName(input: unknown): input is string {

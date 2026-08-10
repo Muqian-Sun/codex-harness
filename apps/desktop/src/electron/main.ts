@@ -24,6 +24,9 @@ import {
   decodeDesktopRoutingConfigurationUpdate,
   decodeDesktopProjectRoutingBindingMutationResult,
   decodeDesktopProjectRoutingBindingProjectId,
+  decodeDesktopProjectTaskCatalogResult,
+  decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskMutationResult,
   decodeDesktopProjectSelectionResult,
   decodeDesktopProjectWorkspaceRegistration,
   failedBootstrapState,
@@ -47,6 +50,8 @@ const BOOTSTRAP_STATE_CHANGED_CHANNEL = "desktop.bootstrap.changed";
 const SET_ROUTING_CONFIGURATION_CHANNEL = "desktop.routing.set";
 const CHOOSE_PROJECT_WORKSPACE_CHANNEL = "desktop.project.choose";
 const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_default";
+const READ_PROJECT_TASK_CATALOG_CHANNEL = "desktop.task.catalog_page";
+const CREATE_PROJECT_TASK_CHANNEL = "desktop.task.create";
 const DEVELOPMENT_CODEX_ENVIRONMENT = "CODEX_HARNESS_CODEX_EXECUTABLE";
 const DEVELOPMENT_SMOKE_EXPECTED_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_EXPECTED";
 const DEVELOPMENT_SMOKE_USER_DATA_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_USER_DATA";
@@ -54,6 +59,7 @@ const DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_ROUTI
 const DEVELOPMENT_SMOKE_PROJECT_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_PROJECT";
 const DEVELOPMENT_SMOKE_PROJECT_PATH_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_PROJECT_PATH";
 const DEVELOPMENT_SMOKE_BINDING_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_BINDING";
+const DEVELOPMENT_SMOKE_TASK_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_TASK";
 const preloadPath = fileURLToPath(new URL("../preload/index.cjs", import.meta.url));
 const rendererRoot = fileURLToPath(new URL("../renderer", import.meta.url));
 const developmentDaemonEntry = fileURLToPath(
@@ -153,6 +159,7 @@ async function runDesktopApplication(): Promise<void> {
   stateStore.subscribe(broadcastState);
   let projectWorkspaceSelectionActive = false;
   const activeProjectRoutingBindings = new Set<string>();
+  const activeProjectTaskCreations = new Set<string>();
 
   ipcMain.handle(
     GET_BOOTSTRAP_STATE_CHANNEL,
@@ -251,6 +258,72 @@ async function runDesktopApplication(): Promise<void> {
     },
   );
 
+  ipcMain.handle(
+    READ_PROJECT_TASK_CATALOG_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      if (args.length !== 1 || !isManagedRenderer(event, windows)) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      const projectId = decodeDesktopProjectRoutingBindingProjectId(args[0]);
+      const state = stateStore.current;
+      if (
+        projectId === undefined ||
+        state.phase !== "ready" ||
+        !state.projects.projects.some((project) => project.projectId === projectId)
+      ) {
+        throw new Error("The desktop Project Task catalog request is invalid.");
+      }
+      const result = decodeDesktopProjectTaskCatalogResult(
+        await controller.readProjectTaskCatalog(projectId),
+        projectId,
+      );
+      return result ?? Object.freeze({ status: "unavailable" as const });
+    },
+  );
+
+  ipcMain.handle(
+    CREATE_PROJECT_TASK_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      if (args.length !== 1 || !isManagedRenderer(event, windows)) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      const creation = decodeDesktopProjectTaskCreation(args[0]);
+      const state = stateStore.current;
+      const binding =
+        creation === undefined || state.phase !== "ready"
+          ? undefined
+          : state.projectRoutingBindings.bindings.find(
+              (candidate) => candidate.projectId === creation.projectId,
+            );
+      if (
+        creation === undefined ||
+        state.phase !== "ready" ||
+        !state.projects.projects.some((project) => project.projectId === creation.projectId) ||
+        binding === undefined
+      ) {
+        throw new Error("The desktop Project Task creation request is invalid.");
+      }
+      if (binding.status !== "default_bound") {
+        return Object.freeze({ status: "routing_unbound" as const });
+      }
+      if (activeProjectTaskCreations.has(creation.projectId)) {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      activeProjectTaskCreations.add(creation.projectId);
+      try {
+        const result = decodeDesktopProjectTaskMutationResult(
+          await controller.createProjectTask(creation),
+          creation.projectId,
+        );
+        return result ?? Object.freeze({ status: "unavailable" as const });
+      } catch {
+        return Object.freeze({ status: "unavailable" as const });
+      } finally {
+        activeProjectTaskCreations.delete(creation.projectId);
+      }
+    },
+  );
+
   const createWindow = (): BrowserWindow => {
     const window = new BrowserWindow(createSecureWindowOptions(preloadPath));
     windows.add(window);
@@ -309,6 +382,7 @@ async function runDesktopApplication(): Promise<void> {
       const routingMode = process.env[DEVELOPMENT_SMOKE_ROUTING_ENVIRONMENT];
       const projectMode = process.env[DEVELOPMENT_SMOKE_PROJECT_ENVIRONMENT];
       const bindingMode = process.env[DEVELOPMENT_SMOKE_BINDING_ENVIRONMENT];
+      const taskMode = process.env[DEVELOPMENT_SMOKE_TASK_ENVIRONMENT];
       installSmokeObservation(
         mainWindow,
         stateStore,
@@ -319,6 +393,7 @@ async function runDesktopApplication(): Promise<void> {
         routingMode === "configure" || routingMode === "recover" ? routingMode : undefined,
         projectMode === "register" || projectMode === "recover" ? projectMode : undefined,
         bindingMode === "bind" || bindingMode === "recover" ? bindingMode : undefined,
+        taskMode === "create" || taskMode === "recover" ? taskMode : undefined,
       );
     }
   }
@@ -431,6 +506,10 @@ const ROUTING_SMOKE_FIELDS = Object.freeze(
     }),
   ]),
 );
+const TASK_SMOKE_DRAFT = Object.freeze({
+  title: "桌面重启恢复 Task",
+  sourceText: "只持久化初始需求，不启动计划、模型调用或执行。",
+});
 
 async function driveRoutingSmokeForm(
   window: BrowserWindow,
@@ -458,6 +537,41 @@ async function driveRoutingSmokeForm(
     await window.webContents.insertText(value);
   }
   reportProgress(Object.freeze({ phase: "draft_inserted" }));
+  return true;
+}
+
+async function driveTaskSmokeForm(
+  window: BrowserWindow,
+  reportProgress: (progress: unknown) => void,
+): Promise<boolean> {
+  for (const { selector, field, value } of [
+    Object.freeze({ selector: "[data-task-title]", field: "title", value: TASK_SMOKE_DRAFT.title }),
+    Object.freeze({
+      selector: "[data-task-source]",
+      field: "sourceText",
+      value: TASK_SMOKE_DRAFT.sourceText,
+    }),
+  ]) {
+    reportProgress(Object.freeze({ phase: "focusing_task_field", field }));
+    const focused = (await window.webContents.executeJavaScript(
+      `(() => {
+        const input = document.querySelector(${JSON.stringify(selector)});
+        if (!((input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) || input.disabled) {
+          return false;
+        }
+        input.focus();
+        input.select();
+        return document.activeElement === input;
+      })()`,
+      true,
+    )) as unknown;
+    if (focused !== true) {
+      return false;
+    }
+    reportProgress(Object.freeze({ phase: "inserting_task_text", field }));
+    await window.webContents.insertText(value);
+  }
+  reportProgress(Object.freeze({ phase: "task_draft_inserted" }));
   return true;
 }
 
@@ -523,11 +637,13 @@ function installSmokeObservation(
   routingMode: "configure" | "recover" | undefined,
   projectMode: "register" | "recover" | undefined,
   bindingMode: "bind" | "recover" | undefined,
+  taskMode: "create" | "recover" | undefined,
 ): void {
   let finished = false;
   let inspecting = false;
   let rendererLoaded = false;
   let routingFormDriven = false;
+  let taskFormDriven = false;
   let lastRendererProgress: unknown = Object.freeze({ phase: "not_observed" });
   let lastRendererConsoleError: unknown = "none";
   const inspectionDeadline = Date.now() + 45_000;
@@ -565,11 +681,18 @@ function installSmokeObservation(
               lastRendererProgress = progress;
             });
           }
+          if (taskMode === "create" && !taskFormDriven) {
+            taskFormDriven = await driveTaskSmokeForm(window, (progress) => {
+              lastRendererProgress = progress;
+            });
+          }
           const rendered = (await window.webContents.executeJavaScript(
             `(() => {
             const routingMode = ${JSON.stringify(routingMode)};
             const projectMode = ${JSON.stringify(projectMode)};
             const bindingMode = ${JSON.stringify(bindingMode)};
+            const taskMode = ${JSON.stringify(taskMode)};
+            const taskDraft = ${JSON.stringify(TASK_SMOKE_DRAFT)};
             const matrix = document.querySelector("[data-routing-configured]");
             if (routingMode === "configure" && matrix?.dataset.routingConfigured === "false" && !window.__codexHarnessRoutingSmokeSubmitted) {
               const values = ${JSON.stringify(ROUTING_SMOKE_DRAFT)};
@@ -604,6 +727,16 @@ function installSmokeObservation(
                 bind.click();
               }
             }
+            const taskPanel = document.querySelector("[data-task-catalog-status]");
+            if (taskMode === "create" && taskPanel?.dataset.taskCatalogStatus === "loaded" && taskPanel.dataset.taskCount === "0" && !window.__codexHarnessTaskSmokeSubmitted) {
+              const title = document.querySelector("[data-task-title]");
+              const source = document.querySelector("[data-task-source]");
+              const create = document.querySelector("[data-task-create]");
+              if (title instanceof HTMLInputElement && title.value === taskDraft.title && source instanceof HTMLTextAreaElement && source.value === taskDraft.sourceText && create instanceof HTMLButtonElement && !create.disabled) {
+                window.__codexHarnessTaskSmokeSubmitted = true;
+                create.click();
+              }
+            }
             const text = document.body?.textContent ?? "";
             return {
               documentReadyState: document.readyState,
@@ -634,6 +767,15 @@ function installSmokeObservation(
               projectRouting: Array.from(document.querySelectorAll("[data-project-routing]"), (element) => element.dataset.projectRouting),
               projectRoutingButtonDisabled: document.querySelector("[data-project-routing-bind]")?.disabled,
               bindingSubmitted: window.__codexHarnessBindingSmokeSubmitted === true,
+              taskCatalogStatus: taskPanel?.dataset.taskCatalogStatus,
+              taskCount: taskPanel?.dataset.taskCount,
+              taskProject: taskPanel?.dataset.taskProject,
+              taskTitles: Array.from(document.querySelectorAll("[data-task-id] strong"), (element) => element.textContent),
+              taskObjectives: Array.from(document.querySelectorAll("[data-task-id] p"), (element) => element.textContent),
+              taskStages: Array.from(document.querySelectorAll("[data-task-stage]"), (element) => element.dataset.taskStage),
+              taskFeedback: document.querySelector("[data-task-feedback]")?.textContent,
+              taskCreateDisabled: document.querySelector("[data-task-create]")?.disabled,
+              taskSubmitted: window.__codexHarnessTaskSmokeSubmitted === true,
               containsSensitiveText: ["private@example.com", "must-not-survive", "snapshotId", "workerSessionId", "nextCursor", "id-smoke"].some((value) => text.includes(value))
             };
           })()`,
@@ -667,6 +809,15 @@ function installSmokeObservation(
             projectRouting?: unknown;
             projectRoutingButtonDisabled?: unknown;
             bindingSubmitted?: unknown;
+            taskCatalogStatus?: unknown;
+            taskCount?: unknown;
+            taskProject?: unknown;
+            taskTitles?: unknown;
+            taskObjectives?: unknown;
+            taskStages?: unknown;
+            taskFeedback?: unknown;
+            taskCreateDisabled?: unknown;
+            taskSubmitted?: unknown;
             containsSensitiveText?: unknown;
           };
           lastRendererProgress = Object.freeze({
@@ -691,6 +842,13 @@ function installSmokeObservation(
             projectRouting: rendered.projectRouting,
             projectRoutingButtonDisabled: rendered.projectRoutingButtonDisabled,
             bindingSubmitted: rendered.bindingSubmitted,
+            taskCatalogStatus: rendered.taskCatalogStatus,
+            taskCount: rendered.taskCount,
+            taskProject: rendered.taskProject,
+            taskStages: rendered.taskStages,
+            taskFeedback: rendered.taskFeedback,
+            taskCreateDisabled: rendered.taskCreateDisabled,
+            taskSubmitted: rendered.taskSubmitted,
           });
           if (
             routingMode === "configure" &&
@@ -749,6 +907,26 @@ function installSmokeObservation(
                 (bindingMode !== "bind" ||
                   (rendered.bindingSubmitted === true &&
                     rendered.projectFeedback === "Project 已绑定默认路由；执行权限仍未开放。"))));
+          const taskObserved =
+            expected === "ready" &&
+            (taskMode === undefined ||
+              (rendered.taskCatalogStatus === "loaded" &&
+                rendered.taskCount === "1" &&
+                typeof rendered.taskProject === "string" &&
+                rendered.taskProject.length > 0 &&
+                Array.isArray(rendered.taskTitles) &&
+                rendered.taskTitles.length === 1 &&
+                rendered.taskTitles[0] === TASK_SMOKE_DRAFT.title &&
+                Array.isArray(rendered.taskObjectives) &&
+                rendered.taskObjectives.length === 1 &&
+                rendered.taskObjectives[0] === TASK_SMOKE_DRAFT.sourceText &&
+                Array.isArray(rendered.taskStages) &&
+                rendered.taskStages.length === 1 &&
+                rendered.taskStages[0] === "requirements_only" &&
+                rendered.taskCreateDisabled === true &&
+                (taskMode !== "create" ||
+                  (rendered.taskSubmitted === true &&
+                    rendered.taskFeedback === "Task 与初始需求已持久化；计划和执行仍未开始。"))));
           if (
             rendered.phase === expected &&
             (expected !== "failed" ||
@@ -758,12 +936,13 @@ function installSmokeObservation(
                 modelCatalogObserved &&
                 routingObserved &&
                 projectObserved &&
-                bindingObserved))
+                bindingObserved &&
+                taskObserved))
           ) {
             finished = true;
             clearTimeout(timeout);
             process.stdout.write(
-              `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true, routingObserved: true, projectObserved: true, bindingObserved: true } : {}) })}\n`,
+              `desktop-smoke:${JSON.stringify({ phase: rendered.phase, ...(rendered.code === undefined ? {} : { code: rendered.code }), ...(expected === "ready" ? { accountObserved: true, modelCatalogObserved: true, routingObserved: true, projectObserved: true, bindingObserved: true, taskObserved: true } : {}) })}\n`,
             );
             app.quit();
             return;

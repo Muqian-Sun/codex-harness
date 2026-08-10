@@ -13,11 +13,14 @@ const MAX_REASONING_EFFORT_CHARACTERS = 128;
 const MAX_MODEL_CATALOG_CURSOR_CHARACTERS = 2_048;
 const MAX_PROJECT_DISPLAY_NAME_BYTES = 256;
 const MAX_PROJECT_PATH_BYTES = 4_096;
+const MAX_TASK_TITLE_BYTES = 256;
+const MAX_TASK_SOURCE_TEXT_BYTES = 16 * 1_024;
 
 export const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
 export const MAX_MODEL_REASONING_EFFORTS = 64;
 export const MAX_PROJECT_CATALOG_PAGE_SIZE = 12;
 export const MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE = 16;
+export const MAX_TASK_CATALOG_PAGE_SIZE = 12;
 
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
@@ -325,6 +328,145 @@ export type HarnessProjectRegisterResult = Readonly<{
   project: HarnessProjectSummary;
 }>;
 
+export const TASK_STAGES = Object.freeze([
+  "requirements_only",
+  "candidate_plan",
+  "confirmed_plan",
+  "active_graph",
+  "active_graph_with_candidate",
+] as const);
+
+const TaskTitleSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      value.trim() === value &&
+      utf8ByteLength(value) <= MAX_TASK_TITLE_BYTES &&
+      !containsControlCharacter(value),
+    "Task title is invalid",
+  );
+
+const TaskSourceTextSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      value.trim().length > 0 &&
+      utf8ByteLength(value) <= MAX_TASK_SOURCE_TEXT_BYTES &&
+      !value.includes("\0"),
+    "Task source text is invalid",
+  );
+
+const TaskSummarySchema = z
+  .object({
+    taskId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskVersion: NonNegativeSafeIntegerSchema.min(1),
+    title: TaskTitleSchema,
+    objective: TaskSourceTextSchema,
+    stage: z.enum(TASK_STAGES),
+  })
+  .strict();
+
+export const TaskCatalogPageParamsSchema = z
+  .object({
+    projectId: z.string().regex(UUID_PATTERN),
+    cursor: z.string().regex(UUID_PATTERN).nullable(),
+    limit: z.number().int().min(1).max(MAX_TASK_CATALOG_PAGE_SIZE),
+  })
+  .strict();
+
+export const TaskCatalogPageResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    tasks: z.array(TaskSummarySchema).max(MAX_TASK_CATALOG_PAGE_SIZE),
+    nextCursor: z.string().regex(UUID_PATTERN).nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const taskIds = value.tasks.map((task) => task.taskId);
+    if (new Set(taskIds).size !== taskIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["tasks"],
+        message: "Task identifiers must be unique",
+      });
+    }
+    if (value.nextCursor !== null && value.nextCursor !== value.tasks.at(-1)?.taskId) {
+      context.addIssue({
+        code: "custom",
+        path: ["nextCursor"],
+        message: "Task page cursor must identify the final Task",
+      });
+    }
+  });
+
+export const TaskCreateParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    ownershipCommandId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    expectedProjectVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedRoutingBindingVersion: NonNegativeSafeIntegerSchema.min(1),
+    title: TaskTitleSchema,
+    sourceText: TaskSourceTextSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set([value.commandId, value.ownershipCommandId, value.taskId]).size !== 3) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "Task command and entity identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskCreateResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["created", "existing"]),
+    taskId: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
+export type HarnessTaskStage = (typeof TASK_STAGES)[number];
+export type HarnessTaskSummary = Readonly<{
+  taskId: string;
+  projectId: string;
+  taskVersion: number;
+  title: string;
+  objective: string;
+  stage: HarnessTaskStage;
+}>;
+export type HarnessTaskCatalogPageParams = Readonly<{
+  projectId: string;
+  cursor: string | null;
+  limit: number;
+}>;
+export type HarnessTaskCatalogPageResult = Readonly<{
+  schemaVersion: 1;
+  tasks: readonly HarnessTaskSummary[];
+  nextCursor: string | null;
+}>;
+export type HarnessTaskCreateParams = Readonly<{
+  commandId: string;
+  ownershipCommandId: string;
+  taskId: string;
+  projectId: string;
+  expectedProjectVersion: number;
+  expectedRoutingBindingVersion: number;
+  title: string;
+  sourceText: string;
+}>;
+export type HarnessTaskCreateResult = Readonly<{
+  schemaVersion: 1;
+  status: "created" | "existing";
+  taskId: string;
+}>;
+
 const ProjectRoutingBindingRecordSchema = z
   .object({
     projectId: z.string().regex(UUID_PATTERN),
@@ -626,6 +768,14 @@ export const METHOD_CONTRACTS = Object.freeze({
   "routing.configuration.set": Object.freeze({
     params: RoutingConfigurationSetParamsSchema,
     result: RoutingConfigurationResultSchema,
+  }),
+  "task.catalog_page": Object.freeze({
+    params: TaskCatalogPageParamsSchema,
+    result: TaskCatalogPageResultSchema,
+  }),
+  "task.create": Object.freeze({
+    params: TaskCreateParamsSchema,
+    result: TaskCreateResultSchema,
   }),
   "system.health": Object.freeze({
     params: SystemHealthParamsSchema,

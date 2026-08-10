@@ -19,6 +19,8 @@ export type RpcDispatchContext = Readonly<{
   registerProject: (params: JsonValue) => unknown;
   readProjectRoutingBindingStatuses: (params: JsonValue) => unknown;
   bindProjectDefaultRouting: (params: JsonValue) => unknown;
+  readProjectTaskCatalogPage: (params: JsonValue) => unknown;
+  createProjectTask: (params: JsonValue) => unknown;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -258,6 +260,58 @@ export function dispatchRpcRequest(
             shutdownReason: undefined,
           }
         : unavailable(request.id, "The Project routing binding is unavailable.");
+    }
+
+    if (request.method === "task.catalog_page") {
+      let candidate: unknown;
+      try {
+        candidate = context.readProjectTaskCatalogPage(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(
+              request.id,
+              RPC_ERROR_CODES.conflict,
+              "The Project Task catalog changed.",
+            ),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Project Task catalog is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("task.catalog_page", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project Task catalog is unavailable.");
+    }
+
+    if (request.method === "task.create") {
+      let candidate: unknown;
+      try {
+        candidate = context.createProjectTask(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(request.id, RPC_ERROR_CODES.conflict, "The Project Task changed."),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Project Task service is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("task.create", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Project Task service is unavailable.");
     }
 
     if (request.method === "routing.configuration.set") {

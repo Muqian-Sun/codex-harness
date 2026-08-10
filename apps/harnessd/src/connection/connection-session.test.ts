@@ -33,6 +33,8 @@ function createSession(options?: {
   readModelCatalogPage?: (params: JsonValue) => unknown;
   readProjectRoutingBindingStatuses?: (params: JsonValue) => unknown;
   bindProjectDefaultRouting?: (params: JsonValue) => unknown;
+  readProjectTaskCatalogPage?: (params: JsonValue) => unknown;
+  createProjectTask?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }): ConnectionSession {
@@ -53,6 +55,12 @@ function createSession(options?: {
     ...(options?.bindProjectDefaultRouting === undefined
       ? {}
       : { bindProjectDefaultRouting: options.bindProjectDefaultRouting }),
+    ...(options?.readProjectTaskCatalogPage === undefined
+      ? {}
+      : { readProjectTaskCatalogPage: options.readProjectTaskCatalogPage }),
+    ...(options?.createProjectTask === undefined
+      ? {}
+      : { createProjectTask: options.createProjectTask }),
     ...(options?.readRoutingConfiguration === undefined
       ? {}
       : { readRoutingConfiguration: options.readRoutingConfiguration }),
@@ -340,6 +348,60 @@ describe("daemon connection session", () => {
             }),
           ),
         ),
+      )[0],
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+  });
+
+  it("serves Project Task catalog and creation only through explicit providers", () => {
+    const projectId = "00000000-0000-4000-8000-000000000861";
+    const taskId = "00000000-0000-4000-8000-000000000911";
+    const readProjectTaskCatalogPage = vi.fn(() => ({
+      schemaVersion: 1,
+      tasks: [
+        {
+          taskId,
+          projectId,
+          taskVersion: 1,
+          title: "Persist Task",
+          objective: "Persist without execution.",
+          stage: "requirements_only",
+        },
+      ],
+      nextCursor: null,
+    }));
+    const createProjectTask = vi.fn(() => ({
+      schemaVersion: 1,
+      status: "created",
+      taskId,
+    }));
+    const session = createSession({ readProjectTaskCatalogPage, createProjectTask });
+    authenticate(session);
+    const catalogParams = { projectId, cursor: null, limit: 12 };
+    expect(
+      sentValues(session.receive(frame(rpc("task-get", "task.catalog_page", catalogParams))))[0],
+    ).toMatchObject({ kind: "response", result: { tasks: [{ taskId }] } });
+    expect(readProjectTaskCatalogPage).toHaveBeenCalledWith(catalogParams);
+
+    const createParams = {
+      commandId: "00000000-0000-4000-8000-000000000912",
+      ownershipCommandId: "00000000-0000-4000-8000-000000000913",
+      taskId,
+      projectId,
+      expectedProjectVersion: 1,
+      expectedRoutingBindingVersion: 1,
+      title: "Persist Task",
+      sourceText: "Persist without execution.",
+    };
+    expect(
+      sentValues(session.receive(frame(rpc("task-create", "task.create", createParams))))[0],
+    ).toMatchObject({ kind: "response", result: { status: "created", taskId } });
+    expect(createProjectTask).toHaveBeenCalledWith(createParams);
+
+    const missing = createSession();
+    authenticate(missing);
+    expect(
+      sentValues(
+        missing.receive(frame(rpc("task-missing", "task.catalog_page", catalogParams))),
       )[0],
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
   });

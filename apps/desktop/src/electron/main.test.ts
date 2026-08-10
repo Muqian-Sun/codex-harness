@@ -9,6 +9,17 @@ const harness = vi.hoisted(() => {
   const bindProjectToDefaultRouting = vi.fn(async (projectId: string): Promise<unknown> => ({
     status: projectId === PROJECT_ID ? "bound" : "unavailable",
   }));
+  const readProjectTaskCatalog = vi.fn(async (projectId: string): Promise<unknown> => {
+    void projectId;
+    return {
+      status: "loaded" as const,
+      catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
+    };
+  });
+  const createProjectTask = vi.fn(async (input: unknown): Promise<unknown> => {
+    void input;
+    return { status: "unavailable" as const };
+  });
   const appEvents = new Map<string, (...arguments_: unknown[]) => unknown>();
   const webContents = {
     executeJavaScript: vi.fn(async () => true),
@@ -33,6 +44,8 @@ const harness = vi.hoisted(() => {
   return {
     appEvents,
     bindProjectToDefaultRouting,
+    readProjectTaskCatalog,
+    createProjectTask,
     ipcHandlers,
     webContents,
     window,
@@ -146,7 +159,7 @@ vi.mock("./application-controller.js", () => {
               hasMore: false,
             },
             {
-              bindings: [{ projectId: PROJECT_ID, status: "unbound", bindingVersion: null }],
+              bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
             },
           ),
         );
@@ -154,6 +167,14 @@ vi.mock("./application-controller.js", () => {
 
       async bindProjectToDefaultRouting(projectId: string): Promise<unknown> {
         return await harness.bindProjectToDefaultRouting(projectId);
+      }
+
+      async readProjectTaskCatalog(projectId: string): Promise<unknown> {
+        return await harness.readProjectTaskCatalog(projectId);
+      }
+
+      async createProjectTask(input: unknown): Promise<unknown> {
+        return await harness.createProjectTask(input);
       }
 
       async setRoutingConfiguration(): Promise<Readonly<{ status: "unavailable" }>> {
@@ -165,6 +186,67 @@ vi.mock("./application-controller.js", () => {
       }
     },
   };
+});
+
+describe("desktop Electron main Project Task IPC", () => {
+  it("validates sender and input, keeps identifiers in main, and serializes writes", async () => {
+    await import("./main.js");
+    await vi.waitFor(() => {
+      expect(harness.ipcHandlers.has("desktop.task.catalog_page")).toBe(true);
+      expect(harness.ipcHandlers.has("desktop.task.create")).toBe(true);
+    });
+    const read = harness.ipcHandlers.get("desktop.task.catalog_page")!;
+    const create = harness.ipcHandlers.get("desktop.task.create")!;
+    const event = { sender: harness.webContents, senderFrame: {} };
+
+    await expect(read({ sender: {}, senderFrame: {} }, PROJECT_ID)).rejects.toThrow(
+      "not authorized",
+    );
+    await expect(read(event, "invalid")).rejects.toThrow("request is invalid");
+    await expect(read(event, PROJECT_ID)).resolves.toEqual({
+      status: "loaded",
+      catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
+    });
+    harness.readProjectTaskCatalog.mockResolvedValueOnce({
+      status: "loaded",
+      catalog: {
+        projectId: "00000000-0000-4000-8000-000000000892",
+        tasks: [],
+        hasMore: false,
+      },
+    });
+    await expect(read(event, PROJECT_ID)).resolves.toEqual({ status: "unavailable" });
+
+    const creation = { projectId: PROJECT_ID, title: "Task", sourceText: "Requirement" };
+    await expect(create(event, { ...creation, title: " " })).rejects.toThrow(
+      "creation request is invalid",
+    );
+    let resolveCreation!: (value: Readonly<{ status: "unavailable" }>) => void;
+    harness.createProjectTask.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveCreation = resolve;
+        }),
+    );
+    const first = create(event, creation);
+    await vi.waitFor(() => expect(harness.createProjectTask).toHaveBeenCalledWith(creation));
+    await expect(create(event, creation)).resolves.toEqual({ status: "unavailable" });
+    resolveCreation({ status: "unavailable" });
+    await expect(first).resolves.toEqual({ status: "unavailable" });
+
+    harness.createProjectTask.mockResolvedValueOnce({ status: "unexpected" });
+    await expect(create(event, creation)).resolves.toEqual({ status: "unavailable" });
+    harness.createProjectTask.mockResolvedValueOnce({
+      status: "created",
+      taskId: "00000000-0000-4000-8000-000000000893",
+      catalog: {
+        projectId: "00000000-0000-4000-8000-000000000892",
+        tasks: [],
+        hasMore: false,
+      },
+    });
+    await expect(create(event, creation)).resolves.toEqual({ status: "unavailable" });
+  });
 });
 
 describe("desktop Electron main Project routing binding IPC", () => {

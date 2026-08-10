@@ -313,6 +313,41 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       error: { code: "service.unavailable" },
     });
 
+    const taskCatalogPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-catalog-1", "task.catalog_page", {
+        projectId: "00000000-0000-4000-8000-000000000941",
+        cursor: null,
+        limit: 12,
+      }),
+    );
+    await expect(taskCatalogPromise).resolves.toMatchObject({
+      kind: "error",
+      id: "task-catalog-1",
+      error: { code: "service.unavailable" },
+    });
+
+    const taskCreatePromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-create-1", "task.create", {
+        commandId: "00000000-0000-4000-8000-000000000971",
+        ownershipCommandId: "00000000-0000-4000-8000-000000000972",
+        taskId: "00000000-0000-4000-8000-000000000973",
+        projectId: "00000000-0000-4000-8000-000000000941",
+        expectedProjectVersion: 1,
+        expectedRoutingBindingVersion: 1,
+        title: "Unavailable Task",
+        sourceText: "No state store is present.",
+      }),
+    );
+    await expect(taskCreatePromise).resolves.toMatchObject({
+      kind: "error",
+      id: "task-create-1",
+      error: { code: "service.unavailable" },
+    });
+
     const closePromise = once(socket, "close");
     const shutdownResponsePromise = readFrame(socket);
     sendFrame(socket, rpc("shutdown-1", "system.shutdown", { reason: "user.requested" }));
@@ -578,6 +613,84 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
     await expect(bindPromise).resolves.toMatchObject({
       kind: "response",
       result: { status: "bound", binding: { projectId, bindingVersion: 1 } },
+    });
+
+    const taskId = "00000000-0000-4000-8000-000000000971";
+    const taskParams = {
+      commandId: "00000000-0000-4000-8000-000000000972",
+      ownershipCommandId: "00000000-0000-4000-8000-000000000973",
+      taskId,
+      projectId,
+      expectedProjectVersion: 1,
+      expectedRoutingBindingVersion: 1,
+      title: "实现持久化 Task 目录",
+      sourceText: "创建需求并在 daemon 重启后恢复。",
+    };
+    const createTaskPromise = readFrame(socket);
+    sendFrame(socket, rpc("task-create", "task.create", taskParams));
+    await expect(createTaskPromise).resolves.toMatchObject({
+      kind: "response",
+      result: { schemaVersion: 1, status: "created", taskId },
+    });
+
+    const listTasksPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-catalog", "task.catalog_page", { projectId, cursor: null, limit: 12 }),
+    );
+    await expect(listTasksPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        schemaVersion: 1,
+        tasks: [
+          {
+            taskId,
+            projectId,
+            taskVersion: 1,
+            title: taskParams.title,
+            objective: taskParams.sourceText,
+            stage: "requirements_only",
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+
+    const retryTaskPromise = readFrame(socket);
+    sendFrame(socket, rpc("task-retry", "task.create", taskParams));
+    await expect(retryTaskPromise).resolves.toMatchObject({
+      kind: "response",
+      result: { schemaVersion: 1, status: "existing", taskId },
+    });
+
+    const missingTaskCatalogPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-catalog-missing", "task.catalog_page", {
+        projectId: "00000000-0000-4000-8000-000000000942",
+        cursor: null,
+        limit: 12,
+      }),
+    );
+    await expect(missingTaskCatalogPromise).resolves.toMatchObject({
+      kind: "error",
+      error: { code: "rpc.conflict" },
+    });
+
+    const staleTaskPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("task-create-stale", "task.create", {
+        ...taskParams,
+        commandId: "00000000-0000-4000-8000-000000000974",
+        ownershipCommandId: "00000000-0000-4000-8000-000000000975",
+        taskId: "00000000-0000-4000-8000-000000000976",
+        expectedRoutingBindingVersion: 99,
+      }),
+    );
+    await expect(staleTaskPromise).resolves.toMatchObject({
+      kind: "error",
+      error: { code: "rpc.conflict" },
     });
 
     const missingPromise = readFrame(socket);
