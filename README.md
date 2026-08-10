@@ -25,8 +25,11 @@ pnpm format:check
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm test:coverage:changed --coverage.changed=main
 pnpm build
 pnpm smoke:build
 ```
+
+涉及可执行代码的功能分支还必须对相对目标分支发生变化的可执行文件验证聚合行覆盖率。覆盖命令要求唯一且可解析为 Git commit 的显式基准，运行完整单元测试，只把变更文件纳入覆盖报告；未被测试导入的变更源码同样按零覆盖统计，聚合行覆盖率低于 90% 时失败。纯文档或配置 PR 不适用该指标。
 
 所有仓库变更必须通过功能分支提交 PR，禁止直接推送 `main`。PR 详细设计写在 PR 正文中，不作为 PR 专属文件进入仓库。
