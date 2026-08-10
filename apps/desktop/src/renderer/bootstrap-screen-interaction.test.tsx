@@ -446,11 +446,35 @@ describe("Project Task interaction", () => {
       ],
       hasMore: false,
     };
+    const concurrentDetail = {
+      ...revisedDetail,
+      taskVersion: 3,
+      activeRequirement: {
+        ...revisedDetail.activeRequirement,
+        revisionNumber: 3,
+        sourceText: "Concurrent requirement.",
+        objective: "Concurrent requirement.",
+      },
+    };
+    const concurrentCatalog = {
+      ...catalog,
+      tasks: [
+        {
+          ...catalog.tasks[0]!,
+          taskVersion: 3,
+          objective: concurrentDetail.activeRequirement.objective,
+        },
+      ],
+    };
     const readProjectTaskDetail = vi
       .fn()
+      .mockResolvedValue({ status: "loaded", detail: concurrentDetail })
       .mockResolvedValueOnce({ status: "loaded", detail })
       .mockResolvedValueOnce({ status: "unavailable" })
       .mockRejectedValueOnce(new Error("contained"));
+    const readProjectTaskCatalog = vi
+      .fn()
+      .mockResolvedValue({ status: "loaded", catalog: concurrentCatalog });
     const reviseProjectTaskRequirement = vi
       .fn()
       .mockResolvedValueOnce({
@@ -460,11 +484,12 @@ describe("Project Task interaction", () => {
         catalog,
       })
       .mockResolvedValueOnce({ status: "conflict" })
+      .mockResolvedValueOnce({ status: "conflict" })
       .mockRejectedValueOnce(new Error("contained"));
     Object.assign(globalThis, {
       codexHarness: {
         createProjectTask: vi.fn(),
-        readProjectTaskCatalog: vi.fn(),
+        readProjectTaskCatalog,
         readProjectTaskDetail,
         reviseProjectTaskRequirement,
       },
@@ -564,20 +589,64 @@ describe("Project Task interaction", () => {
     expect(hooks.setters[6]).toHaveBeenCalledWith("Revised requirement.");
     expect(hooks.setters[8]).toHaveBeenLastCalledWith("revised");
 
-    for (const expected of ["conflict", "unavailable"] as const) {
-      hooks.cursor = 0;
-      hooks.effects = [];
-      hooks.values = values({ status: "loaded", detail }, "Revised requirement.", expected);
-      const next = ProjectTaskPanel({
-        projects: PROJECTS,
-        projectRoutingBindings: {
-          bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
-        },
-      });
-      (findTaskControl(next, "data-task-revise").props.onClick as () => void)();
-      await Promise.resolve();
-      await Promise.resolve();
-    }
+    hooks.setters[6]!.mockClear();
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loaded", detail }, "Revised requirement.");
+    const conflicted = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    (findTaskControl(conflicted, "data-task-revise").props.onClick as () => void)();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(readProjectTaskDetail).toHaveBeenLastCalledWith({ projectId: PROJECT_ID, taskId });
+    expect(readProjectTaskCatalog).toHaveBeenCalledWith(PROJECT_ID);
+    expect(hooks.setters[3]).toHaveBeenLastCalledWith({
+      status: "loaded",
+      detail: concurrentDetail,
+    });
+    expect(hooks.setters[1]).toHaveBeenLastCalledWith({
+      status: "loaded",
+      catalog: concurrentCatalog,
+    });
+    expect(hooks.setters[6]).not.toHaveBeenCalled();
+    expect(hooks.setters[8]).toHaveBeenLastCalledWith("conflict");
+
+    readProjectTaskDetail.mockRejectedValueOnce(new Error("contained refresh"));
+    readProjectTaskCatalog.mockResolvedValueOnce({ status: "unavailable" });
+    hooks.setters[3]!.mockClear();
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loaded", detail: concurrentDetail }, "Revised requirement.");
+    const conflictWithoutRefresh = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    (findTaskControl(conflictWithoutRefresh, "data-task-revise").props.onClick as () => void)();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(hooks.setters[3]).not.toHaveBeenCalled();
+    expect(hooks.setters[8]).toHaveBeenLastCalledWith("conflict");
+
+    hooks.cursor = 0;
+    hooks.effects = [];
+    hooks.values = values({ status: "loaded", detail: concurrentDetail }, "Revised requirement.");
+    const unavailable = ProjectTaskPanel({
+      projects: PROJECTS,
+      projectRoutingBindings: {
+        bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+      },
+    });
+    (findTaskControl(unavailable, "data-task-revise").props.onClick as () => void)();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(hooks.setters[8]).toHaveBeenLastCalledWith("unavailable");
 
     hooks.cursor = 0;
@@ -597,7 +666,7 @@ describe("Project Task interaction", () => {
     expect(findTaskControl(disabled, "data-task-revision-source").props.disabled).toBe(true);
     expect(findTaskCreateButton(disabled).props.disabled).toBe(true);
     (findTaskControl(disabled, "data-task-revise").props.onClick as () => void)();
-    expect(reviseProjectTaskRequirement).toHaveBeenCalledTimes(3);
+    expect(reviseProjectTaskRequirement).toHaveBeenCalledTimes(4);
 
     hooks.cursor = 0;
     hooks.effects = [];

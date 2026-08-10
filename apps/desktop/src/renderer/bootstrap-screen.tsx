@@ -523,6 +523,20 @@ export function ProjectTaskPanel({
         setCatalogState({ status: "loaded", catalog: result.catalog });
         setDetailState({ status: "loaded", detail: result.detail });
         setRequirementSource(result.detail.activeRequirement.sourceText);
+      } else if (result.status === "conflict") {
+        const [currentDetail, currentCatalog] = await Promise.allSettled([
+          desktopTaskApi().readProjectTaskDetail({
+            projectId: requirementRevision.projectId,
+            taskId: requirementRevision.taskId,
+          }),
+          desktopTaskApi().readProjectTaskCatalog(requirementRevision.projectId),
+        ]);
+        if (currentDetail.status === "fulfilled" && currentDetail.value.status === "loaded") {
+          setDetailState({ status: "loaded", detail: currentDetail.value.detail });
+        }
+        if (currentCatalog.status === "fulfilled" && currentCatalog.value.status === "loaded") {
+          setCatalogState({ status: "loaded", catalog: currentCatalog.value.catalog });
+        }
       }
       setRevisionStatus(result.status);
     } catch {
@@ -686,6 +700,12 @@ export function ProjectTaskPanel({
                   }}
                 />
               </label>
+              {requirementSource !== detailState.detail.activeRequirement.sourceText ? (
+                <div className="task-authoritative-requirement">
+                  <span>当前已持久化原文</span>
+                  <p>{detailState.detail.activeRequirement.sourceText}</p>
+                </div>
+              ) : null}
               {detailState.detail.activeRequirement.constraints.length > 0 ? (
                 <RequirementItems
                   title="当前约束"
@@ -781,7 +801,7 @@ export function taskRequirementFeedback(
     case "existing":
       return "相同修订命令已经提交，已重新读取当前权威详情。";
     case "conflict":
-      return "Task 已发生变化；草稿仍保留，请重新打开详情后核对再提交。";
+      return "Task 已发生变化；已刷新权威详情，草稿仍保留，请比较当前原文后再提交。";
     case "unavailable":
       return "结果当前未知；请重启并核对 Requirement 修订号，不要盲目重复提交。";
   }

@@ -65,7 +65,7 @@ Project 路由绑定必须由用户在对应首屏 Project 行明确发起。未
 
 Task 创建必须选择首屏内且处于 `default_bound` 的 Project。Renderer 只提交 Project ID、标题和需求原文；Electron main 重新验证受管 frame、成员资格和绑定状态，按 Project 串行化写入，并生成 Task ID、Task command ID、归属 command ID 以及 Project/binding 乐观锁。daemon 在一个 SQLite 事务内提交 `task.created` 与初始 `task.project_assigned`；完整重试返回既有 Task，半批命令、过期 fence 或不可证明的状态返回稳定冲突，不留下孤立 Task。初始 Requirement 的 `objective` 与原文相同，约束和验收标准暂为空；创建成功后 main 权威重读目录。此入口不生成计划、TODO/DAG、thread/turn、RouteDecision，也不调用模型或工具。
 
-Task 详情读取同时携带 Project ID 与 Task ID；daemon 只在 Project 已注册且 Task 当前归属精确匹配时返回数据。Renderer 看到修订号和 Requirement 内容，但看不到 Requirement UUID 或 ownership version。保存修订时 Renderer 回传页面上显示的 Task version 和新原文；Electron main 重新读取详情，显示版本不再当前时直接冲突，再生成 command UUID 并使用隐藏的 Task/Requirement/ownership fence 请求 daemon。新修订把原文同时作为 objective，并把旧修订派生的 constraints 与 acceptance criteria 置空；旧 Requirement 仍保留在事件日志，旧 candidate/active graph 按领域规则失效，旧 confirmed plan 只作历史参照。冲突不会自动重放或覆盖草稿，结果未知时应重启并按 Requirement 修订号核对。当前尚无执行能力，因此运行中节点的中断与重新验证策略仍由后续安全轮次协调 PR 交付。
+Task 详情读取同时携带 Project ID 与 Task ID；daemon 只在 Project 已注册且 Task 当前归属精确匹配时返回数据。Renderer 看到修订号和 Requirement 内容，但看不到 Requirement UUID 或 ownership version。保存修订时 Renderer 回传页面上显示的 Task version 和新原文；Electron main 重新读取详情，显示版本不再当前时直接冲突，再生成 command UUID 并使用隐藏的 Task/Requirement/ownership fence 请求 daemon。新修订把原文同时作为 objective，并把旧修订派生的 constraints 与 acceptance criteria 置空；旧 Requirement 仍保留在事件日志，旧 candidate/active graph 按领域规则失效，旧 confirmed plan 只作历史参照。冲突不会自动重放或覆盖草稿；界面会只读刷新权威详情与目录，并同时展示当前已持久化原文和草稿供用户比较。结果未知时应重启并按 Requirement 修订号核对。当前尚无执行能力，因此运行中节点的中断与重新验证策略仍由后续安全轮次协调 PR 交付。
 
 ## Electron 首次安装与代理
 
