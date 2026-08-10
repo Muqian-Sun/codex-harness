@@ -387,7 +387,9 @@ h1 {
 }
 
 .task-header label span,
-.task-intake-form label span {
+.task-intake-form label span,
+.task-detail label span,
+.task-requirement-items > span {
   color: #718781;
   font-size: 8px;
   font-weight: 700;
@@ -397,7 +399,8 @@ h1 {
 
 .task-header select,
 .task-intake-form input,
-.task-intake-form textarea {
+.task-intake-form textarea,
+.task-detail textarea {
   width: 100%;
   border: 1px solid rgba(195, 211, 203, 0.18);
   border-radius: 0;
@@ -414,11 +417,12 @@ h1 {
 
 .task-workspace {
   display: grid;
-  grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.28fr);
+  grid-template-columns: minmax(230px, 0.68fr) minmax(280px, 0.92fr) minmax(300px, 1.15fr);
 }
 
 .task-intake-form,
-.task-catalog {
+.task-catalog,
+.task-detail {
   padding: 22px 24px;
 }
 
@@ -426,6 +430,10 @@ h1 {
   display: grid;
   align-content: start;
   gap: 16px;
+  border-right: 1px solid var(--line);
+}
+
+.task-catalog {
   border-right: 1px solid var(--line);
 }
 
@@ -441,7 +449,8 @@ h1 {
   line-height: 1.55;
 }
 
-.task-intake-form button {
+.task-intake-form button,
+.task-detail > button {
   min-height: 38px;
   border: 1px solid rgba(111, 191, 155, 0.48);
   border-radius: 0;
@@ -454,7 +463,8 @@ h1 {
   cursor: pointer;
 }
 
-.task-intake-form button:disabled {
+.task-intake-form button:disabled,
+.task-detail > button:disabled {
   border-color: rgba(195, 211, 203, 0.13);
   color: #5f746f;
   background: rgba(24, 39, 43, 0.35);
@@ -463,7 +473,9 @@ h1 {
 
 .task-intake-form > span,
 .task-catalog > p,
-.task-catalog > small {
+.task-catalog > small,
+.task-detail > p,
+.task-detail > span {
   color: #849792;
   font-size: 9px;
   line-height: 1.55;
@@ -477,29 +489,43 @@ h1 {
 }
 
 .task-catalog li {
-  display: grid;
-  padding: 14px 0;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 14px;
   border-bottom: 1px solid var(--line);
 }
 
-.task-catalog li > span {
+.task-catalog li > button {
+  display: grid;
+  width: 100%;
+  padding: 14px 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-catalog li[data-task-selected="true"] > button,
+.task-catalog li > button:hover {
+  background: rgba(73, 123, 103, 0.14);
+}
+
+.task-catalog li > button > span {
   color: #718781;
   font-size: 8px;
   font-weight: 700;
 }
 
-.task-catalog li div {
+.task-catalog li button div {
   min-width: 0;
 }
 
-.task-catalog li strong {
+.task-catalog li button strong {
   color: #dce5df;
   font-size: 12px;
 }
 
-.task-catalog li p {
+.task-catalog li button p {
   display: -webkit-box;
   overflow: hidden;
   margin: 6px 0 0;
@@ -510,13 +536,86 @@ h1 {
   -webkit-line-clamp: 3;
 }
 
-.task-catalog li small {
+.task-catalog li button small {
   color: #79c9a5;
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 7px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   white-space: nowrap;
+}
+
+.task-detail {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.task-detail header {
+  display: grid;
+  gap: 6px;
+}
+
+.task-detail header span,
+.task-detail header small {
+  color: #79c9a5;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.task-detail header strong {
+  color: #e1e7e2;
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 19px;
+  font-weight: 400;
+}
+
+.task-detail label {
+  display: grid;
+  gap: 7px;
+}
+
+.task-detail textarea {
+  min-height: 168px;
+  padding: 10px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+.task-authoritative-requirement {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid rgba(201, 169, 107, 0.22);
+  background: rgba(201, 169, 107, 0.06);
+}
+
+.task-authoritative-requirement span {
+  color: #9a8766;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.task-authoritative-requirement p {
+  margin: 0;
+  color: #c6d0ca;
+  font-size: 9px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.task-requirement-items ul {
+  display: grid;
+  gap: 5px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #9aaba5;
+  font-size: 9px;
+  line-height: 1.5;
 }
 
 .project-header button {
@@ -1158,6 +1257,11 @@ h1 {
   }
 
   .task-intake-form {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .task-catalog {
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }

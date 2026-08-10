@@ -538,7 +538,7 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
     ).rejects.toMatchObject({ code: "invalid_request" });
   });
 
-  it("reads and creates strictly validated Project Tasks", async () => {
+  it("reads, creates, details, and revises strictly validated Project Tasks", async () => {
     const projectId = "00000000-0000-4000-8000-000000000861";
     const taskId = "00000000-0000-4000-8000-000000000911";
     const observedMethods: string[] = [];
@@ -570,7 +570,27 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
                 ],
                 nextCursor: null,
               }
-            : { schemaVersion: 1, status: "created", taskId },
+            : method === "task.create"
+              ? { schemaVersion: 1, status: "created", taskId }
+              : method === "task.detail"
+                ? {
+                    schemaVersion: 1,
+                    projectId,
+                    ownershipVersion: 1,
+                    taskId,
+                    taskVersion: 1,
+                    title: "Persist Task",
+                    stage: "requirements_only",
+                    activeRequirement: {
+                      revisionId: "00000000-0000-4000-8000-000000000912",
+                      revisionNumber: 1,
+                      sourceText: "Persist without execution.",
+                      objective: "Persist without execution.",
+                      constraints: [],
+                      acceptanceCriteria: [],
+                    },
+                  }
+                : { schemaVersion: 1, status: "revised", taskId },
       });
     });
     const client = await createClient(endpoint);
@@ -590,9 +610,41 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
         sourceText: "Persist without execution.",
       }),
     ).resolves.toEqual({ schemaVersion: 1, status: "created", taskId });
-    expect(observedMethods).toEqual(["task.catalog_page", "task.create"]);
+    await expect(client.projectTaskDetail({ projectId, taskId })).resolves.toMatchObject({
+      taskId,
+      ownershipVersion: 1,
+      activeRequirement: { revisionNumber: 1 },
+    });
+    await expect(
+      client.reviseProjectTaskRequirement({
+        commandId: "00000000-0000-4000-8000-000000000914",
+        projectId,
+        taskId,
+        expectedTaskVersion: 1,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        sourceText: "Persist the revised Requirement.",
+      }),
+    ).resolves.toEqual({ schemaVersion: 1, status: "revised", taskId });
+    expect(observedMethods).toEqual([
+      "task.catalog_page",
+      "task.create",
+      "task.detail",
+      "task.requirement.revise",
+    ]);
     await expect(
       client.projectTaskCatalogPage({ projectId, cursor: null, limit: 13 }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(
+      client.reviseProjectTaskRequirement({
+        commandId: "00000000-0000-4000-8000-000000000914",
+        projectId,
+        taskId,
+        expectedTaskVersion: 0,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        sourceText: "invalid",
+      }),
     ).rejects.toMatchObject({ code: "invalid_request" });
   });
 

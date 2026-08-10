@@ -27,6 +27,8 @@ type ExposedApi = Readonly<{
   bindProjectToDefaultRouting(projectId: string): Promise<unknown>;
   readProjectTaskCatalog(projectId: string): Promise<unknown>;
   createProjectTask(input: unknown): Promise<unknown>;
+  readProjectTaskDetail(input: unknown): Promise<unknown>;
+  reviseProjectTaskRequirement(input: unknown): Promise<unknown>;
 }>;
 
 function readyState(binding: unknown): unknown {
@@ -233,6 +235,70 @@ describe("desktop preload Project routing binding boundary", () => {
     });
     await expect(api.createProjectTask(creation)).rejects.toThrow(
       "Project Task creation result is invalid",
+    );
+
+    const selection = { projectId: PROJECT_ID, taskId };
+    const detail = {
+      projectId: PROJECT_ID,
+      taskId,
+      taskVersion: 1,
+      title: "Persist Task",
+      stage: "requirements_only",
+      activeRequirement: {
+        revisionNumber: 1,
+        sourceText: "Persist without execution.",
+        objective: "Persist without execution.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+    };
+    await expect(api.readProjectTaskDetail({ ...selection, extra: true })).rejects.toThrow(
+      "valid desktop Project Task selection",
+    );
+    harness.invoke.mockResolvedValueOnce({ status: "loaded", detail });
+    await expect(api.readProjectTaskDetail(selection)).resolves.toEqual({
+      status: "loaded",
+      detail,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith("desktop.task.detail", selection);
+    harness.invoke.mockResolvedValueOnce({ status: "unavailable" });
+    await expect(api.readProjectTaskDetail(selection)).resolves.toEqual({ status: "unavailable" });
+    harness.invoke.mockResolvedValueOnce({
+      status: "loaded",
+      detail: { ...detail, projectId: "00000000-0000-4000-8000-000000000894" },
+    });
+    await expect(api.readProjectTaskDetail(selection)).rejects.toThrow(
+      "Project Task detail result is invalid",
+    );
+
+    const revision = {
+      ...selection,
+      expectedTaskVersion: 1,
+      sourceText: "Persist the revised Requirement.",
+    };
+    await expect(
+      api.reviseProjectTaskRequirement({ ...revision, expectedTaskVersion: 0 }),
+    ).rejects.toThrow("valid desktop Project Task Requirement revision");
+    harness.invoke.mockResolvedValueOnce({ status: "revised", taskId, detail, catalog });
+    await expect(api.reviseProjectTaskRequirement(revision)).resolves.toEqual({
+      status: "revised",
+      taskId,
+      detail,
+      catalog,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith("desktop.task.requirement.revise", revision);
+    harness.invoke.mockResolvedValueOnce({ status: "conflict" });
+    await expect(api.reviseProjectTaskRequirement(revision)).resolves.toEqual({
+      status: "conflict",
+    });
+    harness.invoke.mockResolvedValueOnce({
+      status: "revised",
+      taskId,
+      detail: { ...detail, taskId: "00000000-0000-4000-8000-000000000895" },
+      catalog,
+    });
+    await expect(api.reviseProjectTaskRequirement(revision)).rejects.toThrow(
+      "Project Task Requirement result is invalid",
     );
   });
 });

@@ -20,6 +20,30 @@ const harness = vi.hoisted(() => {
     void input;
     return { status: "unavailable" as const };
   });
+  const readProjectTaskDetail = vi.fn(async (input: unknown): Promise<unknown> => {
+    const selection = input as { projectId: string; taskId: string };
+    return {
+      status: "loaded" as const,
+      detail: {
+        projectId: selection.projectId,
+        taskId: selection.taskId,
+        taskVersion: 1,
+        title: "Task",
+        stage: "requirements_only" as const,
+        activeRequirement: {
+          revisionNumber: 1,
+          sourceText: "Requirement",
+          objective: "Requirement",
+          constraints: [],
+          acceptanceCriteria: [],
+        },
+      },
+    };
+  });
+  const reviseProjectTaskRequirement = vi.fn(async (input: unknown): Promise<unknown> => {
+    void input;
+    return { status: "unavailable" as const };
+  });
   const appEvents = new Map<string, (...arguments_: unknown[]) => unknown>();
   const webContents = {
     executeJavaScript: vi.fn(async () => true),
@@ -46,6 +70,8 @@ const harness = vi.hoisted(() => {
     bindProjectToDefaultRouting,
     readProjectTaskCatalog,
     createProjectTask,
+    readProjectTaskDetail,
+    reviseProjectTaskRequirement,
     ipcHandlers,
     webContents,
     window,
@@ -177,6 +203,14 @@ vi.mock("./application-controller.js", () => {
         return await harness.createProjectTask(input);
       }
 
+      async readProjectTaskDetail(input: unknown): Promise<unknown> {
+        return await harness.readProjectTaskDetail(input);
+      }
+
+      async reviseProjectTaskRequirement(input: unknown): Promise<unknown> {
+        return await harness.reviseProjectTaskRequirement(input);
+      }
+
       async setRoutingConfiguration(): Promise<Readonly<{ status: "unavailable" }>> {
         return { status: "unavailable" };
       }
@@ -194,6 +228,8 @@ describe("desktop Electron main Project Task IPC", () => {
     await vi.waitFor(() => {
       expect(harness.ipcHandlers.has("desktop.task.catalog_page")).toBe(true);
       expect(harness.ipcHandlers.has("desktop.task.create")).toBe(true);
+      expect(harness.ipcHandlers.has("desktop.task.detail")).toBe(true);
+      expect(harness.ipcHandlers.has("desktop.task.requirement.revise")).toBe(true);
     });
     const read = harness.ipcHandlers.get("desktop.task.catalog_page")!;
     const create = harness.ipcHandlers.get("desktop.task.create")!;
@@ -246,6 +282,72 @@ describe("desktop Electron main Project Task IPC", () => {
       },
     });
     await expect(create(event, creation)).resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("validates Task detail and serializes Requirement revisions per Task", async () => {
+    await import("./main.js");
+    const read = harness.ipcHandlers.get("desktop.task.detail")!;
+    const revise = harness.ipcHandlers.get("desktop.task.requirement.revise")!;
+    const event = { sender: harness.webContents, senderFrame: {} };
+    const taskId = "00000000-0000-4000-8000-000000000894";
+    const selection = { projectId: PROJECT_ID, taskId };
+
+    await expect(read({ sender: {}, senderFrame: {} }, selection)).rejects.toThrow(
+      "not authorized",
+    );
+    await expect(read(event, { ...selection, extra: true })).rejects.toThrow(
+      "detail request is invalid",
+    );
+    await expect(read(event, selection)).resolves.toMatchObject({
+      status: "loaded",
+      detail: { projectId: PROJECT_ID, taskId, taskVersion: 1 },
+    });
+    harness.readProjectTaskDetail.mockResolvedValueOnce({
+      status: "loaded",
+      detail: {
+        projectId: "00000000-0000-4000-8000-000000000895",
+        taskId,
+        taskVersion: 1,
+        title: "Task",
+        stage: "requirements_only",
+        activeRequirement: {
+          revisionNumber: 1,
+          sourceText: "Requirement",
+          objective: "Requirement",
+          constraints: [],
+          acceptanceCriteria: [],
+        },
+      },
+    });
+    await expect(read(event, selection)).resolves.toEqual({ status: "unavailable" });
+
+    const revision = {
+      ...selection,
+      expectedTaskVersion: 1,
+      sourceText: "Revised Requirement",
+    };
+    await expect(revise(event, { ...revision, expectedTaskVersion: 0 })).rejects.toThrow(
+      "revision is invalid",
+    );
+    let resolveRevision!: (value: Readonly<{ status: "unavailable" }>) => void;
+    harness.reviseProjectTaskRequirement.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveRevision = resolve;
+        }),
+    );
+    const first = revise(event, revision);
+    await vi.waitFor(() =>
+      expect(harness.reviseProjectTaskRequirement).toHaveBeenCalledWith(revision),
+    );
+    await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
+    resolveRevision({ status: "unavailable" });
+    await expect(first).resolves.toEqual({ status: "unavailable" });
+
+    harness.reviseProjectTaskRequirement.mockResolvedValueOnce({ status: "unexpected" });
+    await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
+    harness.reviseProjectTaskRequirement.mockRejectedValueOnce(new Error("private"));
+    await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
   });
 });
 

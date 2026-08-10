@@ -34,6 +34,10 @@ import {
   type HarnessTaskCatalogPageResult as ProtocolTaskCatalogPageResult,
   type HarnessTaskCreateParams as ProtocolTaskCreateParams,
   type HarnessTaskCreateResult as ProtocolTaskCreateResult,
+  type HarnessTaskDetailParams as ProtocolTaskDetailParams,
+  type HarnessTaskDetailResult as ProtocolTaskDetailResult,
+  type HarnessTaskRequirementReviseParams as ProtocolTaskRequirementReviseParams,
+  type HarnessTaskRequirementReviseResult as ProtocolTaskRequirementReviseResult,
   type RpcEvent,
   type RpcMethodName,
 } from "@codex-harness/protocol";
@@ -128,6 +132,10 @@ export type HarnessTaskCatalogPageParams = Readonly<ProtocolTaskCatalogPageParam
 export type HarnessTaskCatalogPageResult = Readonly<ProtocolTaskCatalogPageResult>;
 export type HarnessTaskCreateParams = Readonly<ProtocolTaskCreateParams>;
 export type HarnessTaskCreateResult = Readonly<ProtocolTaskCreateResult>;
+export type HarnessTaskDetailParams = Readonly<ProtocolTaskDetailParams>;
+export type HarnessTaskDetailResult = Readonly<ProtocolTaskDetailResult>;
+export type HarnessTaskRequirementReviseParams = Readonly<ProtocolTaskRequirementReviseParams>;
+export type HarnessTaskRequirementReviseResult = Readonly<ProtocolTaskRequirementReviseResult>;
 export type HarnessAccountStatusObservation = Readonly<{
   account: HarnessAccountStatusResult;
   observedThroughSequence: number;
@@ -375,6 +383,22 @@ export class HarnessRpcClient {
       "task.create",
       params as JsonValue,
     )) as unknown as HarnessTaskCreateResult;
+  }
+
+  async projectTaskDetail(params: HarnessTaskDetailParams): Promise<HarnessTaskDetailResult> {
+    return (await this.request(
+      "task.detail",
+      params as JsonValue,
+    )) as unknown as HarnessTaskDetailResult;
+  }
+
+  async reviseProjectTaskRequirement(
+    params: HarnessTaskRequirementReviseParams,
+  ): Promise<HarnessTaskRequirementReviseResult> {
+    return (await this.request(
+      "task.requirement.revise",
+      params as JsonValue,
+    )) as unknown as HarnessTaskRequirementReviseResult;
   }
 
   async setRoutingConfiguration(

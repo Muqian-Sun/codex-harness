@@ -35,6 +35,8 @@ function createSession(options?: {
   bindProjectDefaultRouting?: (params: JsonValue) => unknown;
   readProjectTaskCatalogPage?: (params: JsonValue) => unknown;
   createProjectTask?: (params: JsonValue) => unknown;
+  readProjectTaskDetail?: (params: JsonValue) => unknown;
+  reviseProjectTaskRequirement?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }): ConnectionSession {
@@ -61,6 +63,12 @@ function createSession(options?: {
     ...(options?.createProjectTask === undefined
       ? {}
       : { createProjectTask: options.createProjectTask }),
+    ...(options?.readProjectTaskDetail === undefined
+      ? {}
+      : { readProjectTaskDetail: options.readProjectTaskDetail }),
+    ...(options?.reviseProjectTaskRequirement === undefined
+      ? {}
+      : { reviseProjectTaskRequirement: options.reviseProjectTaskRequirement }),
     ...(options?.readRoutingConfiguration === undefined
       ? {}
       : { readRoutingConfiguration: options.readRoutingConfiguration }),
@@ -352,7 +360,7 @@ describe("daemon connection session", () => {
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
   });
 
-  it("serves Project Task catalog and creation only through explicit providers", () => {
+  it("serves Project Task catalog, creation, detail, and revision through explicit providers", () => {
     const projectId = "00000000-0000-4000-8000-000000000861";
     const taskId = "00000000-0000-4000-8000-000000000911";
     const readProjectTaskCatalogPage = vi.fn(() => ({
@@ -374,7 +382,34 @@ describe("daemon connection session", () => {
       status: "created",
       taskId,
     }));
-    const session = createSession({ readProjectTaskCatalogPage, createProjectTask });
+    const readProjectTaskDetail = vi.fn(() => ({
+      schemaVersion: 1,
+      projectId,
+      ownershipVersion: 1,
+      taskId,
+      taskVersion: 1,
+      title: "Persist Task",
+      stage: "requirements_only",
+      activeRequirement: {
+        revisionId: "00000000-0000-4000-8000-000000000912",
+        revisionNumber: 1,
+        sourceText: "Persist without execution.",
+        objective: "Persist without execution.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+    }));
+    const reviseProjectTaskRequirement = vi.fn(() => ({
+      schemaVersion: 1,
+      status: "revised",
+      taskId,
+    }));
+    const session = createSession({
+      readProjectTaskCatalogPage,
+      createProjectTask,
+      readProjectTaskDetail,
+      reviseProjectTaskRequirement,
+    });
     authenticate(session);
     const catalogParams = { projectId, cursor: null, limit: 12 };
     expect(
@@ -396,6 +431,28 @@ describe("daemon connection session", () => {
       sentValues(session.receive(frame(rpc("task-create", "task.create", createParams))))[0],
     ).toMatchObject({ kind: "response", result: { status: "created", taskId } });
     expect(createProjectTask).toHaveBeenCalledWith(createParams);
+
+    const detailParams = { projectId, taskId };
+    expect(
+      sentValues(session.receive(frame(rpc("task-detail", "task.detail", detailParams))))[0],
+    ).toMatchObject({ kind: "response", result: { taskId, taskVersion: 1 } });
+    expect(readProjectTaskDetail).toHaveBeenCalledWith(detailParams);
+
+    const reviseParams = {
+      commandId: "00000000-0000-4000-8000-000000000914",
+      projectId,
+      taskId,
+      expectedTaskVersion: 1,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+      sourceText: "Persist the revised Requirement.",
+    };
+    expect(
+      sentValues(
+        session.receive(frame(rpc("task-revise", "task.requirement.revise", reviseParams))),
+      )[0],
+    ).toMatchObject({ kind: "response", result: { status: "revised", taskId } });
+    expect(reviseProjectTaskRequirement).toHaveBeenCalledWith(reviseParams);
 
     const missing = createSession();
     authenticate(missing);

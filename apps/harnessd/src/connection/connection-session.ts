@@ -49,6 +49,8 @@ export type ConnectionSessionConfig = Readonly<{
   bindProjectDefaultRouting?: (params: JsonValue) => unknown;
   readProjectTaskCatalogPage?: (params: JsonValue) => unknown;
   createProjectTask?: (params: JsonValue) => unknown;
+  readProjectTaskDetail?: (params: JsonValue) => unknown;
+  reviseProjectTaskRequirement?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
@@ -126,6 +128,8 @@ export class ConnectionSession {
   readonly #bindProjectDefaultRouting: (params: JsonValue) => unknown;
   readonly #readProjectTaskCatalogPage: (params: JsonValue) => unknown;
   readonly #createProjectTask: (params: JsonValue) => unknown;
+  readonly #readProjectTaskDetail: (params: JsonValue) => unknown;
+  readonly #reviseProjectTaskRequirement: (params: JsonValue) => unknown;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
@@ -158,7 +162,11 @@ export class ConnectionSession {
         typeof config.bindProjectDefaultRouting !== "function") ||
       (config.readProjectTaskCatalogPage !== undefined &&
         typeof config.readProjectTaskCatalogPage !== "function") ||
-      (config.createProjectTask !== undefined && typeof config.createProjectTask !== "function")
+      (config.createProjectTask !== undefined && typeof config.createProjectTask !== "function") ||
+      (config.readProjectTaskDetail !== undefined &&
+        typeof config.readProjectTaskDetail !== "function") ||
+      (config.reviseProjectTaskRequirement !== undefined &&
+        typeof config.reviseProjectTaskRequirement !== "function")
     ) {
       throw new Error("Invalid connection session configuration.");
     }
@@ -183,6 +191,8 @@ export class ConnectionSession {
     this.#bindProjectDefaultRouting = config.bindProjectDefaultRouting ?? (() => null);
     this.#readProjectTaskCatalogPage = config.readProjectTaskCatalogPage ?? (() => null);
     this.#createProjectTask = config.createProjectTask ?? (() => null);
+    this.#readProjectTaskDetail = config.readProjectTaskDetail ?? (() => null);
+    this.#reviseProjectTaskRequirement = config.reviseProjectTaskRequirement ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
     this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
@@ -360,6 +370,8 @@ export class ConnectionSession {
       bindProjectDefaultRouting: this.#bindProjectDefaultRouting,
       readProjectTaskCatalogPage: this.#readProjectTaskCatalogPage,
       createProjectTask: this.#createProjectTask,
+      readProjectTaskDetail: this.#readProjectTaskDetail,
+      reviseProjectTaskRequirement: this.#reviseProjectTaskRequirement,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
     });

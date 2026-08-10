@@ -40,7 +40,7 @@ export async function smokeDesktopApplication() {
       routingMode: "configure",
       projectMode: "register",
       bindingMode: "bind",
-      taskMode: "create",
+      taskMode: "create_revise",
     });
     await runScenario({
       directory: join(directory, "ready"),
@@ -51,7 +51,7 @@ export async function smokeDesktopApplication() {
       routingMode: "recover",
       projectMode: "recover",
       bindingMode: "recover",
-      taskMode: "recover",
+      taskMode: "recover_revision",
     });
     await runScenario({
       directory: join(directory, "failed"),

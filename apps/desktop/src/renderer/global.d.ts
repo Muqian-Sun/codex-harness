@@ -4,7 +4,11 @@ import type {
   DesktopProjectRoutingBindingMutationResult,
   DesktopProjectTaskCatalogResult,
   DesktopProjectTaskCreation,
+  DesktopProjectTaskDetailResult,
   DesktopProjectTaskMutationResult,
+  DesktopProjectTaskRequirementMutationResult,
+  DesktopProjectTaskRequirementRevision,
+  DesktopProjectTaskSelection,
   DesktopRoutingConfigurationMutationResult,
   DesktopRoutingConfigurationUpdate,
 } from "../shared/bootstrap-state.js";
@@ -21,6 +25,12 @@ declare global {
       createProjectTask(
         creation: DesktopProjectTaskCreation,
       ): Promise<DesktopProjectTaskMutationResult>;
+      readProjectTaskDetail(
+        selection: DesktopProjectTaskSelection,
+      ): Promise<DesktopProjectTaskDetailResult>;
+      reviseProjectTaskRequirement(
+        revision: DesktopProjectTaskRequirementRevision,
+      ): Promise<DesktopProjectTaskRequirementMutationResult>;
       setRoutingConfiguration(
         update: DesktopRoutingConfigurationUpdate,
       ): Promise<DesktopRoutingConfigurationMutationResult>;
