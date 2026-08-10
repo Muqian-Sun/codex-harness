@@ -95,6 +95,25 @@ describe("App Server method policy", () => {
         sandboxPolicy: { type: "dangerFullAccess" },
       }),
     ).toMatchObject({ ok: false, error: { code: "invalid_params" } });
+
+    const outputSchema = {
+      type: "object",
+      required: ["kind"],
+      properties: { kind: { type: "string" } },
+      additionalProperties: false,
+    };
+    const validated = validateMethodParams("turn/start", {
+      threadId: "thread-1",
+      input: [{ type: "text", text: "hello", text_elements: [] }],
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+      outputSchema,
+    });
+    expect(validated).toMatchObject({ ok: true, value: { outputSchema } });
+    if (!validated.ok) {
+      throw new Error("turn/start parameters were not validated");
+    }
+    expect(Object.isFrozen((validated.value as { outputSchema: unknown }).outputSchema)).toBe(true);
   });
 
   it("classifies approval requests without deciding them", () => {

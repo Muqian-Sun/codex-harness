@@ -202,6 +202,7 @@ export const TurnStartParamsSchema = z
     serviceTier: z.string().max(4096).nullable().optional(),
     effort: z.string().min(1).max(128).nullable().optional(),
     summary: z.enum(["auto", "concise", "detailed", "none"]).nullable().optional(),
+    outputSchema: z.unknown().optional(),
   })
   .strict();
 

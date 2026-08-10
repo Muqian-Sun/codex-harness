@@ -16,6 +16,10 @@ import {
 } from "./methods.js";
 import { adapterFailure, adapterSuccess, type AdapterResult } from "./result.js";
 import { InitializeParamsSchema, InitializeResponseSchema } from "./schemas.js";
+import {
+  parseAppServerTurnOutputNotification,
+  type AppServerCompletedAgentMessage,
+} from "./turn-output.js";
 import type { AppServerMessage, AppServerRequestId } from "./wire.js";
 
 export type AdapterState = "new" | "initializing" | "awaiting_initialized" | "ready" | "closed";
@@ -52,6 +56,7 @@ export type AppServerAdapterEvent =
   | Readonly<{ type: "notification"; method: string; params: JsonValue | undefined }>
   | Readonly<{ type: "account_updated" }>
   | Readonly<{ type: "recovery_lifecycle"; signal: AppServerRecoveryLifecycleSignal }>
+  | Readonly<{ type: "turn_output"; signal: AppServerCompletedAgentMessage }>
   | Readonly<{
       type: "server_request";
       id: AppServerRequestId;
@@ -166,6 +171,14 @@ export class AppServerProtocolAdapter {
           type: "recovery_lifecycle",
           signal: lifecycle.signal,
         });
+      }
+      const turnOutput = parseAppServerTurnOutputNotification(message.method, message.params);
+      if (turnOutput.kind === "invalid") {
+        this.#state = "closed";
+        return adapterFailure("invalid_message");
+      }
+      if (turnOutput.kind === "signal") {
+        return adapterSuccess({ type: "turn_output", signal: turnOutput.signal });
       }
       const account = parseAppServerAccountNotification(message.method, message.params);
       if (account.kind === "invalid") {
