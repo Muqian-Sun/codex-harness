@@ -1,8 +1,8 @@
 {
-  "codexCliVersion": "0.146.0-alpha.9.2",
-  "codexVersionOutput": "codex-cli 0.146.0-alpha.9.2",
+  "codexCliVersion": "0.146.0",
+  "codexVersionOutput": "codex-cli 0.146.0",
   "experimentalApi": false,
   "generatorCommand": "codex app-server generate-json-schema",
   "schemaFile": "schema/codex-app-server.schema.json",
-  "sha256": "0dc592f9d0df1eb58141a89dc902ea671870045e63dfa4adc5632dfbb6636eab"
+  "sha256": "1a9a00c1ee35d44c8e04e92b394263544f90acaa7afe3c7023b08d9f0eb0d161"
 }

@@ -26,7 +26,7 @@ function initializedAdapter(): AppServerProtocolAdapter {
       kind: "success",
       id: initialize.value.id,
       result: {
-        userAgent: "codex_cli_rs/0.146.0-alpha.9.2",
+        userAgent: "codex_cli_rs/0.146.0",
         codexHome: "/tmp/codex-home",
         platformFamily: "unix",
         platformOs: "macos",

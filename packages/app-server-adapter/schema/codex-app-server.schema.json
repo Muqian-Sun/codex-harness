@@ -6056,14 +6056,10 @@
         "title": "ThreadStartParams",
         "type": "object",
         "properties": {
-          "personality": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/Personality"
-              },
-              {
-                "type": "null"
-              }
+          "serviceTier": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "approvalPolicy": {
@@ -6112,15 +6108,10 @@
               "null"
             ]
           },
-          "threadSource": {
-            "description": "Optional client-supplied analytics source classification for this thread.",
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/ThreadSource"
-              },
-              {
-                "type": "null"
-              }
+          "serviceName": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "sessionStartSource": {
@@ -6139,6 +6130,16 @@
               "null"
             ]
           },
+          "personality": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/Personality"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "sandbox": {
             "anyOf": [
               {
@@ -6149,16 +6150,15 @@
               }
             ]
           },
-          "serviceTier": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "serviceName": {
-            "type": [
-              "string",
-              "null"
+          "threadSource": {
+            "description": "Optional client-supplied analytics source classification for this thread.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadSource"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "model": {
@@ -7517,11 +7517,8 @@
               "null"
             ]
           },
-          "serviceTier": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "threadId": {
+            "type": "string"
           },
           "personality": {
             "anyOf": [
@@ -7556,8 +7553,11 @@
               "null"
             ]
           },
-          "threadId": {
-            "type": "string"
+          "serviceTier": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -7597,15 +7597,10 @@
               "null"
             ]
           },
-          "threadSource": {
-            "description": "Optional client-supplied analytics source classification for this forked thread.",
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/ThreadSource"
-              },
-              {
-                "type": "null"
-              }
+          "serviceTier": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "config": {
@@ -7621,10 +7616,14 @@
               "null"
             ]
           },
-          "serviceTier": {
-            "type": [
-              "string",
-              "null"
+          "sandbox": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SandboxMode"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "developerInstructions": {
@@ -7636,8 +7635,16 @@
           "ephemeral": {
             "type": "boolean"
           },
-          "threadId": {
-            "type": "string"
+          "threadSource": {
+            "description": "Optional client-supplied analytics source classification for this forked thread.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "lastTurnId": {
             "description": "Optional last turn id to fork through, inclusive.\n\nWhen specified, turns after `last_turn_id` are omitted from the fork. The referenced turn cannot be in progress.",
@@ -7659,15 +7666,8 @@
               "null"
             ]
           },
-          "sandbox": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/SandboxMode"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "threadId": {
+            "type": "string"
           }
         }
       },
@@ -9537,12 +9537,8 @@
           "threadId"
         ],
         "properties": {
-          "serviceTier": {
-            "description": "Override the service tier for this turn and subsequent turns.",
-            "type": [
-              "string",
-              "null"
-            ]
+          "threadId": {
+            "type": "string"
           },
           "approvalPolicy": {
             "description": "Override the approval policy for this turn and subsequent turns.",
@@ -9572,15 +9568,11 @@
               "null"
             ]
           },
-          "personality": {
-            "description": "Override the personality for this turn and subsequent turns.",
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/Personality"
-              },
-              {
-                "type": "null"
-              }
+          "serviceTier": {
+            "description": "Override the service tier for this turn and subsequent turns.",
+            "type": [
+              "string",
+              "null"
             ]
           },
           "cwd": {
@@ -9601,11 +9593,11 @@
               }
             ]
           },
-          "summary": {
-            "description": "Override the reasoning summary for this turn and subsequent turns.",
+          "sandboxPolicy": {
+            "description": "Override the sandbox policy for this turn and subsequent turns.",
             "anyOf": [
               {
-                "$ref": "#/definitions/v2/ReasoningSummary"
+                "$ref": "#/definitions/v2/SandboxPolicy"
               },
               {
                 "type": "null"
@@ -9625,11 +9617,11 @@
               "null"
             ]
           },
-          "sandboxPolicy": {
-            "description": "Override the sandbox policy for this turn and subsequent turns.",
+          "summary": {
+            "description": "Override the reasoning summary for this turn and subsequent turns.",
             "anyOf": [
               {
-                "$ref": "#/definitions/v2/SandboxPolicy"
+                "$ref": "#/definitions/v2/ReasoningSummary"
               },
               {
                 "type": "null"
@@ -9639,8 +9631,16 @@
           "outputSchema": {
             "description": "Optional JSON Schema used to constrain the final assistant message for this turn."
           },
-          "threadId": {
-            "type": "string"
+          "personality": {
+            "description": "Override the personality for this turn and subsequent turns.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/Personality"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -12538,16 +12538,10 @@
               "null"
             ]
           },
-          "threadSource": {
-            "description": "Optional analytics source classification for this thread.",
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/ThreadSource"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "updatedAt": {
+            "description": "Unix timestamp (in seconds) when the thread was last updated.",
+            "type": "integer",
+            "format": "int64"
           },
           "cliVersion": {
             "description": "Version of the CLI that created the thread.",
@@ -12570,12 +12564,16 @@
             "description": "Whether the thread is ephemeral and should not be materialized on disk.",
             "type": "boolean"
           },
-          "turns": {
-            "description": "Only populated on `thread/resume`, `thread/rollback`, `thread/fork`, and `thread/read` (when `includeTurns` is true) responses. For all other responses and notifications returning a Thread, the turns field will be an empty list.",
-            "type": "array",
-            "items": {
-              "$ref": "#/definitions/v2/Turn"
-            }
+          "threadSource": {
+            "description": "Optional analytics source classification for this thread.",
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ThreadSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "forkedFromId": {
             "description": "Source thread id when this thread was created by forking another thread.",
@@ -12595,10 +12593,12 @@
               }
             ]
           },
-          "updatedAt": {
-            "description": "Unix timestamp (in seconds) when the thread was last updated.",
-            "type": "integer",
-            "format": "int64"
+          "turns": {
+            "description": "Only populated on `thread/resume`, `thread/rollback`, `thread/fork`, and `thread/read` (when `includeTurns` is true) responses. For all other responses and notifications returning a Thread, the turns field will be an empty list.",
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/v2/Turn"
+            }
           },
           "id": {
             "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
@@ -13841,11 +13841,13 @@
           "thread"
         ],
         "properties": {
-          "sandbox": {
-            "description": "Legacy sandbox policy retained for compatibility. Experimental clients should prefer `activePermissionProfile` for profile provenance.",
-            "allOf": [
+          "reasoningEffort": {
+            "anyOf": [
               {
-                "$ref": "#/definitions/v2/SandboxPolicy"
+                "$ref": "#/definitions/v2/ReasoningEffort"
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -13863,15 +13865,8 @@
           "cwd": {
             "$ref": "#/definitions/v2/AbsolutePathBuf"
           },
-          "reasoningEffort": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/v2/ReasoningEffort"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "thread": {
+            "$ref": "#/definitions/v2/Thread"
           },
           "instructionSources": {
             "description": "Environment-native paths to instruction source files currently loaded for this thread.",
@@ -13881,8 +13876,13 @@
               "$ref": "#/definitions/v2/LegacyAppPathString"
             }
           },
-          "thread": {
-            "$ref": "#/definitions/v2/Thread"
+          "sandbox": {
+            "description": "Legacy sandbox policy retained for compatibility. Experimental clients should prefer `activePermissionProfile` for profile provenance.",
+            "allOf": [
+              {
+                "$ref": "#/definitions/v2/SandboxPolicy"
+              }
+            ]
           },
           "model": {
             "type": "string"

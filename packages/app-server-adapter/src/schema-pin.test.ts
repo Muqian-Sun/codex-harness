@@ -26,7 +26,7 @@ describe("pinned App Server schema", () => {
     );
     expect(APP_SERVER_SCHEMA_MANIFEST.experimentalApi).toBe(false);
     expect(APP_SERVER_SCHEMA_MANIFEST.generatorCommand).not.toContain("--experimental");
-    expect(SUPPORTED_CODEX_CLI_VERSION).toBe("0.146.0-alpha.9.2");
+    expect(SUPPORTED_CODEX_CLI_VERSION).toBe("0.146.0");
 
     const schema = JSON.parse(schemaBytes.toString("utf8")) as {
       definitions?: Record<string, unknown> & {
