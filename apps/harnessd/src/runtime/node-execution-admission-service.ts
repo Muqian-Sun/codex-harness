@@ -218,6 +218,9 @@ export class NodeExecutionAdmissionService {
     const binding = this.#bindings.readBinding(params.projectId);
     const profile = this.#profiles.readProfile(binding.profileId);
     const catalog = this.#workerManager.catalog;
+    if (catalog === null || !this.#workerManager.isCatalogCurrent(catalog)) {
+      throw new NodeExecutionAdmissionServiceError("unavailable");
+    }
     const preview = task.activeGraph === null ? null : previewSerialTaskSchedule(task.activeGraph);
     if (
       project.projectVersion !== params.expectedProjectVersion ||
@@ -236,9 +239,7 @@ export class NodeExecutionAdmissionService {
       manifest.stateVersion !== params.expectedManifestStateVersion ||
       binding.bindingVersion !== params.expectedRoutingBindingVersion ||
       profile.profileVersion !== params.expectedProfileVersion ||
-      profile.activeConfiguration.revisionId !== params.expectedConfigurationRevisionId ||
-      catalog === null ||
-      !this.#workerManager.isCatalogCurrent(catalog)
+      profile.activeConfiguration.revisionId !== params.expectedConfigurationRevisionId
     ) {
       throw new NodeExecutionAdmissionServiceError("conflict");
     }

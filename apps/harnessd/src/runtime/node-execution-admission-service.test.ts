@@ -56,6 +56,7 @@ async function setup(
   operationKinds: readonly ("answer" | "network_read")[] = ["answer"],
   options: Readonly<{
     includeFastModel?: boolean;
+    catalogAvailable?: boolean;
     observation?: MacosWorkspaceAdmissionObservation;
   }> = {},
 ): Promise<Setup> {
@@ -225,8 +226,9 @@ async function setup(
   });
   const workerManager = {
     state: "ready",
-    catalog,
-    isCatalogCurrent: (candidate: unknown) => candidate === catalog,
+    catalog: options.catalogAvailable === false ? null : catalog,
+    isCatalogCurrent: (candidate: unknown) =>
+      options.catalogAvailable !== false && candidate === catalog,
   } as unknown as AppServerWorkerManager;
   const observation: MacosWorkspaceAdmissionObservation =
     options.observation ??
@@ -325,6 +327,12 @@ describe("node execution admission service", () => {
   });
 
   it("persists stable model and workspace denials", async () => {
+    const missingCatalog = await setup(["answer"], { catalogAvailable: false });
+    await expect(missingCatalog.service.activate(missingCatalog.params)).rejects.toMatchObject({
+      code: "unavailable",
+    });
+    missingCatalog.store.close();
+
     const missingModel = await setup(["answer"], { includeFastModel: false });
     await expect(missingModel.service.activate(missingModel.params)).resolves.toMatchObject({
       status: "denied",
