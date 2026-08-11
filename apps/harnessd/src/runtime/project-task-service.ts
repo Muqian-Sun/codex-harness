@@ -33,6 +33,7 @@ import {
   TaskPlanRepository,
   type TaskPlanRecord,
 } from "../domain/task-plan-store.js";
+import { previewSerialTaskSchedule } from "../domain/serial-task-scheduler.js";
 import {
   TaskProjectOwnershipError,
   TaskProjectOwnershipRepository,
@@ -517,6 +518,7 @@ function taskDetail(
                 }),
               ),
             ),
+            schedulePreview: previewSerialTaskSchedule(task.activeGraph),
             topologicalOrder: Object.freeze([...task.activeGraph.topologicalOrder]),
           }),
   });
@@ -662,6 +664,15 @@ function validateDetailResult(
                 }),
               ),
             ),
+            schedulePreview:
+              result.activeGraph.schedulePreview.state === "blocked"
+                ? Object.freeze({
+                    ...result.activeGraph.schedulePreview,
+                    blockerNodeIds: Object.freeze([
+                      ...result.activeGraph.schedulePreview.blockerNodeIds,
+                    ]),
+                  })
+                : Object.freeze({ ...result.activeGraph.schedulePreview }),
             topologicalOrder: Object.freeze([...result.activeGraph.topologicalOrder]),
           }),
   });

@@ -1265,6 +1265,37 @@ a:focus-visible {
   font-size: 18px;
 }
 
+.task-schedule-preview {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(78, 109, 94, 0.14);
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.task-schedule-preview span,
+.task-schedule-preview small {
+  color: var(--muted);
+  font-size: 7px;
+  line-height: 1.45;
+}
+
+.task-schedule-preview span {
+  color: var(--moss);
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.task-schedule-preview strong {
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.task-schedule-preview[data-task-schedule-state="blocked"] strong {
+  color: var(--danger);
+}
+
 .task-active-graph > ol {
   margin: 0;
   padding: 0;

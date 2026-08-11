@@ -181,6 +181,8 @@ export async function smokeProjectTaskPlanConfirmation(dependencies) {
       graphDetail.activeGraph?.revisionId !== GRAPH_ID ||
       graphDetail.activeGraph.nodes[0]?.nodeId !== NODE_ID ||
       graphDetail.activeGraph.nodes[0]?.status !== "pending" ||
+      graphDetail.activeGraph.schedulePreview.state !== "dependency_eligible" ||
+      graphDetail.activeGraph.schedulePreview.nodeId !== NODE_ID ||
       graphDetail.activeGraph.topologicalOrder[0] !== NODE_ID
     ) {
       throw new Error("The compiled Task graph did not recover exactly.");

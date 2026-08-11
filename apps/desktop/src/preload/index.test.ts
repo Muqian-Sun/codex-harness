@@ -407,6 +407,7 @@ describe("desktop preload Project routing binding boundary", () => {
       stage: "active_graph",
       activeGraph: {
         revisionNumber: 1,
+        schedulePreview: { state: "dependency_eligible", nodeNumber: 1 },
         nodes: [
           {
             nodeNumber: 1,
@@ -440,6 +441,31 @@ describe("desktop preload Project routing binding boundary", () => {
       "desktop.task.graph.materialize",
       materialization,
     );
+    for (const [status, schedulePreview] of [
+      ["ready", { state: "awaiting_claim", nodeNumber: 1 }],
+      ["running", { state: "busy", nodeNumber: 1 }],
+      ["succeeded", { state: "complete" }],
+      ["failed", { state: "blocked", blockerNodeNumbers: [1] }],
+    ] as const) {
+      const scheduledDetail = {
+        ...graphDetail,
+        activeGraph: {
+          ...graphDetail.activeGraph,
+          nodes: [{ ...graphDetail.activeGraph.nodes[0], status }],
+          schedulePreview,
+        },
+      };
+      harness.invoke.mockResolvedValueOnce({
+        status: "materialized",
+        taskId,
+        detail: scheduledDetail,
+        catalog: graphCatalog,
+      });
+      await expect(api.materializeProjectTaskGraph(materialization)).resolves.toMatchObject({
+        status: "materialized",
+        detail: scheduledDetail,
+      });
+    }
     harness.invoke.mockResolvedValueOnce({
       status: "materialized",
       taskId,
@@ -453,6 +479,74 @@ describe("desktop preload Project routing binding boundary", () => {
               dependsOnNodeNumbers: Array.from({ length: 201 }, () => 1),
             },
           ],
+        },
+      },
+      catalog: graphCatalog,
+    });
+    await expect(api.materializeProjectTaskGraph(materialization)).rejects.toThrow(
+      "graph materialization result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "materialized",
+      taskId,
+      detail: {
+        ...graphDetail,
+        confirmedPlan: {
+          ...graphDetail.confirmedPlan,
+          steps: [
+            ...graphDetail.confirmedPlan.steps,
+            {
+              title: "Second step",
+              description: "Must wait for the first step.",
+              acceptanceCriteria: [],
+            },
+          ],
+        },
+        activeGraph: {
+          ...graphDetail.activeGraph,
+          nodes: [
+            graphDetail.activeGraph.nodes[0],
+            {
+              nodeNumber: 2,
+              sourcePlanStepNumber: 2,
+              title: "Second step",
+              description: "Must wait for the first step.",
+              acceptanceCriteria: [],
+              dependsOnNodeNumbers: [1],
+              status: "ready",
+            },
+          ],
+          schedulePreview: { state: "awaiting_claim", nodeNumber: 2 },
+        },
+      },
+      catalog: graphCatalog,
+    });
+    await expect(api.materializeProjectTaskGraph(materialization)).rejects.toThrow(
+      "graph materialization result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "materialized",
+      taskId,
+      detail: {
+        ...graphDetail,
+        activeGraph: {
+          ...graphDetail.activeGraph,
+          schedulePreview: { state: "blocked", blockerNodeNumbers: [] },
+        },
+      },
+      catalog: graphCatalog,
+    });
+    await expect(api.materializeProjectTaskGraph(materialization)).rejects.toThrow(
+      "graph materialization result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "materialized",
+      taskId,
+      detail: {
+        ...graphDetail,
+        activeGraph: {
+          ...graphDetail.activeGraph,
+          schedulePreview: { state: "blocked", blockerNodeNumbers: [1] },
         },
       },
       catalog: graphCatalog,

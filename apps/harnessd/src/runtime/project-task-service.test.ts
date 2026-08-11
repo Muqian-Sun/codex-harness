@@ -513,6 +513,7 @@ describe("ProjectTaskService", () => {
         revisionId: GRAPH_ID,
         revisionNumber: 1,
         basedOnPlanRevisionId: CONFIRMED_PLAN_ID,
+        schedulePreview: { state: "dependency_eligible", nodeId: NODE_ID },
         topologicalOrder: [NODE_ID, NODE_TWO_ID],
         nodes: [
           {
@@ -532,6 +533,7 @@ describe("ProjectTaskService", () => {
     });
     expect(Object.isFrozen(detail.activeGraph?.nodes)).toBe(true);
     expect(Object.isFrozen(detail.activeGraph?.nodes[1]?.dependsOnNodeIds)).toBe(true);
+    expect(Object.isFrozen(detail.activeGraph?.schedulePreview)).toBe(true);
     expect(store.events.readByEventId(GRAPH_ID)).toMatchObject({
       eventType: "task.graph_committed",
       metadata: { actor: "desktop.project_task.graph_materialization" },
