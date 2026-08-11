@@ -661,6 +661,50 @@ describe("RPC dispatcher Project Task methods", () => {
     status: "materialized" as const,
     taskId: PROJECT_TASK_CREATED.taskId,
   };
+  const manifestNodeId = "00000000-0000-4000-8000-000000000919";
+  const manifestId = "00000000-0000-4000-8000-00000000091a";
+  const generateManifestParams = {
+    commandId: "00000000-0000-4000-8000-00000000091b",
+    projectId: PROJECT.projectId,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    nodeId: manifestNodeId,
+    expectedProjectVersion: 1,
+    expectedTaskVersion: 4,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: PROJECT_TASK_DETAIL.activeRequirement.revisionId,
+    confirmedPlanRevisionId: confirmParams.commandId,
+    graphRevisionId: graphParams.commandId,
+    expectedManifestStateVersion: 0,
+    previousManifestId: null,
+    expectedRoutingBindingVersion: 1,
+    expectedProfileVersion: 1,
+    expectedConfigurationRevisionId: generateParams.expectedConfigurationRevisionId,
+  };
+  const generatedManifest = {
+    schemaVersion: 1 as const,
+    status: "generated" as const,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    nodeId: manifestNodeId,
+  };
+  const confirmManifestParams = {
+    commandId: "00000000-0000-4000-8000-00000000091c",
+    projectId: PROJECT.projectId,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    nodeId: manifestNodeId,
+    manifestId,
+    expectedTaskVersion: 4,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: PROJECT_TASK_DETAIL.activeRequirement.revisionId,
+    confirmedPlanRevisionId: confirmParams.commandId,
+    graphRevisionId: graphParams.commandId,
+    expectedManifestStateVersion: 1,
+  };
+  const confirmedManifest = {
+    schemaVersion: 1 as const,
+    status: "confirmed" as const,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    nodeId: manifestNodeId,
+  };
 
   it("awaits candidate Plan generation and maps its stable outcomes", async () => {
     const base = context(() => ACCOUNT_STATUS);
@@ -691,6 +735,12 @@ describe("RPC dispatcher Project Task methods", () => {
         },
         RPC_ERROR_CODES.unavailable,
       ],
+      [
+        async () => {
+          throw new Error("private operation analysis failure");
+        },
+        RPC_ERROR_CODES.unavailable,
+      ],
       [async () => ({ private: true }), RPC_ERROR_CODES.unavailable],
     ] as const) {
       const result = await dispatchRpcRequestAsync(
@@ -715,6 +765,102 @@ describe("RPC dispatcher Project Task methods", () => {
         )
       ).envelope,
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(
+      (
+        await dispatchRpcRequestAsync(
+          request("task.operation_manifest.generate_candidate", generateManifestParams),
+          base,
+        )
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+  });
+
+  it("awaits operation manifest generation and synchronously confirms a candidate", async () => {
+    const base = context(() => ACCOUNT_STATUS);
+    const generateProvider = vi.fn(async () => generatedManifest);
+    await expect(
+      dispatchRpcRequestAsync(
+        request("task.operation_manifest.generate_candidate", generateManifestParams),
+        { ...base, generateProjectTaskOperationManifest: generateProvider },
+      ),
+    ).resolves.toMatchObject({ envelope: { kind: "response", result: generatedManifest } });
+    expect(generateProvider).toHaveBeenCalledWith(generateManifestParams);
+
+    for (const [implementation, expectedCode] of [
+      [
+        async () => {
+          throw new RpcProviderError("conflict");
+        },
+        RPC_ERROR_CODES.conflict,
+      ],
+      [async () => ({ private: true }), RPC_ERROR_CODES.unavailable],
+    ] as const) {
+      const result = await dispatchRpcRequestAsync(
+        request("task.operation_manifest.generate_candidate", generateManifestParams),
+        { ...base, generateProjectTaskOperationManifest: implementation },
+      );
+      expect(result.envelope).toMatchObject({
+        kind: "error",
+        error: { code: expectedCode },
+      });
+    }
+    expect(
+      (
+        await dispatchRpcRequestAsync(
+          request("task.operation_manifest.generate_candidate", {
+            ...generateManifestParams,
+            extra: true,
+          }),
+          { ...base, generateProjectTaskOperationManifest: generateProvider },
+        )
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+
+    const confirmProvider = vi.fn(() => confirmedManifest);
+    expect(
+      dispatchRpcRequest(
+        request("task.operation_manifest.confirm_candidate", confirmManifestParams),
+        { ...base, confirmProjectTaskOperationManifest: confirmProvider },
+      ).envelope,
+    ).toMatchObject({ kind: "response", result: confirmedManifest });
+    expect(confirmProvider).toHaveBeenCalledWith(confirmManifestParams);
+    expect(
+      dispatchRpcRequest(
+        request("task.operation_manifest.confirm_candidate", {
+          ...confirmManifestParams,
+          expectedManifestStateVersion: 0,
+        }),
+        { ...base, confirmProjectTaskOperationManifest: confirmProvider },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(
+      dispatchRpcRequest(
+        request("task.operation_manifest.confirm_candidate", confirmManifestParams),
+        {
+          ...base,
+          confirmProjectTaskOperationManifest: () => {
+            throw new RpcProviderError("conflict");
+          },
+        },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.conflict } });
+    expect(
+      dispatchRpcRequest(
+        request("task.operation_manifest.confirm_candidate", confirmManifestParams),
+        base,
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+    expect(
+      dispatchRpcRequest(
+        request("task.operation_manifest.confirm_candidate", confirmManifestParams),
+        {
+          ...base,
+          confirmProjectTaskOperationManifest: () => {
+            throw new Error("private confirmation failure");
+          },
+        },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
   });
 
   it("passes strict catalog, creation, detail, revision, and confirmation inputs to providers", () => {

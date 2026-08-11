@@ -33,6 +33,10 @@ import {
   decodeDesktopProjectTaskDetailResult,
   decodeDesktopProjectTaskGraphMaterialization,
   decodeDesktopProjectTaskGraphMaterializationResult,
+  decodeDesktopProjectTaskOperationManifestConfirmation,
+  decodeDesktopProjectTaskOperationManifestConfirmationResult,
+  decodeDesktopProjectTaskOperationManifestGeneration,
+  decodeDesktopProjectTaskOperationManifestGenerationResult,
   decodeDesktopProjectTaskMutationResult,
   decodeDesktopProjectTaskRequirementMutationResult,
   decodeDesktopProjectTaskRequirementRevision,
@@ -68,6 +72,10 @@ const CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.confirm_c
 const GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.generate_candidate";
 const REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL = "desktop.task.requirement.revise";
 const MATERIALIZE_PROJECT_TASK_GRAPH_CHANNEL = "desktop.task.graph.materialize";
+const GENERATE_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL =
+  "desktop.task.operation_manifest.generate_candidate";
+const CONFIRM_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL =
+  "desktop.task.operation_manifest.confirm_candidate";
 const DEVELOPMENT_CODEX_ENVIRONMENT = "CODEX_HARNESS_CODEX_EXECUTABLE";
 const DEVELOPMENT_SMOKE_EXPECTED_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_EXPECTED";
 const DEVELOPMENT_SMOKE_USER_DATA_ENVIRONMENT = "CODEX_HARNESS_DESKTOP_SMOKE_USER_DATA";
@@ -180,6 +188,7 @@ async function runDesktopApplication(): Promise<void> {
   const activeProjectTaskCandidatePlanGenerations = new Set<string>();
   const activeProjectTaskCandidatePlanConfirmations = new Set<string>();
   const activeProjectTaskGraphMaterializations = new Set<string>();
+  const activeProjectTaskOperationManifestMutations = new Set<string>();
 
   ipcMain.handle(
     GET_BOOTSTRAP_STATE_CHANNEL,
@@ -388,7 +397,8 @@ async function runDesktopApplication(): Promise<void> {
         activeProjectTaskRequirementRevisions.has(mutationKey) ||
         activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
         activeProjectTaskCandidatePlanConfirmations.has(mutationKey) ||
-        activeProjectTaskGraphMaterializations.has(mutationKey)
+        activeProjectTaskGraphMaterializations.has(mutationKey) ||
+        activeProjectTaskOperationManifestMutations.has(mutationKey)
       ) {
         return Object.freeze({ status: "unavailable" as const });
       }
@@ -428,7 +438,8 @@ async function runDesktopApplication(): Promise<void> {
         activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
         activeProjectTaskRequirementRevisions.has(mutationKey) ||
         activeProjectTaskCandidatePlanConfirmations.has(mutationKey) ||
-        activeProjectTaskGraphMaterializations.has(mutationKey)
+        activeProjectTaskGraphMaterializations.has(mutationKey) ||
+        activeProjectTaskOperationManifestMutations.has(mutationKey)
       ) {
         return Object.freeze({ status: "unavailable" as const });
       }
@@ -468,7 +479,8 @@ async function runDesktopApplication(): Promise<void> {
         activeProjectTaskCandidatePlanConfirmations.has(mutationKey) ||
         activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
         activeProjectTaskRequirementRevisions.has(mutationKey) ||
-        activeProjectTaskGraphMaterializations.has(mutationKey)
+        activeProjectTaskGraphMaterializations.has(mutationKey) ||
+        activeProjectTaskOperationManifestMutations.has(mutationKey)
       ) {
         return Object.freeze({ status: "unavailable" as const });
       }
@@ -508,7 +520,8 @@ async function runDesktopApplication(): Promise<void> {
         activeProjectTaskGraphMaterializations.has(mutationKey) ||
         activeProjectTaskCandidatePlanConfirmations.has(mutationKey) ||
         activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
-        activeProjectTaskRequirementRevisions.has(mutationKey)
+        activeProjectTaskRequirementRevisions.has(mutationKey) ||
+        activeProjectTaskOperationManifestMutations.has(mutationKey)
       ) {
         return Object.freeze({ status: "unavailable" as const });
       }
@@ -524,6 +537,88 @@ async function runDesktopApplication(): Promise<void> {
         return Object.freeze({ status: "unavailable" as const });
       } finally {
         activeProjectTaskGraphMaterializations.delete(mutationKey);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    GENERATE_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      if (args.length !== 1 || !isManagedRenderer(event, windows)) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      const generation = decodeDesktopProjectTaskOperationManifestGeneration(args[0]);
+      const state = stateStore.current;
+      if (
+        generation === undefined ||
+        state.phase !== "ready" ||
+        !state.projects.projects.some((project) => project.projectId === generation.projectId)
+      ) {
+        throw new Error("The desktop Project Task operation manifest generation is invalid.");
+      }
+      const mutationKey = `${generation.projectId}/${generation.taskId}`;
+      if (
+        activeProjectTaskOperationManifestMutations.has(mutationKey) ||
+        activeProjectTaskGraphMaterializations.has(mutationKey) ||
+        activeProjectTaskCandidatePlanConfirmations.has(mutationKey) ||
+        activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
+        activeProjectTaskRequirementRevisions.has(mutationKey)
+      ) {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      activeProjectTaskOperationManifestMutations.add(mutationKey);
+      try {
+        const result = decodeDesktopProjectTaskOperationManifestGenerationResult(
+          await controller.generateProjectTaskOperationManifest(generation),
+          generation.projectId,
+          generation.taskId,
+        );
+        return result ?? Object.freeze({ status: "unavailable" as const });
+      } catch {
+        return Object.freeze({ status: "unavailable" as const });
+      } finally {
+        activeProjectTaskOperationManifestMutations.delete(mutationKey);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    CONFIRM_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      if (args.length !== 1 || !isManagedRenderer(event, windows)) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      const confirmation = decodeDesktopProjectTaskOperationManifestConfirmation(args[0]);
+      const state = stateStore.current;
+      if (
+        confirmation === undefined ||
+        state.phase !== "ready" ||
+        !state.projects.projects.some((project) => project.projectId === confirmation.projectId)
+      ) {
+        throw new Error("The desktop Project Task operation manifest confirmation is invalid.");
+      }
+      const mutationKey = `${confirmation.projectId}/${confirmation.taskId}`;
+      if (
+        activeProjectTaskOperationManifestMutations.has(mutationKey) ||
+        activeProjectTaskGraphMaterializations.has(mutationKey) ||
+        activeProjectTaskCandidatePlanConfirmations.has(mutationKey) ||
+        activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
+        activeProjectTaskRequirementRevisions.has(mutationKey)
+      ) {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      activeProjectTaskOperationManifestMutations.add(mutationKey);
+      try {
+        const result = decodeDesktopProjectTaskOperationManifestConfirmationResult(
+          await controller.confirmProjectTaskOperationManifest(confirmation),
+          confirmation.projectId,
+          confirmation.taskId,
+        );
+        return result ?? Object.freeze({ status: "unavailable" as const });
+      } catch {
+        return Object.freeze({ status: "unavailable" as const });
+      } finally {
+        activeProjectTaskOperationManifestMutations.delete(mutationKey);
       }
     },
   );

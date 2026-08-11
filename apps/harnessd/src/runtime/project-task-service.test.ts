@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ModelRoutingProfileRepository } from "../domain/model-routing-profile-repository.js";
 import type { ModelRoutingConfiguration } from "../domain/model-routing-config.js";
+import { NodeOperationManifestRepository } from "../domain/node-operation-manifest-repository.js";
 import { ProjectRegistryRepository } from "../domain/project-registry-repository.js";
 import { ProjectRoutingProfileBindingRepository } from "../domain/project-routing-profile-binding-repository.js";
 import { TaskPlanRepository } from "../domain/task-plan-store.js";
@@ -35,6 +36,10 @@ const CONFIRM_AFTER_GRAPH_ID = "00000000-0000-4000-8000-000000000951";
 const STEP_TWO_ID = "00000000-0000-4000-8000-000000000952";
 const NODE_TWO_ID = "00000000-0000-4000-8000-000000000953";
 const STALE_GRAPH_ID = "00000000-0000-4000-8000-000000000954";
+const MANIFEST_ID = "00000000-0000-4000-8000-000000000955";
+const MANIFEST_CONFIRMATION_ID = "00000000-0000-4000-8000-000000000956";
+const OPERATION_ID = "00000000-0000-4000-8000-000000000957";
+const STALE_MANIFEST_CONFIRMATION_ID = "00000000-0000-4000-8000-000000000958";
 const temporaryDirectories: string[] = [];
 const stores: DaemonStateStore[] = [];
 
@@ -578,6 +583,112 @@ describe("ProjectTaskService", () => {
     ).toEqual(recoveredExpected);
   });
 
+  it("projects and explicitly confirms only the current scheduled node operation manifest", async () => {
+    const path = await databasePath();
+    const store = await openStore(path);
+    registerProject(store);
+    bindDefaultProfile(store);
+    new ProjectTaskService(store, { now: () => 103 }).create(createParams());
+    new TaskPlanRepository(store.events).revisePlan({
+      eventId: CANDIDATE_PLAN_ID,
+      taskId: TASK_ID,
+      occurredAtMs: 104,
+      expectedTaskVersion: 1,
+      previousPlanRevisionId: null,
+      plan: {
+        revisionId: CANDIDATE_PLAN_ID,
+        status: "candidate",
+        basedOnRequirementRevisionId: TASK_COMMAND_ID,
+        steps: [
+          {
+            stepId: STEP_ID,
+            title: "识别操作",
+            description: "形成候选操作清单。",
+            acceptanceCriteria: ["执行继续锁定。"],
+          },
+        ],
+      },
+    });
+    new ProjectTaskService(store, { now: () => 105 }).confirmCandidatePlan(confirmParams());
+    new ProjectTaskService(store, { now: () => 106, newId: () => NODE_ID }).materializeGraph({
+      commandId: GRAPH_ID,
+      projectId: PROJECT_ID,
+      taskId: TASK_ID,
+      expectedTaskVersion: 3,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: TASK_COMMAND_ID,
+      confirmedPlanRevisionId: CONFIRMED_PLAN_ID,
+      previousGraphRevisionId: null,
+    });
+    const service = new ProjectTaskService(store, { now: () => 108 });
+    expect(service.detail({ projectId: PROJECT_ID, taskId: TASK_ID })).toMatchObject({
+      activeGraph: { operationManifest: null },
+    });
+    new NodeOperationManifestRepository(store.events).propose({
+      manifestId: MANIFEST_ID,
+      taskId: TASK_ID,
+      nodeId: NODE_ID,
+      expectedTaskVersion: 4,
+      expectedGraphRevisionId: GRAPH_ID,
+      expectedManifestStateVersion: 0,
+      previousManifestId: null,
+      occurredAtMs: 107,
+      operations: [{ operationId: OPERATION_ID, kind: "inspect_workspace" }],
+    });
+    const params = {
+      commandId: MANIFEST_CONFIRMATION_ID,
+      projectId: PROJECT_ID,
+      taskId: TASK_ID,
+      nodeId: NODE_ID,
+      manifestId: MANIFEST_ID,
+      expectedTaskVersion: 4,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: TASK_COMMAND_ID,
+      confirmedPlanRevisionId: CONFIRMED_PLAN_ID,
+      graphRevisionId: GRAPH_ID,
+      expectedManifestStateVersion: 1,
+    };
+
+    expect(service.confirmOperationManifest(params)).toEqual({
+      schemaVersion: 1,
+      status: "confirmed",
+      taskId: TASK_ID,
+      nodeId: NODE_ID,
+    });
+    const detail = service.detail({ projectId: PROJECT_ID, taskId: TASK_ID });
+    expect(detail).toMatchObject({
+      taskVersion: 4,
+      activeGraph: {
+        operationManifest: {
+          manifestId: MANIFEST_ID,
+          nodeId: NODE_ID,
+          stateVersion: 2,
+          status: "confirmed",
+          operations: [{ operationId: OPERATION_ID, kind: "inspect_workspace" }],
+        },
+      },
+    });
+    expect(Object.isFrozen(detail.activeGraph?.operationManifest?.operations)).toBe(true);
+    expect(service.confirmOperationManifest(params)).toMatchObject({ status: "existing" });
+    expect(() =>
+      service.confirmOperationManifest({ ...params, expectedManifestStateVersion: 2 }),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(() =>
+      service.confirmOperationManifest({
+        ...params,
+        commandId: STALE_MANIFEST_CONFIRMATION_ID,
+        projectId: OTHER_PROJECT_ID,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    const recoveredExpected = service.detail({ projectId: PROJECT_ID, taskId: TASK_ID });
+    store.close();
+
+    const reopened = await openStore(path);
+    expect(
+      new ProjectTaskService(reopened).detail({ projectId: PROJECT_ID, taskId: TASK_ID }),
+    ).toEqual(recoveredExpected);
+  });
+
   it("retries exact Requirement history and rejects stale or cross-Project commands", async () => {
     const store = await openStore();
     registerProject(store);
@@ -696,6 +807,9 @@ describe("ProjectTaskService", () => {
     expect(() =>
       service.confirmCandidatePlan(confirmParams({ expectedTaskVersion: 0 })),
     ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(() => service.confirmOperationManifest({})).toThrowError(
+      expect.objectContaining({ code: "conflict" }),
+    );
     expect(() =>
       service.list({ projectId: "00000000-0000-4000-8000-000000000942", cursor: null, limit: 12 }),
     ).toThrowError(expect.objectContaining({ code: "conflict" }));

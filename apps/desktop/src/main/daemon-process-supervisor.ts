@@ -38,6 +38,10 @@ import {
   type HarnessTaskDetailResult,
   type HarnessTaskGraphMaterializeParams,
   type HarnessTaskGraphMaterializeResult,
+  type HarnessTaskOperationManifestConfirmParams,
+  type HarnessTaskOperationManifestConfirmResult,
+  type HarnessTaskOperationManifestGenerateParams,
+  type HarnessTaskOperationManifestGenerateResult,
   type HarnessTaskRequirementReviseParams,
   type HarnessTaskRequirementReviseResult,
   type HarnessRpcClientConfig,
@@ -543,6 +547,18 @@ export class DaemonProcessSupervisor {
     params: HarnessTaskGraphMaterializeParams,
   ): Promise<HarnessTaskGraphMaterializeResult> {
     return await this.client.materializeProjectTaskGraph(params);
+  }
+
+  async generateProjectTaskOperationManifest(
+    params: HarnessTaskOperationManifestGenerateParams,
+  ): Promise<HarnessTaskOperationManifestGenerateResult> {
+    return await this.client.generateProjectTaskOperationManifest(params);
+  }
+
+  async confirmProjectTaskOperationManifest(
+    params: HarnessTaskOperationManifestConfirmParams,
+  ): Promise<HarnessTaskOperationManifestConfirmResult> {
+    return await this.client.confirmProjectTaskOperationManifest(params);
   }
 
   async reviseProjectTaskRequirement(

@@ -17,6 +17,8 @@ const hooks = vi.hoisted(() => ({
     vi.fn(),
     vi.fn(),
     vi.fn(),
+    vi.fn(),
+    vi.fn(),
   ],
   values: [] as unknown[],
 }));
@@ -41,6 +43,7 @@ vi.mock("react", () => ({
 import {
   BootstrapScreen,
   CandidatePlan,
+  OperationManifestPanel,
   ProjectRegistryPanel,
   ProjectTaskPanel,
   RequirementItems,
@@ -49,6 +52,7 @@ import {
   taskCandidatePlanFeedback,
   taskCandidatePlanConfirmationFeedback,
   taskGraphMaterializationFeedback,
+  taskOperationManifestFeedback,
 } from "./bootstrap-screen.js";
 
 const PROJECTS = {
@@ -149,6 +153,10 @@ function findTaskControl(
     | "data-task-plan-confirm-commit"
     | "data-task-plan-confirm-cancel"
     | "data-task-graph-materialize"
+    | "data-task-operation-manifest-confirm"
+    | "data-task-operation-manifest-confirm-cancel"
+    | "data-task-operation-manifest-confirm-commit"
+    | "data-task-operation-manifest-generate"
     | "data-task-project-select"
     | "data-task-revise"
     | "data-task-revision-source"
@@ -524,6 +532,7 @@ describe("Project Task interaction", () => {
       confirmedPlan: { ...plan, revisionNumber: 1 },
       activeGraph: {
         revisionNumber: 1,
+        operationManifest: null,
         schedulePreview: { state: "dependency_eligible" as const, nodeNumber: 1 },
         nodes: [
           {
@@ -659,6 +668,7 @@ describe("Project Task interaction", () => {
     };
     const graph = {
       revisionNumber: 1,
+      operationManifest: null,
       schedulePreview: { state: "dependency_eligible" as const, nodeNumber: 1 },
       nodes: [
         {
@@ -805,6 +815,292 @@ describe("Project Task interaction", () => {
     const unavailable = render(detail, "idle");
     (findTaskControl(unavailable, "data-task-graph-materialize").props.onClick as () => void)();
     await vi.waitFor(() => expect(hooks.setters[11]).toHaveBeenLastCalledWith("unavailable"));
+  });
+
+  it("generates, reviews, and explicitly confirms the scheduled node operation manifest", async () => {
+    const taskId = "00000000-0000-4000-8000-0000000008a1";
+    const baseGraph = {
+      revisionNumber: 1,
+      operationManifest: null,
+      schedulePreview: { state: "dependency_eligible" as const, nodeNumber: 1 },
+      nodes: [
+        {
+          nodeNumber: 1,
+          sourcePlanStepNumber: 1,
+          title: "Inspect and edit",
+          description: "Inspect the workspace before a bounded edit.",
+          acceptanceCriteria: ["The edit remains reviewable."],
+          dependsOnNodeNumbers: [],
+          status: "pending" as const,
+        },
+      ],
+    };
+    const baseDetail = {
+      projectId: PROJECT_ID,
+      taskId,
+      taskVersion: 4,
+      title: "Operation manifest Task",
+      stage: "active_graph" as const,
+      activeRequirement: {
+        revisionNumber: 1,
+        sourceText: "Inspect and edit one workspace file.",
+        objective: "Inspect and edit one workspace file.",
+        constraints: ["Do not execute tools yet."],
+        acceptanceCriteria: [],
+      },
+      candidatePlan: null,
+      confirmedPlan: {
+        revisionNumber: 2,
+        steps: [
+          {
+            title: "Inspect and edit",
+            description: "Inspect the workspace before a bounded edit.",
+            acceptanceCriteria: ["The edit remains reviewable."],
+          },
+        ],
+      },
+      activeGraph: baseGraph,
+    };
+    const candidateDetail = {
+      ...baseDetail,
+      stage: "active_graph" as const,
+      activeGraph: {
+        ...baseGraph,
+        operationManifest: {
+          nodeNumber: 1,
+          stateVersion: 1,
+          status: "candidate" as const,
+          operations: [
+            { operationNumber: 1, kind: "inspect_workspace" as const },
+            { operationNumber: 2, kind: "modify_workspace" as const },
+          ],
+        },
+      },
+    };
+    const confirmedDetail = {
+      ...candidateDetail,
+      stage: "active_graph" as const,
+      activeGraph: {
+        ...candidateDetail.activeGraph,
+        operationManifest: {
+          ...candidateDetail.activeGraph.operationManifest,
+          stateVersion: 2,
+          status: "confirmed" as const,
+        },
+      },
+    };
+    const catalog = {
+      projectId: PROJECT_ID,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT_ID,
+          taskVersion: 4,
+          title: baseDetail.title,
+          objective: baseDetail.activeRequirement.objective,
+          stage: "active_graph" as const,
+        },
+      ],
+      hasMore: false,
+    };
+    const generateProjectTaskOperationManifest = vi.fn(async (): Promise<unknown> => ({
+      status: "generated" as const,
+      taskId,
+      detail: candidateDetail,
+      catalog,
+    }));
+    const confirmProjectTaskOperationManifest = vi.fn(async (): Promise<unknown> => ({
+      status: "confirmed" as const,
+      taskId,
+      detail: confirmedDetail,
+      catalog,
+    }));
+    const readProjectTaskCatalog = vi.fn(async () => ({
+      status: "loaded" as const,
+      catalog,
+    }));
+    const readProjectTaskDetail = vi.fn(async () => ({
+      status: "loaded" as const,
+      detail: candidateDetail,
+    }));
+    Object.assign(globalThis, {
+      codexHarness: {
+        generateProjectTaskOperationManifest,
+        confirmProjectTaskOperationManifest,
+        readProjectTaskCatalog,
+        readProjectTaskDetail,
+      },
+    });
+    const routing = {
+      configured: true as const,
+      profileVersion: 1,
+      configurationRevisionId: "00000000-0000-4000-8000-000000000899",
+      tiers: {
+        fast: { provider: "openai", model: "fast", reasoningEffort: "low" },
+        standard: { provider: "openai", model: "standard", reasoningEffort: "medium" },
+        deep: { provider: "openai", model: "deep", reasoningEffort: "high" },
+      },
+      availability: {
+        fast: "observed_available" as const,
+        standard: "observed_available" as const,
+        deep: "observed_available" as const,
+      },
+    };
+    const render = (
+      detail: typeof baseDetail | typeof candidateDetail | typeof confirmedDetail,
+      generationStatus = "idle",
+      confirmationStatus = "idle",
+    ) => {
+      hooks.cursor = 0;
+      hooks.effects = [];
+      hooks.values = [
+        PROJECT_ID,
+        { status: "loaded", catalog },
+        taskId,
+        { status: "loaded", detail },
+        "",
+        "",
+        detail.activeRequirement.sourceText,
+        "idle",
+        "idle",
+        "idle",
+        "idle",
+        "idle",
+        generationStatus,
+        confirmationStatus,
+      ];
+      return ProjectTaskPanel({
+        projects: PROJECTS,
+        projectRoutingBindings: {
+          bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+        },
+        routing,
+      });
+    };
+    const operationPanel = (root: unknown) => {
+      const element = findElementByType(root, OperationManifestPanel);
+      expect(element).toBeDefined();
+      return OperationManifestPanel(element!.props as Parameters<typeof OperationManifestPanel>[0]);
+    };
+
+    const empty = render(baseDetail);
+    const emptyPanel = operationPanel(empty);
+    expect(JSON.stringify(emptyPanel)).toContain("高级档位只读分析当前节点");
+    expect(
+      findTaskControl(emptyPanel, "data-task-operation-manifest-generate").props.disabled,
+    ).toBe(false);
+    (findElementByType(empty, OperationManifestPanel)!.props.onGenerate as () => void)();
+    await vi.waitFor(() =>
+      expect(generateProjectTaskOperationManifest).toHaveBeenCalledWith({
+        projectId: PROJECT_ID,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        expectedManifestStateVersion: 0,
+      }),
+    );
+    expect(hooks.setters[12]).toHaveBeenNthCalledWith(1, "generating");
+    expect(hooks.setters[12]).toHaveBeenLastCalledWith("generated");
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: candidateDetail });
+
+    const candidate = render(candidateDetail);
+    const candidatePanel = operationPanel(candidate);
+    expect(JSON.stringify(candidatePanel)).toContain("REVIEW REQUIRED");
+    expect(JSON.stringify(candidatePanel)).toContain("检查工作区");
+    expect(
+      findTaskControl(candidatePanel, "data-task-operation-manifest-generate").props.disabled,
+    ).toBe(false);
+    (
+      findElementByType(candidate, OperationManifestPanel)!.props.onBeginConfirmation as () => void
+    )();
+    expect(hooks.setters[13]).toHaveBeenCalledWith("reviewing");
+    expect(confirmProjectTaskOperationManifest).not.toHaveBeenCalled();
+
+    const reviewing = operationPanel(render(candidateDetail, "idle", "reviewing"));
+    expect(JSON.stringify(reviewing)).toContain("SECURITY CLAIM");
+    (
+      findTaskControl(reviewing, "data-task-operation-manifest-confirm-cancel").props
+        .onClick as () => void
+    )();
+    expect(hooks.setters[13]).toHaveBeenCalledWith("idle");
+    hooks.setters[13]!.mockClear();
+    const reviewingForCommit = render(candidateDetail, "idle", "reviewing");
+    const confirmationElement = findElementByType(reviewingForCommit, OperationManifestPanel)!;
+    (confirmationElement.props.onConfirm as () => void)();
+    await vi.waitFor(() =>
+      expect(confirmProjectTaskOperationManifest).toHaveBeenCalledWith({
+        projectId: PROJECT_ID,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        manifestStateVersion: 1,
+      }),
+    );
+    expect(hooks.setters[13]).toHaveBeenNthCalledWith(1, "confirming");
+    expect(hooks.setters[13]).toHaveBeenLastCalledWith("confirmed");
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: confirmedDetail });
+
+    const locked = operationPanel(render(confirmedDetail));
+    expect(JSON.stringify(locked)).toContain("CONFIRMED · EXECUTION LOCKED");
+    expect(JSON.stringify(locked)).toContain("智能路由和权限门禁尚未开放");
+    const blockedGeneration = render(baseDetail, "generating");
+    (
+      findElementByType(blockedGeneration, OperationManifestPanel)!.props.onGenerate as () => void
+    )();
+    expect(generateProjectTaskOperationManifest).toHaveBeenCalledTimes(1);
+    const notReviewing = render(candidateDetail);
+    (findElementByType(notReviewing, OperationManifestPanel)!.props.onConfirm as () => void)();
+    expect(confirmProjectTaskOperationManifest).toHaveBeenCalledTimes(1);
+
+    generateProjectTaskOperationManifest.mockResolvedValueOnce({ status: "conflict" });
+    const generationConflict = render(baseDetail);
+    (
+      findElementByType(generationConflict, OperationManifestPanel)!.props.onGenerate as () => void
+    )();
+    await vi.waitFor(() => expect(hooks.setters[12]).toHaveBeenLastCalledWith("conflict"));
+    expect(readProjectTaskDetail).toHaveBeenCalledWith({ projectId: PROJECT_ID, taskId });
+    expect(readProjectTaskCatalog).toHaveBeenCalledWith(PROJECT_ID);
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: candidateDetail });
+    expect(hooks.setters[1]).toHaveBeenCalledWith({ status: "loaded", catalog });
+
+    generateProjectTaskOperationManifest.mockRejectedValueOnce(new Error("contained"));
+    const generationUnavailable = render(baseDetail);
+    (
+      findElementByType(generationUnavailable, OperationManifestPanel)!.props
+        .onGenerate as () => void
+    )();
+    await vi.waitFor(() => expect(hooks.setters[12]).toHaveBeenLastCalledWith("unavailable"));
+
+    confirmProjectTaskOperationManifest.mockResolvedValueOnce({ status: "conflict" });
+    const confirmationConflict = render(candidateDetail, "idle", "reviewing");
+    (
+      findElementByType(confirmationConflict, OperationManifestPanel)!.props.onConfirm as () => void
+    )();
+    await vi.waitFor(() => expect(hooks.setters[13]).toHaveBeenLastCalledWith("conflict"));
+    expect(hooks.setters[12]).toHaveBeenLastCalledWith("idle");
+
+    confirmProjectTaskOperationManifest.mockRejectedValueOnce(new Error("contained"));
+    const confirmationUnavailable = render(candidateDetail, "idle", "reviewing");
+    (
+      findElementByType(confirmationUnavailable, OperationManifestPanel)!.props
+        .onConfirm as () => void
+    )();
+    await vi.waitFor(() => expect(hooks.setters[13]).toHaveBeenLastCalledWith("unavailable"));
+
+    expect(taskOperationManifestFeedback("idle", "idle", undefined)).toContain("禁网分析");
+    expect(taskOperationManifestFeedback("generating", "idle", undefined)).toContain("只读识别");
+    expect(taskOperationManifestFeedback("generated", "idle", "candidate")).toContain("人工确认");
+    expect(taskOperationManifestFeedback("idle", "reviewing", "candidate")).toContain("第二次");
+    expect(taskOperationManifestFeedback("idle", "confirming", "candidate")).toContain("状态栅栏");
+    expect(taskOperationManifestFeedback("idle", "confirmed", "confirmed")).toContain("仍未开放");
+    expect(taskOperationManifestFeedback("idle", "existing", "confirmed")).toContain("已经落盘");
+    expect(taskOperationManifestFeedback("idle", "conflict", "candidate")).toContain("已刷新");
+    expect(taskOperationManifestFeedback("idle", "unavailable", "candidate")).toContain(
+      "确认结果未知",
+    );
+    expect(taskOperationManifestFeedback("existing", "idle", "candidate")).toContain("已经落盘");
+    expect(taskOperationManifestFeedback("conflict", "idle", "candidate")).toContain("结果未写入");
+    expect(taskOperationManifestFeedback("unavailable", "idle", undefined)).toContain("结果未知");
   });
 
   it("refreshes authority after confirmation conflicts and contains confirmation failures", async () => {

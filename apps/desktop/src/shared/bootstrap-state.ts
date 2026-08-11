@@ -1,3 +1,22 @@
+export const DESKTOP_TASK_OPERATION_KINDS = Object.freeze([
+  "answer",
+  "inspect_workspace",
+  "modify_workspace",
+  "run_workspace_command",
+  "network_read",
+  "credential_access",
+  "external_write",
+  "database_migration",
+  "production_change",
+  "irreversible_action",
+  "permission_boundary_change",
+  "public_api_change",
+  "concurrent_change",
+  "architecture_decision",
+  "systemic_diagnosis",
+  "user_interaction",
+] as const);
+
 export const DESKTOP_BOOTSTRAP_FAILURE_CODES = Object.freeze([
   "unsupported_platform",
   "resource_configuration_missing",
@@ -212,9 +231,21 @@ export type DesktopProjectTaskSchedulePreview =
   | Readonly<{ state: "busy"; nodeNumber: number }>
   | Readonly<{ state: "blocked"; blockerNodeNumbers: readonly number[] }>
   | Readonly<{ state: "complete" }>;
+export type DesktopProjectTaskOperationKind = (typeof DESKTOP_TASK_OPERATION_KINDS)[number];
+export type DesktopProjectTaskOperation = Readonly<{
+  operationNumber: number;
+  kind: DesktopProjectTaskOperationKind;
+}>;
+export type DesktopProjectTaskOperationManifest = Readonly<{
+  nodeNumber: number;
+  stateVersion: number;
+  status: "candidate" | "confirmed";
+  operations: readonly DesktopProjectTaskOperation[];
+}>;
 export type DesktopProjectTaskGraph = Readonly<{
   revisionNumber: number;
   nodes: readonly DesktopProjectTaskGraphNode[];
+  operationManifest: DesktopProjectTaskOperationManifest | null;
   schedulePreview: DesktopProjectTaskSchedulePreview;
 }>;
 export type DesktopProjectTaskDetail = Readonly<{
@@ -290,6 +321,36 @@ export type DesktopProjectTaskGraphMaterializationResult =
       catalog: DesktopProjectTaskCatalog;
     }>
   | Readonly<{ status: "conflict" | "unavailable" }>;
+export type DesktopProjectTaskOperationManifestGeneration = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  nodeNumber: number;
+  expectedManifestStateVersion: number;
+}>;
+export type DesktopProjectTaskOperationManifestGenerationResult =
+  | Readonly<{
+      status: "generated" | "existing";
+      taskId: string;
+      detail: DesktopProjectTaskDetail;
+      catalog: DesktopProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+export type DesktopProjectTaskOperationManifestConfirmation = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  nodeNumber: number;
+  manifestStateVersion: number;
+}>;
+export type DesktopProjectTaskOperationManifestConfirmationResult =
+  | Readonly<{
+      status: "confirmed" | "existing";
+      taskId: string;
+      detail: DesktopProjectTaskDetail;
+      catalog: DesktopProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
 
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
@@ -338,6 +399,7 @@ const taskNodeStatuses = new Set<string>([
   "interrupted",
   "cancelled",
 ]);
+const taskOperationKinds = new Set<string>(DESKTOP_TASK_OPERATION_KINDS);
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -820,6 +882,62 @@ export function decodeDesktopProjectTaskGraphMaterialization(
   });
 }
 
+export function decodeDesktopProjectTaskOperationManifestGeneration(
+  input: unknown,
+): DesktopProjectTaskOperationManifestGeneration | undefined {
+  const record = exactRecord(input, [
+    "expectedManifestStateVersion",
+    "expectedTaskVersion",
+    "nodeNumber",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.nodeNumber) ||
+    !isNonNegativeSafeInteger(record.expectedManifestStateVersion)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    nodeNumber: record.nodeNumber,
+    expectedManifestStateVersion: record.expectedManifestStateVersion,
+  });
+}
+
+export function decodeDesktopProjectTaskOperationManifestConfirmation(
+  input: unknown,
+): DesktopProjectTaskOperationManifestConfirmation | undefined {
+  const record = exactRecord(input, [
+    "expectedTaskVersion",
+    "manifestStateVersion",
+    "nodeNumber",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.nodeNumber) ||
+    !isPositiveSafeInteger(record.manifestStateVersion)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    nodeNumber: record.nodeNumber,
+    manifestStateVersion: record.manifestStateVersion,
+  });
+}
+
 export function decodeDesktopProjectTaskCandidatePlanMutationResult(
   input: unknown,
   expectedProjectId: string,
@@ -919,6 +1037,80 @@ export function decodeDesktopProjectTaskGraphMaterializationResult(
       detail.confirmedPlan === null ||
       detail.activeGraph === null
     ) {
+      return undefined;
+    }
+    return Object.freeze({
+      status: record.status,
+      taskId: expectedTaskId,
+      detail,
+      catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+export function decodeDesktopProjectTaskOperationManifestGenerationResult(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskOperationManifestGenerationResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  if (
+    record === undefined ||
+    (record.status !== "generated" && record.status !== "existing") ||
+    record.taskId !== expectedTaskId
+  ) {
+    return undefined;
+  }
+  try {
+    const detail = decodeProjectedDesktopTaskDetail(
+      record.detail,
+      expectedProjectId,
+      expectedTaskId,
+    );
+    if (detail.activeGraph?.operationManifest === null || detail.activeGraph === null) {
+      return undefined;
+    }
+    return Object.freeze({
+      status: record.status,
+      taskId: expectedTaskId,
+      detail,
+      catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+export function decodeDesktopProjectTaskOperationManifestConfirmationResult(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskOperationManifestConfirmationResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  if (
+    record === undefined ||
+    (record.status !== "confirmed" && record.status !== "existing") ||
+    record.taskId !== expectedTaskId
+  ) {
+    return undefined;
+  }
+  try {
+    const detail = decodeProjectedDesktopTaskDetail(
+      record.detail,
+      expectedProjectId,
+      expectedTaskId,
+    );
+    if (detail.activeGraph?.operationManifest?.status !== "confirmed") {
       return undefined;
     }
     return Object.freeze({
@@ -1674,6 +1866,7 @@ function projectDesktopProjectTaskGraph(
   const graph = exactRecord(input, [
     "basedOnPlanRevisionId",
     "nodes",
+    "operationManifest",
     "revisionId",
     "revisionNumber",
     "schedulePreview",
@@ -1787,8 +1980,14 @@ function projectDesktopProjectTaskGraph(
     return undefined;
   }
   const schedulePreview = projectDesktopProjectTaskSchedule(graph.schedulePreview, orderIndex);
+  const operationManifest = projectDesktopProjectTaskOperationManifest(
+    graph.operationManifest,
+    orderIndex,
+    schedulePreview,
+  );
   if (
     schedulePreview === undefined ||
+    operationManifest === undefined ||
     !schedulePreviewMatchesDesktopGraph(schedulePreview, projected as DesktopProjectTaskGraphNode[])
   ) {
     return undefined;
@@ -1796,6 +1995,7 @@ function projectDesktopProjectTaskGraph(
   return Object.freeze({
     revisionNumber: graph.revisionNumber,
     nodes: Object.freeze(projected as DesktopProjectTaskGraphNode[]),
+    operationManifest,
     schedulePreview,
   });
 }
@@ -1807,7 +2007,12 @@ function decodeProjectedDesktopTaskGraph(
   if (input === null) {
     return null;
   }
-  const graph = exactRecord(input, ["nodes", "revisionNumber", "schedulePreview"]);
+  const graph = exactRecord(input, [
+    "nodes",
+    "operationManifest",
+    "revisionNumber",
+    "schedulePreview",
+  ]);
   if (
     graph === undefined ||
     confirmedPlan === null ||
@@ -1873,8 +2078,13 @@ function decodeProjectedDesktopTaskGraph(
     return undefined;
   }
   const schedulePreview = decodeProjectedDesktopTaskSchedule(graph.schedulePreview);
+  const operationManifest = decodeProjectedDesktopTaskOperationManifest(
+    graph.operationManifest,
+    schedulePreview,
+  );
   if (
     schedulePreview === undefined ||
+    operationManifest === undefined ||
     !schedulePreviewMatchesDesktopGraph(schedulePreview, nodes as DesktopProjectTaskGraphNode[])
   ) {
     return undefined;
@@ -1882,8 +2092,129 @@ function decodeProjectedDesktopTaskGraph(
   return Object.freeze({
     revisionNumber: graph.revisionNumber,
     nodes: Object.freeze(nodes as DesktopProjectTaskGraphNode[]),
+    operationManifest,
     schedulePreview,
   });
+}
+
+function projectDesktopProjectTaskOperationManifest(
+  input: unknown,
+  orderIndex: ReadonlyMap<unknown, number>,
+  schedulePreview: DesktopProjectTaskSchedulePreview | undefined,
+): DesktopProjectTaskOperationManifest | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const manifest = exactRecord(input, [
+    "manifestId",
+    "nodeId",
+    "operations",
+    "stateVersion",
+    "status",
+  ]);
+  if (
+    manifest === undefined ||
+    !isUuid(manifest.manifestId) ||
+    !isUuid(manifest.nodeId) ||
+    !isPositiveSafeInteger(manifest.stateVersion) ||
+    (manifest.status !== "candidate" && manifest.status !== "confirmed") ||
+    !Array.isArray(manifest.operations) ||
+    manifest.operations.length < 1 ||
+    manifest.operations.length > DESKTOP_TASK_OPERATION_KINDS.length
+  ) {
+    return undefined;
+  }
+  const nodeIndex = orderIndex.get(manifest.nodeId);
+  const operations = manifest.operations.map((inputOperation, index) => {
+    const operation = exactRecord(inputOperation, ["kind", "operationId"]);
+    return operation === undefined ||
+      !isUuid(operation.operationId) ||
+      typeof operation.kind !== "string" ||
+      !taskOperationKinds.has(operation.kind)
+      ? undefined
+      : Object.freeze({
+          operationNumber: index + 1,
+          kind: operation.kind as DesktopProjectTaskOperationKind,
+        });
+  });
+  if (
+    nodeIndex === undefined ||
+    !scheduleHasNodeNumber(schedulePreview, nodeIndex + 1) ||
+    operations.some((operation) => operation === undefined) ||
+    new Set(
+      manifest.operations.map(
+        (operation) => exactRecord(operation, ["kind", "operationId"])?.operationId,
+      ),
+    ).size !== manifest.operations.length ||
+    new Set(operations.map((operation) => operation?.kind)).size !== operations.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    nodeNumber: nodeIndex + 1,
+    stateVersion: manifest.stateVersion,
+    status: manifest.status,
+    operations: Object.freeze(operations as DesktopProjectTaskOperation[]),
+  });
+}
+
+function decodeProjectedDesktopTaskOperationManifest(
+  input: unknown,
+  schedulePreview: DesktopProjectTaskSchedulePreview | undefined,
+): DesktopProjectTaskOperationManifest | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const manifest = exactRecord(input, ["nodeNumber", "operations", "stateVersion", "status"]);
+  if (
+    manifest === undefined ||
+    !isPositiveSafeInteger(manifest.nodeNumber) ||
+    !isPositiveSafeInteger(manifest.stateVersion) ||
+    (manifest.status !== "candidate" && manifest.status !== "confirmed") ||
+    !Array.isArray(manifest.operations) ||
+    manifest.operations.length < 1 ||
+    manifest.operations.length > DESKTOP_TASK_OPERATION_KINDS.length ||
+    !scheduleHasNodeNumber(schedulePreview, manifest.nodeNumber)
+  ) {
+    return undefined;
+  }
+  const operations = manifest.operations.map((inputOperation, index) => {
+    const operation = exactRecord(inputOperation, ["kind", "operationNumber"]);
+    return operation === undefined ||
+      operation.operationNumber !== index + 1 ||
+      typeof operation.kind !== "string" ||
+      !taskOperationKinds.has(operation.kind)
+      ? undefined
+      : Object.freeze({
+          operationNumber: index + 1,
+          kind: operation.kind as DesktopProjectTaskOperationKind,
+        });
+  });
+  if (
+    operations.some((operation) => operation === undefined) ||
+    new Set(operations.map((operation) => operation?.kind)).size !== operations.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    nodeNumber: manifest.nodeNumber,
+    stateVersion: manifest.stateVersion,
+    status: manifest.status,
+    operations: Object.freeze(operations as DesktopProjectTaskOperation[]),
+  });
+}
+
+function scheduleHasNodeNumber(
+  preview: DesktopProjectTaskSchedulePreview | undefined,
+  nodeNumber: number,
+): boolean {
+  return (
+    preview !== undefined &&
+    (preview.state === "dependency_eligible" ||
+      preview.state === "awaiting_claim" ||
+      preview.state === "busy") &&
+    preview.nodeNumber === nodeNumber
+  );
 }
 
 function projectDesktopProjectTaskSchedule(

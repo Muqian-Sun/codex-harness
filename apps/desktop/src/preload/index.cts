@@ -12,6 +12,10 @@ const CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.confirm_c
 const GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.generate_candidate";
 const REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL = "desktop.task.requirement.revise";
 const MATERIALIZE_PROJECT_TASK_GRAPH_CHANNEL = "desktop.task.graph.materialize";
+const GENERATE_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL =
+  "desktop.task.operation_manifest.generate_candidate";
+const CONFIRM_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL =
+  "desktop.task.operation_manifest.confirm_candidate";
 const FAILURE_CODES = new Set([
   "unsupported_platform",
   "resource_configuration_missing",
@@ -59,6 +63,24 @@ const TASK_NODE_STATUSES = new Set([
   "failed",
   "interrupted",
   "cancelled",
+]);
+const TASK_OPERATION_KINDS = new Set([
+  "answer",
+  "inspect_workspace",
+  "modify_workspace",
+  "run_workspace_command",
+  "network_read",
+  "credential_access",
+  "external_write",
+  "database_migration",
+  "production_change",
+  "irreversible_action",
+  "permission_boundary_change",
+  "public_api_change",
+  "concurrent_change",
+  "architecture_decision",
+  "systemic_diagnosis",
+  "user_interaction",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_PROVIDER_CHARACTERS = 256;
@@ -227,7 +249,14 @@ type PreloadProjectTaskSchedulePreview =
 type PreloadProjectTaskGraph = Readonly<{
   revisionNumber: number;
   nodes: readonly PreloadProjectTaskGraphNode[];
+  operationManifest: PreloadProjectTaskOperationManifest | null;
   schedulePreview: PreloadProjectTaskSchedulePreview;
+}>;
+type PreloadProjectTaskOperationManifest = Readonly<{
+  nodeNumber: number;
+  stateVersion: number;
+  status: "candidate" | "confirmed";
+  operations: readonly Readonly<{ operationNumber: number; kind: string }>[];
 }>;
 type PreloadProjectTaskDetail = Readonly<{
   projectId: string;
@@ -294,6 +323,36 @@ type PreloadProjectTaskGraphMaterialization = Readonly<{
 type PreloadProjectTaskGraphMaterializationResult =
   | Readonly<{
       status: "materialized" | "existing";
+      taskId: string;
+      detail: PreloadProjectTaskDetail;
+      catalog: PreloadProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+type PreloadProjectTaskOperationManifestGeneration = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  nodeNumber: number;
+  expectedManifestStateVersion: number;
+}>;
+type PreloadProjectTaskOperationManifestGenerationResult =
+  | Readonly<{
+      status: "generated" | "existing";
+      taskId: string;
+      detail: PreloadProjectTaskDetail;
+      catalog: PreloadProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+type PreloadProjectTaskOperationManifestConfirmation = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  nodeNumber: number;
+  manifestStateVersion: number;
+}>;
+type PreloadProjectTaskOperationManifestConfirmationResult =
+  | Readonly<{
+      status: "confirmed" | "existing";
       taskId: string;
       detail: PreloadProjectTaskDetail;
       catalog: PreloadProjectTaskCatalog;
@@ -703,6 +762,62 @@ function decodeProjectTaskGraphMaterialization(
   });
 }
 
+function decodeProjectTaskOperationManifestGeneration(
+  input: unknown,
+): PreloadProjectTaskOperationManifestGeneration | undefined {
+  const record = exactRecord(input, [
+    "expectedManifestStateVersion",
+    "expectedTaskVersion",
+    "nodeNumber",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.nodeNumber) ||
+    !isNonNegativeSafeInteger(record.expectedManifestStateVersion)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    nodeNumber: record.nodeNumber,
+    expectedManifestStateVersion: record.expectedManifestStateVersion,
+  });
+}
+
+function decodeProjectTaskOperationManifestConfirmation(
+  input: unknown,
+): PreloadProjectTaskOperationManifestConfirmation | undefined {
+  const record = exactRecord(input, [
+    "expectedTaskVersion",
+    "manifestStateVersion",
+    "nodeNumber",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.nodeNumber) ||
+    !isPositiveSafeInteger(record.manifestStateVersion)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    nodeNumber: record.nodeNumber,
+    manifestStateVersion: record.manifestStateVersion,
+  });
+}
+
 function decodeProjectTaskCandidatePlanMutationResult(
   input: unknown,
   expected: PreloadProjectTaskCandidatePlanGeneration,
@@ -788,6 +903,72 @@ function decodeProjectTaskGraphMaterializationResult(
     catalog?.projectId !== expected.projectId
   ) {
     throw new Error("The desktop Project Task graph materialization result is invalid.");
+  }
+  return Object.freeze({
+    status: record.status,
+    taskId: expected.taskId,
+    detail,
+    catalog,
+  });
+}
+
+function decodeProjectTaskOperationManifestGenerationResult(
+  input: unknown,
+  expected: PreloadProjectTaskOperationManifestGeneration,
+): PreloadProjectTaskOperationManifestGenerationResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  const detail = decodeProjectTaskDetail(record?.detail);
+  const catalog = decodeProjectTaskCatalog(record?.catalog);
+  if (
+    record === undefined ||
+    (record.status !== "generated" && record.status !== "existing") ||
+    record.taskId !== expected.taskId ||
+    detail?.projectId !== expected.projectId ||
+    detail.taskId !== expected.taskId ||
+    detail.activeGraph?.operationManifest === null ||
+    detail.activeGraph === null ||
+    detail.activeGraph.operationManifest.nodeNumber !== expected.nodeNumber ||
+    detail.activeGraph.operationManifest.stateVersion !==
+      expected.expectedManifestStateVersion + 1 ||
+    catalog?.projectId !== expected.projectId
+  ) {
+    throw new Error("The desktop Project Task operation manifest result is invalid.");
+  }
+  return Object.freeze({
+    status: record.status,
+    taskId: expected.taskId,
+    detail,
+    catalog,
+  });
+}
+
+function decodeProjectTaskOperationManifestConfirmationResult(
+  input: unknown,
+  expected: PreloadProjectTaskOperationManifestConfirmation,
+): PreloadProjectTaskOperationManifestConfirmationResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  const detail = decodeProjectTaskDetail(record?.detail);
+  const catalog = decodeProjectTaskCatalog(record?.catalog);
+  if (
+    record === undefined ||
+    (record.status !== "confirmed" && record.status !== "existing") ||
+    record.taskId !== expected.taskId ||
+    detail?.projectId !== expected.projectId ||
+    detail.taskId !== expected.taskId ||
+    detail.activeGraph?.operationManifest?.status !== "confirmed" ||
+    detail.activeGraph.operationManifest.nodeNumber !== expected.nodeNumber ||
+    detail.activeGraph.operationManifest.stateVersion !== expected.manifestStateVersion + 1 ||
+    catalog?.projectId !== expected.projectId
+  ) {
+    throw new Error("The desktop Project Task operation manifest confirmation is invalid.");
   }
   return Object.freeze({
     status: record.status,
@@ -911,7 +1092,12 @@ function decodeProjectTaskGraph(
   if (input === null) {
     return null;
   }
-  const graph = exactRecord(input, ["nodes", "revisionNumber", "schedulePreview"]);
+  const graph = exactRecord(input, [
+    "nodes",
+    "operationManifest",
+    "revisionNumber",
+    "schedulePreview",
+  ]);
   if (
     graph === undefined ||
     confirmedPlan === null ||
@@ -977,8 +1163,13 @@ function decodeProjectTaskGraph(
     return undefined;
   }
   const schedulePreview = decodeProjectTaskSchedule(graph.schedulePreview);
+  const operationManifest = decodeProjectTaskOperationManifest(
+    graph.operationManifest,
+    schedulePreview,
+  );
   if (
     schedulePreview === undefined ||
+    operationManifest === undefined ||
     !scheduleMatchesProjectTaskGraph(schedulePreview, nodes as PreloadProjectTaskGraphNode[])
   ) {
     return undefined;
@@ -986,7 +1177,55 @@ function decodeProjectTaskGraph(
   return Object.freeze({
     revisionNumber: graph.revisionNumber,
     nodes: Object.freeze(nodes as PreloadProjectTaskGraphNode[]),
+    operationManifest,
     schedulePreview,
+  });
+}
+
+function decodeProjectTaskOperationManifest(
+  input: unknown,
+  schedulePreview: PreloadProjectTaskSchedulePreview | undefined,
+): PreloadProjectTaskOperationManifest | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const manifest = exactRecord(input, ["nodeNumber", "operations", "stateVersion", "status"]);
+  if (
+    manifest === undefined ||
+    !isPositiveSafeInteger(manifest.nodeNumber) ||
+    !isPositiveSafeInteger(manifest.stateVersion) ||
+    (manifest.status !== "candidate" && manifest.status !== "confirmed") ||
+    !Array.isArray(manifest.operations) ||
+    manifest.operations.length < 1 ||
+    manifest.operations.length > TASK_OPERATION_KINDS.size ||
+    schedulePreview === undefined ||
+    (schedulePreview.state !== "dependency_eligible" &&
+      schedulePreview.state !== "awaiting_claim" &&
+      schedulePreview.state !== "busy") ||
+    schedulePreview.nodeNumber !== manifest.nodeNumber
+  ) {
+    return undefined;
+  }
+  const operations = manifest.operations.map((inputOperation, index) => {
+    const operation = exactRecord(inputOperation, ["kind", "operationNumber"]);
+    return operation === undefined ||
+      operation.operationNumber !== index + 1 ||
+      typeof operation.kind !== "string" ||
+      !TASK_OPERATION_KINDS.has(operation.kind)
+      ? undefined
+      : Object.freeze({ operationNumber: index + 1, kind: operation.kind });
+  });
+  if (
+    operations.some((operation) => operation === undefined) ||
+    new Set(operations.map((operation) => operation?.kind)).size !== operations.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    nodeNumber: manifest.nodeNumber,
+    stateVersion: manifest.stateVersion,
+    status: manifest.status,
+    operations: Object.freeze(operations as Readonly<{ operationNumber: number; kind: string }>[]),
   });
 }
 
@@ -1677,6 +1916,32 @@ const desktopApi = Object.freeze({
     return decodeProjectTaskGraphMaterializationResult(
       await ipcRenderer.invoke(MATERIALIZE_PROJECT_TASK_GRAPH_CHANNEL, materialization),
       materialization,
+    );
+  },
+  async generateProjectTaskOperationManifest(
+    input: PreloadProjectTaskOperationManifestGeneration,
+  ): Promise<PreloadProjectTaskOperationManifestGenerationResult> {
+    const generation = decodeProjectTaskOperationManifestGeneration(input);
+    if (generation === undefined) {
+      throw new TypeError("A valid desktop Project Task operation manifest request is required.");
+    }
+    return decodeProjectTaskOperationManifestGenerationResult(
+      await ipcRenderer.invoke(GENERATE_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL, generation),
+      generation,
+    );
+  },
+  async confirmProjectTaskOperationManifest(
+    input: PreloadProjectTaskOperationManifestConfirmation,
+  ): Promise<PreloadProjectTaskOperationManifestConfirmationResult> {
+    const confirmation = decodeProjectTaskOperationManifestConfirmation(input);
+    if (confirmation === undefined) {
+      throw new TypeError(
+        "A valid desktop Project Task operation manifest confirmation is required.",
+      );
+    }
+    return decodeProjectTaskOperationManifestConfirmationResult(
+      await ipcRenderer.invoke(CONFIRM_PROJECT_TASK_OPERATION_MANIFEST_CHANNEL, confirmation),
+      confirmation,
     );
   },
   onBootstrapState(listener: (state: PreloadBootstrapState) => void): () => void {

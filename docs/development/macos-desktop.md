@@ -6,7 +6,7 @@
 Electron main → Harness daemon → SQLite 状态恢复 + Codex App Server worker → 完整模型目录 + 去敏账户快照
 ```
 
-界面当前显示这条链路的启动状态，并在就绪后持续显示去敏的当前账户观察、首批可见模型、已注册 Project、默认三级路由配置和每个首屏 Project 的路由绑定状态。用户可以通过原生目录选择器注册工作区，明确配置 `fast`、`standard`、`deep` 的模型与 reasoning effort，再把 Project 显式绑定到该默认路由配置；绑定完成后，还可以为该 Project 创建持久 Task，查看和修订当前 Requirement，使用 `deep` 档位生成只读候选计划，在二次确认后把它设为权威 confirmed Plan，再以独立操作创建持久 Task Node/DAG。Harness 会从权威 DAG 派生只读串行调度预览，说明下一依赖合格节点或尚未满足的门禁；这些状态都会写入 `state/harness.db` 并在桌面重启后恢复。节点状态流转、Run、审批/证据、thread/turn、自动任务分类和智能路由执行尚未开放，不能把“就绪”“已确认计划”“已有 DAG”或“依赖合格”理解为任务已经可执行。
+界面当前显示这条链路的启动状态，并在就绪后持续显示去敏的当前账户观察、首批可见模型、已注册 Project、默认三级路由配置和每个首屏 Project 的路由绑定状态。用户可以通过原生目录选择器注册工作区，明确配置 `fast`、`standard`、`deep` 的模型与 reasoning effort，再把 Project 显式绑定到该默认路由配置；绑定完成后，还可以为该 Project 创建持久 Task，查看和修订当前 Requirement，使用 `deep` 档位生成只读候选计划，在二次确认后把它设为权威 confirmed Plan，再以独立操作创建持久 Task Node/DAG。Harness 会从权威 DAG 派生只读串行调度预览，说明下一依赖合格节点或尚未满足的门禁；对于当前依赖合格节点，还可以继续使用 `deep` 档位生成固定类别的候选操作清单，并经第二次明确确认后把它保存为该节点的权威清单。这些状态都会写入 `state/harness.db` 并在桌面重启后恢复。节点状态流转、Run、审批/证据、thread/turn、自动任务分类和智能路由执行尚未开放，不能把“就绪”“已确认计划”“已有 DAG”“依赖合格”或“已确认操作清单”理解为任务已经可执行。
 
 ## 前置条件
 
@@ -47,13 +47,13 @@ CODEX_HARNESS_CODEX_EXECUTABLE=/absolute/path/to/codex pnpm desktop:start
 ## 状态含义
 
 - `starting`：正在验证本地资源并启动受控进程链。
-- `ready`：daemon RPC hello、精确 Codex 版本、App Server 初始化、完整模型目录、去敏账户快照、SQLite schema 校验和全部当前领域投影恢复均已通过，main 先并行读取当前账户、首个模型页、首个 Project 页和默认路由配置，再按权威 Project 顺序批量读取绑定状态；任何一步失败都不会发布部分 ready。Task 目录和详情不进入启动原子状态，而是在 ready 后按当前 Project/Task 延迟读取，失败只关闭对应面板，不伪造空状态。后续权威账户快照通过严格、连续的 `account.status_changed` 事件更新。UI 只显示认证状态、凭据类别、已知套餐类别，provider、可见模型总数和最多 12 个模型的名称、推理强度与输入模态，最多 12 个 Project 的 ID/version、显示名、平台、用户明确选择的绝对路径、固定 `unverified` identity 状态及 `unbound`、`default_bound`、`other_profile_bound` 三态和 binding version，路由 profile version、configuration revision、三档目标和当前可用性，所选 Project 最多 12 个 Task 的摘要，所选 Task 当前 Requirement 的修订号、原文、objective、constraints 和 acceptance criteria，candidate/confirmed Plan 的修订号和步骤内容，以及 active Graph 的修订号、`T01…` 节点、来源步骤、依赖和状态；不显示邮箱、token、目录游标、内部模型 ID、hidden、快照标识、worker session、固定 profile ID、绑定所观察的 configuration revision、Requirement/Plan/step/Graph/node UUID、ownership version、事件时间、事件序号、projection key 或数据库路径。
+- `ready`：daemon RPC hello、精确 Codex 版本、App Server 初始化、完整模型目录、去敏账户快照、SQLite schema 校验和全部当前领域投影恢复均已通过，main 先并行读取当前账户、首个模型页、首个 Project 页和默认路由配置，再按权威 Project 顺序批量读取绑定状态；任何一步失败都不会发布部分 ready。Task 目录和详情不进入启动原子状态，而是在 ready 后按当前 Project/Task 延迟读取，失败只关闭对应面板，不伪造空状态。后续权威账户快照通过严格、连续的 `account.status_changed` 事件更新。UI 只显示认证状态、凭据类别、已知套餐类别，provider、可见模型总数和最多 12 个模型的名称、推理强度与输入模态，最多 12 个 Project 的 ID/version、显示名、平台、用户明确选择的绝对路径、固定 `unverified` identity 状态及 `unbound`、`default_bound`、`other_profile_bound` 三态和 binding version，路由 profile version、configuration revision、三档目标和当前可用性，所选 Project 最多 12 个 Task 的摘要，所选 Task 当前 Requirement 的修订号、原文、objective、constraints 和 acceptance criteria，candidate/confirmed Plan 的修订号和步骤内容，active Graph 的修订号、`T01…` 节点、来源步骤、依赖和状态，以及当前调度节点的操作清单状态版本、候选或 confirmed 状态和固定操作类别；不显示邮箱、token、目录游标、内部模型 ID、hidden、快照标识、worker session、固定 profile ID、绑定所观察的 configuration revision、Requirement/Plan/step/Graph/node/manifest/operation UUID、ownership version、事件时间、事件序号、projection key 或数据库路径。
 - `failed`：启动或运行时故障已经保守隔离；界面只显示稳定故障码，不显示路径、stderr 或原始异常。
 - `stopping`：正在排空连接并验证受控进程已经退出。
 
 应用不会在失败后自动重启、自动重放或切换到其他 Codex executable。
 
-Electron main 会在应用的私有用户数据目录下分别维护临时 `runtime` root 和稳定 `state` root。单次 daemon 的 socket 与随机运行目录在退出后清理，`state/harness.db` 则跨应用重启保留；renderer 不知道这些内部路径，也不能直接访问 SQLite。数据库只由 daemon 写入，退出时执行 checkpoint 并关闭，正常冒烟要求不残留 `harness.db-wal` 或 `harness.db-shm`。当前桌面开放的业务写入包括不可变 Project 注册、默认 profile 的完整三级路由配置、Project 到该默认 profile 的显式绑定、已绑定 Project 下的初始 Task/Requirement 与 Task → Project 归属原子创建、现有 Task 的新 Requirement Revision、candidate Plan Revision 生成及其显式确认，以及 confirmed Plan 到 pending Task Node/DAG 的确定性 materialization；RouteDecision、Run、节点状态流转、审批和证据仍没有桌面写入口。
+Electron main 会在应用的私有用户数据目录下分别维护临时 `runtime` root 和稳定 `state` root。单次 daemon 的 socket 与随机运行目录在退出后清理，`state/harness.db` 则跨应用重启保留；renderer 不知道这些内部路径，也不能直接访问 SQLite。数据库只由 daemon 写入，退出时执行 checkpoint 并关闭，正常冒烟要求不残留 `harness.db-wal` 或 `harness.db-shm`。当前桌面开放的业务写入包括不可变 Project 注册、默认 profile 的完整三级路由配置、Project 到该默认 profile 的显式绑定、已绑定 Project 下的初始 Task/Requirement 与 Task → Project 归属原子创建、现有 Task 的新 Requirement Revision、candidate Plan Revision 生成及其显式确认、confirmed Plan 到 pending Task Node/DAG 的确定性 materialization，以及当前调度节点的候选操作清单生成与显式确认；RouteDecision、Run、节点状态流转、审批和证据仍没有桌面写入口。
 
 Project 注册必须从 renderer 的零参数请求开始。Electron main 只接受当前受管窗口的精确 main frame，打开原生单目录选择器，并根据当前宿主平台、返回的规范绝对路径和路径末段生成注册命令；renderer 不能提交任意路径、Project ID 或 command ID。取消选择不会写入；重复选择同一规范 workspace 会返回已有 Project。当前 `unverified` 只表示保存了通过词法校验的目录描述，不证明目录仍存在、可读写、属于同一物理文件身份、是 Git 仓库或已经获得执行授权。UI 暂时只显示首个 12 项页面，没有主动分页、编辑、重命名或删除。
 
@@ -70,6 +70,8 @@ Task 详情读取同时携带 Project ID 与 Task ID；daemon 只在 Project 已
 candidate Plan 生成只在 Project 绑定默认路由、`deep` 目标当前可用且 Requirement 没有未保存草稿时开放；它使用固定只读、禁网分析，不授予执行权限。确认采用两步操作：先点“确认此计划”，再阅读影响说明并点“确认并设为权威计划”。Renderer 只回传页面所见 Task version 和 candidate Plan 修订号；main 重读隐藏 UUID 后提交，daemon 最终复核 Task 归属、ownership、Requirement 和候选修订。若 Task 已变化则只刷新详情并要求重新审阅；结果未知时不自动重放。确认会生成新的 confirmed Plan Revision，并在存在 active graph 时使旧 DAG 失效，但不会创建新 DAG、Run、工具调用或权限；界面会先显示 `CONFIRMED PLAN / WAITING FOR DAG` 与 `EXECUTION LOCKED`。
 
 只有当前没有 candidate 和 active Graph、confirmed Plan 仍绑定 active Requirement、页面没有未保存草稿且同一 Task 没有其他写入时，“创建任务节点与 DAG”才可用。Renderer 只提交页面所见 Task version 与 confirmed Plan 修订号；main 重读隐藏 fence，daemon 再为每个 confirmed step 生成一个稳定节点，复制标题、描述和验收条件，并按步骤顺序建立保守串行依赖。所有节点原子初始化为 `pending`，界面显示 `ACTIVE DAG / EXECUTION LOCKED`、Graph 修订号、节点和依赖，并在 `SERIAL SCHEDULER` 面板显示 `dependency_eligible`、`awaiting_claim`、`busy`、`blocked` 或 `complete` 的只读派生结果。`dependency_eligible` 只证明节点依赖已完成，不等于 `ready`，也不代表审批、路由、执行权限或验收证据已经满足；该操作不调用模型、不生成 Run、不改变节点状态，也不授予任何工具权限。预览若观察到多个 ready/running、ready 与 running 并存或活动节点依赖未完成，会保守返回 `blocked`。冲突只刷新当前权威详情，未知结果不自动重放；重启后从 SQLite 恢复同一 Graph Revision，并重新派生相同预览。
+
+候选操作清单只对调度预检当前返回的 `dependency_eligible` 节点开放，并要求 Project 仍绑定默认 profile、`deep` 目标当前可用、Requirement 没有未保存草稿且同一 Task 没有其他写入。Renderer 只提交 `T01…` 节点号、页面所见 Task version 和 manifest 状态版本；Electron main 重读隐藏的 Project、Task、ownership、Requirement、confirmed Plan、Graph、node、binding、profile 和模型目录 fence，daemon 使用固定禁网、无工具的只读分析生成去重的封闭操作类别，模型不能提交路径、命令、权限或任意操作名称。生成前后任一权威状态或模型目录变化都会保守冲突；未知结果不自动重放，成功或冲突后都通过详情重读恢复权威视图。候选清单必须先进入审阅，再在安全声明卡片执行第二次明确确认；确认不调用模型，只把同一节点的当前 candidate manifest 提交为 confirmed。确认后界面继续显示 `EXECUTION LOCKED`，不会创建 RouteDecision、权限计划、Run 或工具调用，也不会改变节点状态。
 
 ## Electron 首次安装与代理
 

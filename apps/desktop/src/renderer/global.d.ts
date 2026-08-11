@@ -11,6 +11,10 @@ import type {
   DesktopProjectTaskDetailResult,
   DesktopProjectTaskGraphMaterialization,
   DesktopProjectTaskGraphMaterializationResult,
+  DesktopProjectTaskOperationManifestConfirmation,
+  DesktopProjectTaskOperationManifestConfirmationResult,
+  DesktopProjectTaskOperationManifestGeneration,
+  DesktopProjectTaskOperationManifestGenerationResult,
   DesktopProjectTaskMutationResult,
   DesktopProjectTaskRequirementMutationResult,
   DesktopProjectTaskRequirementRevision,
@@ -46,6 +50,12 @@ declare global {
       materializeProjectTaskGraph(
         input: DesktopProjectTaskGraphMaterialization,
       ): Promise<DesktopProjectTaskGraphMaterializationResult>;
+      generateProjectTaskOperationManifest(
+        input: DesktopProjectTaskOperationManifestGeneration,
+      ): Promise<DesktopProjectTaskOperationManifestGenerationResult>;
+      confirmProjectTaskOperationManifest(
+        input: DesktopProjectTaskOperationManifestConfirmation,
+      ): Promise<DesktopProjectTaskOperationManifestConfirmationResult>;
       setRoutingConfiguration(
         update: DesktopRoutingConfigurationUpdate,
       ): Promise<DesktopRoutingConfigurationMutationResult>;

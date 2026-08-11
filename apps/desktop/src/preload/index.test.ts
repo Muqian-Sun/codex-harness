@@ -32,6 +32,8 @@ type ExposedApi = Readonly<{
   generateProjectTaskCandidatePlan(input: unknown): Promise<unknown>;
   confirmProjectTaskCandidatePlan(input: unknown): Promise<unknown>;
   materializeProjectTaskGraph(input: unknown): Promise<unknown>;
+  generateProjectTaskOperationManifest(input: unknown): Promise<unknown>;
+  confirmProjectTaskOperationManifest(input: unknown): Promise<unknown>;
 }>;
 
 function readyState(binding: unknown): unknown {
@@ -407,6 +409,7 @@ describe("desktop preload Project routing binding boundary", () => {
       stage: "active_graph",
       activeGraph: {
         revisionNumber: 1,
+        operationManifest: null,
         schedulePreview: { state: "dependency_eligible", nodeNumber: 1 },
         nodes: [
           {
@@ -566,6 +569,121 @@ describe("desktop preload Project routing binding boundary", () => {
     });
     await expect(api.materializeProjectTaskGraph(materialization)).rejects.toThrow(
       "graph materialization result is invalid",
+    );
+
+    const manifestGeneration = {
+      ...selection,
+      expectedTaskVersion: 3,
+      nodeNumber: 1,
+      expectedManifestStateVersion: 0,
+    };
+    await expect(
+      api.generateProjectTaskOperationManifest({ ...manifestGeneration, nodeNumber: 0 }),
+    ).rejects.toThrow("valid desktop Project Task operation manifest request");
+    const candidateManifestDetail = {
+      ...graphDetail,
+      activeGraph: {
+        ...graphDetail.activeGraph,
+        operationManifest: {
+          nodeNumber: 1,
+          stateVersion: 1,
+          status: "candidate",
+          operations: [
+            { operationNumber: 1, kind: "inspect_workspace" },
+            { operationNumber: 2, kind: "modify_workspace" },
+          ],
+        },
+      },
+    };
+    harness.invoke.mockResolvedValueOnce({
+      status: "generated",
+      taskId,
+      detail: candidateManifestDetail,
+      catalog: graphCatalog,
+    });
+    await expect(api.generateProjectTaskOperationManifest(manifestGeneration)).resolves.toEqual({
+      status: "generated",
+      taskId,
+      detail: candidateManifestDetail,
+      catalog: graphCatalog,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith(
+      "desktop.task.operation_manifest.generate_candidate",
+      manifestGeneration,
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "generated",
+      taskId,
+      detail: {
+        ...candidateManifestDetail,
+        activeGraph: {
+          ...candidateManifestDetail.activeGraph,
+          operationManifest: {
+            ...candidateManifestDetail.activeGraph.operationManifest,
+            operations: [
+              { operationNumber: 1, kind: "inspect_workspace" },
+              { operationNumber: 2, kind: "inspect_workspace" },
+            ],
+          },
+        },
+      },
+      catalog: graphCatalog,
+    });
+    await expect(api.generateProjectTaskOperationManifest(manifestGeneration)).rejects.toThrow(
+      "operation manifest result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({ status: "conflict" });
+    await expect(api.generateProjectTaskOperationManifest(manifestGeneration)).resolves.toEqual({
+      status: "conflict",
+    });
+
+    const manifestConfirmation = {
+      ...selection,
+      expectedTaskVersion: 3,
+      nodeNumber: 1,
+      manifestStateVersion: 1,
+    };
+    await expect(
+      api.confirmProjectTaskOperationManifest({
+        ...manifestConfirmation,
+        manifestStateVersion: 0,
+      }),
+    ).rejects.toThrow("valid desktop Project Task operation manifest confirmation");
+    const confirmedManifestDetail = {
+      ...candidateManifestDetail,
+      activeGraph: {
+        ...candidateManifestDetail.activeGraph,
+        operationManifest: {
+          ...candidateManifestDetail.activeGraph.operationManifest,
+          stateVersion: 2,
+          status: "confirmed",
+        },
+      },
+    };
+    harness.invoke.mockResolvedValueOnce({
+      status: "confirmed",
+      taskId,
+      detail: confirmedManifestDetail,
+      catalog: graphCatalog,
+    });
+    await expect(api.confirmProjectTaskOperationManifest(manifestConfirmation)).resolves.toEqual({
+      status: "confirmed",
+      taskId,
+      detail: confirmedManifestDetail,
+      catalog: graphCatalog,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith(
+      "desktop.task.operation_manifest.confirm_candidate",
+      manifestConfirmation,
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "confirmed",
+      taskId,
+      detail: candidateManifestDetail,
+      catalog: graphCatalog,
+    });
+    await expect(api.confirmProjectTaskOperationManifest(manifestConfirmation)).rejects.toThrow(
+      "operation manifest confirmation is invalid",
     );
   });
 });

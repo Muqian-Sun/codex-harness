@@ -5,6 +5,8 @@ import {
   decodeDesktopProjectTaskCandidatePlanConfirmation,
   decodeDesktopProjectTaskCandidatePlanGeneration,
   decodeDesktopProjectTaskGraphMaterialization,
+  decodeDesktopProjectTaskOperationManifestConfirmation,
+  decodeDesktopProjectTaskOperationManifestGeneration,
   decodeDesktopProjectTaskRequirementRevision,
 } from "../shared/bootstrap-state.js";
 import type {
@@ -29,6 +31,11 @@ import type {
   DesktopProjectTaskMutationResult,
   DesktopProjectTaskGraphMaterialization,
   DesktopProjectTaskGraphMaterializationResult,
+  DesktopProjectTaskOperationKind,
+  DesktopProjectTaskOperationManifestConfirmation,
+  DesktopProjectTaskOperationManifestConfirmationResult,
+  DesktopProjectTaskOperationManifestGeneration,
+  DesktopProjectTaskOperationManifestGenerationResult,
   DesktopProjectTaskRequirementMutationResult,
   DesktopProjectTaskRequirementRevision,
   DesktopProjectTaskSelection,
@@ -105,6 +112,30 @@ const taskStageLabels: Readonly<Record<DesktopTaskStage, string>> = Object.freez
   confirmed_plan: "计划已确认·待建图",
   active_graph: "DAG 已建立",
   active_graph_with_candidate: "DAG 活动·新计划待确认",
+});
+
+const operationKindLabels: Readonly<
+  Record<DesktopProjectTaskOperationKind, Readonly<{ title: string; summary: string }>>
+> = Object.freeze({
+  answer: Object.freeze({ title: "形成回答", summary: "仅产出分析或答复" }),
+  inspect_workspace: Object.freeze({ title: "检查工作区", summary: "读取代码、配置与本地状态" }),
+  modify_workspace: Object.freeze({ title: "修改工作区", summary: "新增、编辑或删除项目文件" }),
+  run_workspace_command: Object.freeze({ title: "运行命令", summary: "执行构建、测试或本地工具" }),
+  network_read: Object.freeze({ title: "读取网络", summary: "查询外部文档或远程只读信息" }),
+  credential_access: Object.freeze({ title: "访问凭据", summary: "需要受控认证材料" }),
+  external_write: Object.freeze({ title: "写入外部系统", summary: "改变仓库外的持久状态" }),
+  database_migration: Object.freeze({ title: "数据库迁移", summary: "改变持久化结构或数据" }),
+  production_change: Object.freeze({ title: "生产变更", summary: "影响线上环境或服务" }),
+  irreversible_action: Object.freeze({ title: "不可逆动作", summary: "结果难以安全撤销" }),
+  permission_boundary_change: Object.freeze({
+    title: "权限边界变更",
+    summary: "改变授权或信任范围",
+  }),
+  public_api_change: Object.freeze({ title: "公共接口变更", summary: "影响跨模块或外部调用方" }),
+  concurrent_change: Object.freeze({ title: "并发协作变更", summary: "可能与其他工作同时修改" }),
+  architecture_decision: Object.freeze({ title: "架构决策", summary: "需要高层设计判断" }),
+  systemic_diagnosis: Object.freeze({ title: "系统性诊断", summary: "需要跨模块定位根因" }),
+  user_interaction: Object.freeze({ title: "用户交互", summary: "需要用户选择、批准或补充" }),
 });
 
 const phasePresentation = Object.freeze({
@@ -485,6 +516,15 @@ export function ProjectTaskPanel({
   const [graphStatus, setGraphStatus] = useState<
     "idle" | "materializing" | DesktopProjectTaskGraphMaterializationResult["status"]
   >("idle");
+  const [operationManifestStatus, setOperationManifestStatus] = useState<
+    "idle" | "generating" | DesktopProjectTaskOperationManifestGenerationResult["status"]
+  >("idle");
+  const [operationManifestConfirmationStatus, setOperationManifestConfirmationStatus] = useState<
+    | "idle"
+    | "reviewing"
+    | "confirming"
+    | DesktopProjectTaskOperationManifestConfirmationResult["status"]
+  >("idle");
 
   useEffect(() => {
     if (
@@ -511,6 +551,8 @@ export function ProjectTaskPanel({
     setPlanStatus("idle");
     setPlanConfirmationStatus("idle");
     setGraphStatus("idle");
+    setOperationManifestStatus("idle");
+    setOperationManifestConfirmationStatus("idle");
     void desktopTaskApi()
       .readProjectTaskCatalog(selectedProjectId)
       .then((result) => {
@@ -546,6 +588,8 @@ export function ProjectTaskPanel({
     setPlanStatus("idle");
     setPlanConfirmationStatus("idle");
     setGraphStatus("idle");
+    setOperationManifestStatus("idle");
+    setOperationManifestConfirmationStatus("idle");
     void desktopTaskApi()
       .readProjectTaskDetail({ projectId: selectedProjectId, taskId: selectedTaskId })
       .then((result) => {
@@ -583,6 +627,10 @@ export function ProjectTaskPanel({
           title,
           sourceText,
         });
+  const operationManifestMutationPending =
+    operationManifestStatus === "generating" ||
+    operationManifestConfirmationStatus === "reviewing" ||
+    operationManifestConfirmationStatus === "confirming";
   const canCreate =
     creation !== undefined &&
     selectedBinding?.status === "default_bound" &&
@@ -591,7 +639,8 @@ export function ProjectTaskPanel({
     planStatus !== "generating" &&
     planConfirmationStatus !== "reviewing" &&
     planConfirmationStatus !== "confirming" &&
-    graphStatus !== "materializing";
+    graphStatus !== "materializing" &&
+    !operationManifestMutationPending;
   const requirementRevision =
     detailState.status !== "loaded"
       ? undefined
@@ -610,7 +659,8 @@ export function ProjectTaskPanel({
     planStatus !== "generating" &&
     planConfirmationStatus !== "reviewing" &&
     planConfirmationStatus !== "confirming" &&
-    graphStatus !== "materializing";
+    graphStatus !== "materializing" &&
+    !operationManifestMutationPending;
   const planGeneration =
     detailState.status !== "loaded"
       ? undefined
@@ -631,7 +681,8 @@ export function ProjectTaskPanel({
     planStatus !== "generating" &&
     planConfirmationStatus !== "reviewing" &&
     planConfirmationStatus !== "confirming" &&
-    graphStatus !== "materializing";
+    graphStatus !== "materializing" &&
+    !operationManifestMutationPending;
   const planConfirmation =
     detailState.status !== "loaded" || detailState.detail.candidatePlan === null
       ? undefined
@@ -649,7 +700,8 @@ export function ProjectTaskPanel({
     revisionStatus !== "revising" &&
     planStatus !== "generating" &&
     planConfirmationStatus !== "confirming" &&
-    graphStatus !== "materializing";
+    graphStatus !== "materializing" &&
+    !operationManifestMutationPending;
   const graphMaterialization =
     detailState.status !== "loaded" ||
     detailState.detail.stage !== "confirmed_plan" ||
@@ -672,14 +724,76 @@ export function ProjectTaskPanel({
     planStatus !== "generating" &&
     planConfirmationStatus !== "reviewing" &&
     planConfirmationStatus !== "confirming" &&
-    graphStatus !== "materializing";
+    graphStatus !== "materializing" &&
+    !operationManifestMutationPending;
+  const scheduledNodeNumber =
+    detailState.status === "loaded" &&
+    detailState.detail.activeGraph?.schedulePreview.state === "dependency_eligible"
+      ? detailState.detail.activeGraph.schedulePreview.nodeNumber
+      : undefined;
+  const currentOperationManifest =
+    detailState.status === "loaded"
+      ? (detailState.detail.activeGraph?.operationManifest ?? null)
+      : null;
+  const operationManifestGeneration =
+    detailState.status !== "loaded" || scheduledNodeNumber === undefined
+      ? undefined
+      : decodeDesktopProjectTaskOperationManifestGeneration({
+          projectId: detailState.detail.projectId,
+          taskId: detailState.detail.taskId,
+          expectedTaskVersion: detailState.detail.taskVersion,
+          nodeNumber: scheduledNodeNumber,
+          expectedManifestStateVersion: currentOperationManifest?.stateVersion ?? 0,
+        });
+  const canGenerateOperationManifest =
+    operationManifestGeneration !== undefined &&
+    detailState.status === "loaded" &&
+    detailState.detail.stage === "active_graph" &&
+    selectedBinding?.status === "default_bound" &&
+    routing.configured &&
+    routing.availability?.deep === "observed_available" &&
+    requirementSource === detailState.detail.activeRequirement.sourceText &&
+    mutationStatus !== "creating" &&
+    revisionStatus !== "revising" &&
+    planStatus !== "generating" &&
+    planConfirmationStatus !== "reviewing" &&
+    planConfirmationStatus !== "confirming" &&
+    graphStatus !== "materializing" &&
+    operationManifestStatus !== "generating" &&
+    operationManifestConfirmationStatus !== "reviewing" &&
+    operationManifestConfirmationStatus !== "confirming";
+  const operationManifestConfirmation =
+    detailState.status !== "loaded" ||
+    currentOperationManifest?.status !== "candidate" ||
+    scheduledNodeNumber === undefined
+      ? undefined
+      : decodeDesktopProjectTaskOperationManifestConfirmation({
+          projectId: detailState.detail.projectId,
+          taskId: detailState.detail.taskId,
+          expectedTaskVersion: detailState.detail.taskVersion,
+          nodeNumber: scheduledNodeNumber,
+          manifestStateVersion: currentOperationManifest.stateVersion,
+        });
+  const canBeginOperationManifestConfirmation =
+    operationManifestConfirmation !== undefined &&
+    detailState.status === "loaded" &&
+    requirementSource === detailState.detail.activeRequirement.sourceText &&
+    mutationStatus !== "creating" &&
+    revisionStatus !== "revising" &&
+    planStatus !== "generating" &&
+    planConfirmationStatus !== "reviewing" &&
+    planConfirmationStatus !== "confirming" &&
+    graphStatus !== "materializing" &&
+    operationManifestStatus !== "generating" &&
+    operationManifestConfirmationStatus !== "confirming";
   const taskMutationPending =
     mutationStatus === "creating" ||
     revisionStatus === "revising" ||
     planStatus === "generating" ||
     planConfirmationStatus === "reviewing" ||
     planConfirmationStatus === "confirming" ||
-    graphStatus === "materializing";
+    graphStatus === "materializing" ||
+    operationManifestMutationPending;
 
   const createTask = async (): Promise<void> => {
     if (!canCreate || creation === undefined) {
@@ -836,6 +950,82 @@ export function ProjectTaskPanel({
     }
   };
 
+  const generateOperationManifest = async (): Promise<void> => {
+    if (!canGenerateOperationManifest || operationManifestGeneration === undefined) {
+      return;
+    }
+    setOperationManifestStatus("generating");
+    setOperationManifestConfirmationStatus("idle");
+    try {
+      const result = await desktopTaskApi().generateProjectTaskOperationManifest(
+        operationManifestGeneration,
+      );
+      if (result.status === "generated" || result.status === "existing") {
+        setCatalogState({ status: "loaded", catalog: result.catalog });
+        setDetailState({ status: "loaded", detail: result.detail });
+        setRequirementSource(result.detail.activeRequirement.sourceText);
+      } else if (result.status === "conflict") {
+        const [currentDetail, currentCatalog] = await Promise.allSettled([
+          desktopTaskApi().readProjectTaskDetail({
+            projectId: operationManifestGeneration.projectId,
+            taskId: operationManifestGeneration.taskId,
+          }),
+          desktopTaskApi().readProjectTaskCatalog(operationManifestGeneration.projectId),
+        ]);
+        if (currentDetail.status === "fulfilled" && currentDetail.value.status === "loaded") {
+          setDetailState({ status: "loaded", detail: currentDetail.value.detail });
+          setRequirementSource(currentDetail.value.detail.activeRequirement.sourceText);
+        }
+        if (currentCatalog.status === "fulfilled" && currentCatalog.value.status === "loaded") {
+          setCatalogState({ status: "loaded", catalog: currentCatalog.value.catalog });
+        }
+      }
+      setOperationManifestStatus(result.status);
+    } catch {
+      setOperationManifestStatus("unavailable");
+    }
+  };
+
+  const confirmOperationManifest = async (): Promise<void> => {
+    if (
+      operationManifestConfirmationStatus !== "reviewing" ||
+      operationManifestConfirmation === undefined
+    ) {
+      return;
+    }
+    setOperationManifestConfirmationStatus("confirming");
+    try {
+      const result = await desktopTaskApi().confirmProjectTaskOperationManifest(
+        operationManifestConfirmation,
+      );
+      if (result.status === "confirmed" || result.status === "existing") {
+        setCatalogState({ status: "loaded", catalog: result.catalog });
+        setDetailState({ status: "loaded", detail: result.detail });
+        setRequirementSource(result.detail.activeRequirement.sourceText);
+        setOperationManifestStatus("idle");
+      } else if (result.status === "conflict") {
+        const [currentDetail, currentCatalog] = await Promise.allSettled([
+          desktopTaskApi().readProjectTaskDetail({
+            projectId: operationManifestConfirmation.projectId,
+            taskId: operationManifestConfirmation.taskId,
+          }),
+          desktopTaskApi().readProjectTaskCatalog(operationManifestConfirmation.projectId),
+        ]);
+        if (currentDetail.status === "fulfilled" && currentDetail.value.status === "loaded") {
+          setDetailState({ status: "loaded", detail: currentDetail.value.detail });
+          setRequirementSource(currentDetail.value.detail.activeRequirement.sourceText);
+        }
+        if (currentCatalog.status === "fulfilled" && currentCatalog.value.status === "loaded") {
+          setCatalogState({ status: "loaded", catalog: currentCatalog.value.catalog });
+        }
+        setOperationManifestStatus("idle");
+      }
+      setOperationManifestConfirmationStatus(result.status);
+    } catch {
+      setOperationManifestConfirmationStatus("unavailable");
+    }
+  };
+
   const tasks = catalogState.status === "loaded" ? catalogState.catalog.tasks : [];
   const accountLabel =
     account.status === "authenticated"
@@ -877,6 +1067,8 @@ export function ProjectTaskPanel({
             setRevisionStatus("idle");
             setPlanStatus("idle");
             setPlanConfirmationStatus("idle");
+            setOperationManifestStatus("idle");
+            setOperationManifestConfirmationStatus("idle");
           }}
         >
           <span aria-hidden="true">＋</span>
@@ -898,6 +1090,8 @@ export function ProjectTaskPanel({
               setRevisionStatus("idle");
               setPlanStatus("idle");
               setPlanConfirmationStatus("idle");
+              setOperationManifestStatus("idle");
+              setOperationManifestConfirmationStatus("idle");
             }}
           >
             {projects.projects.length === 0 ? <option value="">尚无 Project</option> : null}
@@ -941,6 +1135,8 @@ export function ProjectTaskPanel({
                       setRevisionStatus("idle");
                       setPlanStatus("idle");
                       setPlanConfirmationStatus("idle");
+                      setOperationManifestStatus("idle");
+                      setOperationManifestConfirmationStatus("idle");
                     }}
                   >
                     <span className="task-list-icon" aria-hidden="true">
@@ -1061,6 +1257,12 @@ export function ProjectTaskPanel({
                       }
                       if (planConfirmationStatus !== "confirming") {
                         setPlanConfirmationStatus("idle");
+                      }
+                      if (operationManifestStatus !== "generating") {
+                        setOperationManifestStatus("idle");
+                      }
+                      if (operationManifestConfirmationStatus !== "confirming") {
+                        setOperationManifestConfirmationStatus("idle");
                       }
                     }}
                   />
@@ -1250,7 +1452,20 @@ export function ProjectTaskPanel({
               </div>
             )}
             {detailState.detail.activeGraph !== null ? (
-              <TaskGraph graph={detailState.detail.activeGraph} />
+              <>
+                <TaskGraph graph={detailState.detail.activeGraph} />
+                <OperationManifestPanel
+                  graph={detailState.detail.activeGraph}
+                  generationStatus={operationManifestStatus}
+                  confirmationStatus={operationManifestConfirmationStatus}
+                  canGenerate={canGenerateOperationManifest}
+                  canBeginConfirmation={canBeginOperationManifestConfirmation}
+                  onGenerate={() => void generateOperationManifest()}
+                  onBeginConfirmation={() => setOperationManifestConfirmationStatus("reviewing")}
+                  onCancelConfirmation={() => setOperationManifestConfirmationStatus("idle")}
+                  onConfirm={() => void confirmOperationManifest()}
+                />
+              </>
             ) : detailState.detail.confirmedPlan !== null &&
               detailState.detail.candidatePlan === null ? (
               <div className="task-graph-materialization">
@@ -1373,6 +1588,162 @@ export function CandidatePlan({
           </li>
         ))}
       </ol>
+    </section>
+  );
+}
+
+export function OperationManifestPanel({
+  graph,
+  generationStatus,
+  confirmationStatus,
+  canGenerate,
+  canBeginConfirmation,
+  onGenerate,
+  onBeginConfirmation,
+  onCancelConfirmation,
+  onConfirm,
+}: Readonly<{
+  graph: NonNullable<DesktopProjectTaskDetail["activeGraph"]>;
+  generationStatus:
+    "idle" | "generating" | DesktopProjectTaskOperationManifestGenerationResult["status"];
+  confirmationStatus:
+    | "idle"
+    | "reviewing"
+    | "confirming"
+    | DesktopProjectTaskOperationManifestConfirmationResult["status"];
+  canGenerate: boolean;
+  canBeginConfirmation: boolean;
+  onGenerate: () => void;
+  onBeginConfirmation: () => void;
+  onCancelConfirmation: () => void;
+  onConfirm: () => void;
+}>) {
+  const manifest = graph.operationManifest;
+  const scheduledNodeNumber =
+    graph.schedulePreview.state === "dependency_eligible" ||
+    graph.schedulePreview.state === "awaiting_claim" ||
+    graph.schedulePreview.state === "busy"
+      ? graph.schedulePreview.nodeNumber
+      : undefined;
+  return (
+    <section
+      className="operation-manifest"
+      data-task-operation-manifest={manifest?.status ?? "none"}
+      data-task-operation-node={scheduledNodeNumber ?? 0}
+    >
+      <header>
+        <div>
+          <span>OPERATION MANIFEST</span>
+          <strong>
+            {scheduledNodeNumber === undefined
+              ? "NO ACTIVE NODE"
+              : formatTaskNodeNumber(scheduledNodeNumber)}
+          </strong>
+        </div>
+        <small>
+          {manifest === null
+            ? "NOT GENERATED"
+            : manifest.status === "candidate"
+              ? "REVIEW REQUIRED"
+              : "CONFIRMED · EXECUTION LOCKED"}
+        </small>
+      </header>
+      {manifest === null ? (
+        <div className="operation-manifest-empty">
+          <span aria-hidden="true">⌁</span>
+          <div>
+            <strong>先识别节点需要的操作边界</strong>
+            <p>高级档位只读分析当前节点，生成固定类别清单；此步骤不会决定模型或权限。</p>
+          </div>
+        </div>
+      ) : (
+        <ol className="operation-manifest-list">
+          {manifest.operations.map((operation) => {
+            const presentation = operationKindLabels[operation.kind];
+            return (
+              <li key={operation.operationNumber} data-task-operation-kind={operation.kind}>
+                <span>{String(operation.operationNumber).padStart(2, "0")}</span>
+                <div>
+                  <strong>{presentation.title}</strong>
+                  <p>{presentation.summary}</p>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {manifest?.status === "candidate" &&
+      (confirmationStatus === "reviewing" || confirmationStatus === "confirming") ? (
+        <div
+          className="operation-manifest-confirmation"
+          data-task-operation-manifest-confirmation
+          role="group"
+          aria-labelledby="operation-manifest-confirmation-title"
+        >
+          <span>SECURITY CLAIM</span>
+          <strong id="operation-manifest-confirmation-title">
+            确认 {formatTaskNodeNumber(manifest.nodeNumber)} 的操作清单？
+          </strong>
+          <p>确认只建立后续路由与权限判断的输入证据；仍不会创建 Run 或调用工具。</p>
+          <div>
+            <button
+              type="button"
+              data-task-operation-manifest-confirm-cancel
+              disabled={confirmationStatus === "confirming"}
+              onClick={onCancelConfirmation}
+            >
+              返回审阅
+            </button>
+            <button
+              type="button"
+              data-task-operation-manifest-confirm-commit
+              disabled={confirmationStatus === "confirming"}
+              onClick={onConfirm}
+            >
+              {confirmationStatus === "confirming" ? "正在提交确认" : "确认操作清单"}
+            </button>
+          </div>
+        </div>
+      ) : manifest?.status === "candidate" ? (
+        <button
+          type="button"
+          className="operation-manifest-confirm-button"
+          data-task-operation-manifest-confirm
+          disabled={!canBeginConfirmation}
+          onClick={onBeginConfirmation}
+        >
+          审阅并确认清单
+        </button>
+      ) : null}
+      {manifest?.status === "confirmed" ? (
+        <div className="operation-manifest-locked">
+          <span aria-hidden="true">✓</span>
+          <p>清单已成为权威输入；智能路由和权限门禁尚未开放。</p>
+        </div>
+      ) : null}
+      {scheduledNodeNumber !== undefined ? (
+        <button
+          type="button"
+          className="operation-manifest-generate-button"
+          data-task-operation-manifest-generate
+          disabled={!canGenerate}
+          onClick={onGenerate}
+        >
+          {generationStatus === "generating"
+            ? "高级档位正在识别"
+            : manifest === null
+              ? "生成操作清单"
+              : "重新生成操作清单"}
+        </button>
+      ) : null}
+      <span
+        className="operation-manifest-feedback"
+        data-task-operation-manifest-status={generationStatus}
+        data-task-operation-manifest-confirmation-status={confirmationStatus}
+        aria-live="polite"
+      >
+        {taskOperationManifestFeedback(generationStatus, confirmationStatus, manifest?.status)}
+      </span>
     </section>
   );
 }
@@ -1617,6 +1988,54 @@ export function taskGraphMaterializationFeedback(
       return "Task 或 confirmed Plan 已变化；已刷新权威详情，请重新核对。";
     case "unavailable":
       return "结果当前未知；请重启并核对 DAG 修订号，不要盲目重复创建。";
+  }
+}
+
+export function taskOperationManifestFeedback(
+  generationStatus:
+    "idle" | "generating" | DesktopProjectTaskOperationManifestGenerationResult["status"],
+  confirmationStatus:
+    | "idle"
+    | "reviewing"
+    | "confirming"
+    | DesktopProjectTaskOperationManifestConfirmationResult["status"],
+  manifestStatus: "candidate" | "confirmed" | undefined,
+): string {
+  if (confirmationStatus === "reviewing") {
+    return "请逐项核对操作边界；仍需第二次明确确认。";
+  }
+  if (confirmationStatus === "confirming") {
+    return "正在复核 Task、DAG、节点与清单状态栅栏并提交确认。";
+  }
+  if (confirmationStatus === "confirmed") {
+    return "操作清单已确认；模型路由、权限决策与执行仍未开放。";
+  }
+  if (confirmationStatus === "existing") {
+    return "相同确认命令已经落盘，已重新读取当前权威清单。";
+  }
+  if (confirmationStatus === "conflict") {
+    return "节点或清单已经变化；已刷新权威详情，请重新审阅。";
+  }
+  if (confirmationStatus === "unavailable") {
+    return "确认结果未知；请重启核对清单版本，不要盲目重复提交。";
+  }
+  switch (generationStatus) {
+    case "generating":
+      return "高级档位正在只读识别操作类别；不会修改文件或访问网络。";
+    case "generated":
+      return "候选清单已持久化；必须人工确认后才能成为后续路由输入。";
+    case "existing":
+      return "相同生成命令已经落盘，已重新读取当前节点清单。";
+    case "conflict":
+      return "分析期间 Task、DAG、路由或模型目录已变化；结果未写入。";
+    case "unavailable":
+      return "生成结果未知；请重启核对清单版本，不要盲目重复生成。";
+    case "idle":
+      return manifestStatus === "confirmed"
+        ? "已确认清单只是一项权威证据；EXECUTION LOCKED。"
+        : manifestStatus === "candidate"
+          ? "候选清单尚未确认，也不会触发智能路由或权限判断。"
+          : "生成会使用高级档位进行一次只读、禁网分析。";
   }
 }
 
@@ -1943,6 +2362,12 @@ function desktopTaskApi(): Readonly<{
   materializeProjectTaskGraph(
     input: DesktopProjectTaskGraphMaterialization,
   ): Promise<DesktopProjectTaskGraphMaterializationResult>;
+  generateProjectTaskOperationManifest(
+    input: DesktopProjectTaskOperationManifestGeneration,
+  ): Promise<DesktopProjectTaskOperationManifestGenerationResult>;
+  confirmProjectTaskOperationManifest(
+    input: DesktopProjectTaskOperationManifestConfirmation,
+  ): Promise<DesktopProjectTaskOperationManifestConfirmationResult>;
 }> {
   return (
     globalThis as unknown as {
@@ -1966,6 +2391,12 @@ function desktopTaskApi(): Readonly<{
         materializeProjectTaskGraph(
           input: DesktopProjectTaskGraphMaterialization,
         ): Promise<DesktopProjectTaskGraphMaterializationResult>;
+        generateProjectTaskOperationManifest(
+          input: DesktopProjectTaskOperationManifestGeneration,
+        ): Promise<DesktopProjectTaskOperationManifestGenerationResult>;
+        confirmProjectTaskOperationManifest(
+          input: DesktopProjectTaskOperationManifestConfirmation,
+        ): Promise<DesktopProjectTaskOperationManifestConfirmationResult>;
       }>;
     }
   ).codexHarness;

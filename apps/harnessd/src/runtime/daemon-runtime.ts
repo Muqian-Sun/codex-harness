@@ -28,6 +28,7 @@ import type { ProjectRegistryService } from "./project-registry-service.js";
 import type { ProjectRoutingBindingService } from "./project-routing-binding-service.js";
 import type { ProjectTaskService } from "./project-task-service.js";
 import type { CandidatePlanGenerationService } from "./candidate-plan-generation-service.js";
+import type { CandidateOperationManifestGenerationService } from "./candidate-operation-manifest-generation-service.js";
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -101,6 +102,8 @@ export class DaemonRuntime {
   readonly #projectRoutingBindingService: ProjectRoutingBindingService | undefined;
   readonly #projectTaskService: ProjectTaskService | undefined;
   readonly #candidatePlanGenerationService: CandidatePlanGenerationService | undefined;
+  readonly #candidateOperationManifestGenerationService:
+    CandidateOperationManifestGenerationService | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
@@ -134,6 +137,7 @@ export class DaemonRuntime {
         projectRoutingBindingService?: ProjectRoutingBindingService;
         projectTaskService?: ProjectTaskService;
         candidatePlanGenerationService?: CandidatePlanGenerationService;
+        candidateOperationManifestGenerationService?: CandidateOperationManifestGenerationService;
         stateStore?: DaemonStateStore;
         workerManager?: AppServerWorkerManager;
       }>,
@@ -150,6 +154,8 @@ export class DaemonRuntime {
     this.#projectRoutingBindingService = config.projectRoutingBindingService;
     this.#projectTaskService = config.projectTaskService;
     this.#candidatePlanGenerationService = config.candidatePlanGenerationService;
+    this.#candidateOperationManifestGenerationService =
+      config.candidateOperationManifestGenerationService;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
@@ -225,6 +231,12 @@ export class DaemonRuntime {
           : new (
               await import("./candidate-plan-generation-service.js")
             ).CandidatePlanGenerationService(config.stateStore, config.workerManager);
+      const candidateOperationManifestGenerationService =
+        config.stateStore === undefined || config.workerManager === undefined
+          ? undefined
+          : new (
+              await import("./candidate-operation-manifest-generation-service.js")
+            ).CandidateOperationManifestGenerationService(config.stateStore, config.workerManager);
       runtime = new DaemonRuntime(endpoint, {
         startupCapability: config.startupCapability,
         serverVersion: config.serverVersion,
@@ -237,6 +249,9 @@ export class DaemonRuntime {
         ...(projectRoutingBindingService === undefined ? {} : { projectRoutingBindingService }),
         ...(projectTaskService === undefined ? {} : { projectTaskService }),
         ...(candidatePlanGenerationService === undefined ? {} : { candidatePlanGenerationService }),
+        ...(candidateOperationManifestGenerationService === undefined
+          ? {}
+          : { candidateOperationManifestGenerationService }),
       });
     } catch {
       await Promise.all([
@@ -355,6 +370,10 @@ export class DaemonRuntime {
       confirmProjectTaskCandidatePlan: (params) => this.#confirmProjectTaskCandidatePlan(params),
       materializeProjectTaskGraph: (params) => this.#materializeProjectTaskGraph(params),
       generateProjectTaskCandidatePlan: (params) => this.#generateProjectTaskCandidatePlan(params),
+      generateProjectTaskOperationManifest: (params) =>
+        this.#generateProjectTaskOperationManifest(params),
+      confirmProjectTaskOperationManifest: (params) =>
+        this.#confirmProjectTaskOperationManifest(params),
       readRoutingConfiguration: () => this.#readRoutingConfiguration(),
       setRoutingConfiguration: (params) => this.#setRoutingConfiguration(params),
     });
@@ -629,6 +648,32 @@ export class DaemonRuntime {
     }
   }
 
+  async #generateProjectTaskOperationManifest(params: unknown): Promise<unknown> {
+    const service = this.#candidateOperationManifestGenerationService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return await service.generate(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(
+        isCandidateOperationManifestGenerationConflict(error) ? "conflict" : "unavailable",
+      );
+    }
+  }
+
+  #confirmProjectTaskOperationManifest(params: unknown): unknown {
+    const service = this.#projectTaskService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.confirmOperationManifest(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(isProjectTaskConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
   #setRoutingConfiguration(params: unknown): unknown {
     const service = this.#routingConfigurationService;
     if (service === undefined) {
@@ -816,6 +861,15 @@ function isCandidatePlanGenerationConflict(error: unknown): boolean {
   return (
     error instanceof Error &&
     error.name === "CandidatePlanGenerationServiceError" &&
+    "code" in error &&
+    error.code === "conflict"
+  );
+}
+
+function isCandidateOperationManifestGenerationConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "CandidateOperationManifestGenerationServiceError" &&
     "code" in error &&
     error.code === "conflict"
   );

@@ -26,6 +26,8 @@ export type RpcDispatchContext = Readonly<{
   confirmProjectTaskCandidatePlan: (params: JsonValue) => unknown;
   materializeProjectTaskGraph: (params: JsonValue) => unknown;
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
+  generateProjectTaskOperationManifest?: (params: JsonValue) => unknown | Promise<unknown>;
+  confirmProjectTaskOperationManifest?: (params: JsonValue) => unknown;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -415,8 +417,54 @@ export function dispatchRpcRequest(
         : unavailable(request.id, "The Task graph materialization service is unavailable.");
     }
 
+    if (request.method === "task.operation_manifest.confirm_candidate") {
+      if (context.confirmProjectTaskOperationManifest === undefined) {
+        return unavailable(
+          request.id,
+          "The candidate operation manifest confirmation service is unavailable.",
+        );
+      }
+      let candidate: unknown;
+      try {
+        candidate = context.confirmProjectTaskOperationManifest(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(request.id, RPC_ERROR_CODES.conflict, "The Project Task changed."),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(
+          request.id,
+          "The candidate operation manifest confirmation service is unavailable.",
+        );
+      }
+      const decodedResult = decodeResponseResult(
+        "task.operation_manifest.confirm_candidate",
+        candidate,
+      );
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(
+            request.id,
+            "The candidate operation manifest confirmation service is unavailable.",
+          );
+    }
+
     if (request.method === "task.plan.generate_candidate") {
       return unavailable(request.id, "The candidate Plan generation service is unavailable.");
+    }
+
+    if (request.method === "task.operation_manifest.generate_candidate") {
+      return unavailable(
+        request.id,
+        "The candidate operation manifest generation service is unavailable.",
+      );
     }
 
     if (request.method === "routing.configuration.set") {
@@ -497,7 +545,21 @@ export async function dispatchRpcRequestAsync(
   request: RpcRequest,
   context: RpcDispatchContext,
 ): Promise<RpcDispatchResult> {
-  if (request.method !== "task.plan.generate_candidate" || context.closing) {
+  if (context.closing) {
+    return dispatchRpcRequest(request, context);
+  }
+  if (request.method === "task.operation_manifest.generate_candidate") {
+    const decodedParams = decodeRequestParams(request.method, request.params);
+    if (!decodedParams.ok || context.generateProjectTaskOperationManifest === undefined) {
+      return dispatchRpcRequest(request, context);
+    }
+    return await dispatchOperationManifestGeneration(
+      request.id,
+      decodedParams.value,
+      context.generateProjectTaskOperationManifest,
+    );
+  }
+  if (request.method !== "task.plan.generate_candidate") {
     return dispatchRpcRequest(request, context);
   }
   const decodedParams = decodeRequestParams(request.method, request.params);
@@ -509,6 +571,40 @@ export async function dispatchRpcRequestAsync(
     decodedParams.value,
     context.generateProjectTaskCandidatePlan,
   );
+}
+
+async function dispatchOperationManifestGeneration(
+  requestId: string,
+  params: JsonValue,
+  provider: NonNullable<RpcDispatchContext["generateProjectTaskOperationManifest"]>,
+): Promise<RpcDispatchResult> {
+  let candidate: unknown;
+  try {
+    candidate = await provider(params);
+  } catch (error: unknown) {
+    if (error instanceof RpcProviderError && error.code === "conflict") {
+      return {
+        envelope: rpcError(requestId, RPC_ERROR_CODES.conflict, "The Project Task changed."),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      };
+    }
+    return unavailable(
+      requestId,
+      "The candidate operation manifest generation service is unavailable.",
+    );
+  }
+  const decodedResult = decodeResponseResult(
+    "task.operation_manifest.generate_candidate",
+    candidate,
+  );
+  return decodedResult.ok
+    ? {
+        envelope: rpcResponse(requestId, decodedResult.value),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      }
+    : unavailable(requestId, "The candidate operation manifest generation service is unavailable.");
 }
 
 async function dispatchCandidatePlanGeneration(

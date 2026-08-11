@@ -924,6 +924,7 @@ describe("method contracts", () => {
           status: "pending",
         },
       ],
+      operationManifest: null,
       schedulePreview: { state: "dependency_eligible", nodeId: nodeOneId },
       topologicalOrder: [nodeOneId, nodeTwoId],
     } as const;
@@ -958,6 +959,107 @@ describe("method contracts", () => {
       }).ok,
     ).toBe(true);
     expect(decodeResponseResult("task.detail", detail).ok).toBe(true);
+    const manifestId = "00000000-0000-4000-8000-000000000799";
+    const operationOneId = "00000000-0000-4000-8000-00000000079a";
+    const operationTwoId = "00000000-0000-4000-8000-00000000079b";
+    const manifest = {
+      manifestId,
+      nodeId: nodeOneId,
+      stateVersion: 1,
+      status: "candidate",
+      operations: [
+        { operationId: operationOneId, kind: "inspect_workspace" },
+        { operationId: operationTwoId, kind: "modify_workspace" },
+      ],
+    } as const;
+    expect(
+      decodeResponseResult("task.detail", {
+        ...detail,
+        activeGraph: { ...activeGraph, operationManifest: manifest },
+      }).ok,
+    ).toBe(true);
+    for (const operationManifest of [
+      { ...manifest, nodeId: nodeTwoId },
+      { ...manifest, operations: [{ operationId: operationOneId, kind: "unknown" }] },
+      {
+        ...manifest,
+        operations: [
+          { operationId: operationOneId, kind: "answer" },
+          { operationId: operationTwoId, kind: "answer" },
+        ],
+      },
+    ] as const) {
+      expect(
+        decodeResponseResult("task.detail", {
+          ...detail,
+          activeGraph: { ...activeGraph, operationManifest },
+        }).ok,
+      ).toBe(false);
+    }
+    const generateManifestParams = {
+      commandId: "00000000-0000-4000-8000-00000000079e",
+      projectId,
+      taskId,
+      nodeId: nodeOneId,
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 4,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: requirementId,
+      confirmedPlanRevisionId: planId,
+      graphRevisionId: graphId,
+      expectedManifestStateVersion: 0,
+      previousManifestId: null,
+      expectedRoutingBindingVersion: 1,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: "00000000-0000-4000-8000-00000000079c",
+    } as const;
+    expect(
+      decodeRequestParams("task.operation_manifest.generate_candidate", generateManifestParams).ok,
+    ).toBe(true);
+    expect(
+      decodeResponseResult("task.operation_manifest.generate_candidate", {
+        schemaVersion: 1,
+        status: "generated",
+        taskId,
+        nodeId: nodeOneId,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeRequestParams("task.operation_manifest.generate_candidate", {
+        ...generateManifestParams,
+        expectedManifestStateVersion: 1,
+      }).ok,
+    ).toBe(false);
+    const confirmManifestParams = {
+      commandId: "00000000-0000-4000-8000-00000000079d",
+      projectId,
+      taskId,
+      nodeId: nodeOneId,
+      manifestId,
+      expectedTaskVersion: 4,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: requirementId,
+      confirmedPlanRevisionId: planId,
+      graphRevisionId: graphId,
+      expectedManifestStateVersion: 1,
+    } as const;
+    expect(
+      decodeRequestParams("task.operation_manifest.confirm_candidate", confirmManifestParams).ok,
+    ).toBe(true);
+    expect(
+      decodeResponseResult("task.operation_manifest.confirm_candidate", {
+        schemaVersion: 1,
+        status: "confirmed",
+        taskId,
+        nodeId: nodeOneId,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeRequestParams("task.operation_manifest.confirm_candidate", {
+        ...confirmManifestParams,
+        manifestId: nodeOneId,
+      }).ok,
+    ).toBe(false);
     for (const activeGraphVariant of [
       {
         ...activeGraph,
