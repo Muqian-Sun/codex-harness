@@ -924,6 +924,7 @@ describe("method contracts", () => {
           status: "pending",
         },
       ],
+      schedulePreview: { state: "dependency_eligible", nodeId: nodeOneId },
       topologicalOrder: [nodeOneId, nodeTwoId],
     } as const;
     const detail = {
@@ -957,6 +958,43 @@ describe("method contracts", () => {
       }).ok,
     ).toBe(true);
     expect(decodeResponseResult("task.detail", detail).ok).toBe(true);
+    for (const activeGraphVariant of [
+      {
+        ...activeGraph,
+        nodes: [{ ...activeGraph.nodes[0], status: "ready" }, activeGraph.nodes[1]],
+        schedulePreview: { state: "awaiting_claim", nodeId: nodeOneId },
+      },
+      {
+        ...activeGraph,
+        nodes: [{ ...activeGraph.nodes[0], status: "running" }, activeGraph.nodes[1]],
+        schedulePreview: { state: "busy", nodeId: nodeOneId },
+      },
+      {
+        ...activeGraph,
+        nodes: [
+          { ...activeGraph.nodes[0], status: "succeeded" },
+          { ...activeGraph.nodes[1], status: "pending" },
+        ],
+        schedulePreview: { state: "dependency_eligible", nodeId: nodeTwoId },
+      },
+      {
+        ...activeGraph,
+        nodes: [
+          { ...activeGraph.nodes[0], status: "succeeded" },
+          { ...activeGraph.nodes[1], status: "succeeded" },
+        ],
+        schedulePreview: { state: "complete" },
+      },
+      {
+        ...activeGraph,
+        nodes: [{ ...activeGraph.nodes[0], status: "failed" }, activeGraph.nodes[1]],
+        schedulePreview: { state: "blocked", blockerNodeIds: [nodeOneId] },
+      },
+    ] as const) {
+      expect(
+        decodeResponseResult("task.detail", { ...detail, activeGraph: activeGraphVariant }).ok,
+      ).toBe(true);
+    }
     for (const invalid of [
       { ...params, expectedTaskVersion: 0 },
       { ...params, confirmedPlanRevisionId: requirementId },
@@ -995,6 +1033,46 @@ describe("method contracts", () => {
         activeGraph: {
           ...activeGraph,
           nodes: [activeGraph.nodes[0], { ...activeGraph.nodes[1], dependsOnNodeIds: [nodeTwoId] }],
+        },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          schedulePreview: { state: "dependency_eligible", nodeId: nodeTwoId },
+        },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          schedulePreview: { state: "blocked", blockerNodeIds: [nodeOneId] },
+        },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          schedulePreview: { state: "complete" },
+        },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          nodes: [activeGraph.nodes[0], { ...activeGraph.nodes[1], status: "ready" }],
+          schedulePreview: { state: "awaiting_claim", nodeId: nodeTwoId },
+        },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          nodes: [
+            { ...activeGraph.nodes[0], status: "running" },
+            { ...activeGraph.nodes[1], status: "running" },
+          ],
+          schedulePreview: { state: "busy", nodeId: nodeOneId },
         },
       },
     ]) {

@@ -6,7 +6,7 @@
 Electron main → Harness daemon → SQLite 状态恢复 + Codex App Server worker → 完整模型目录 + 去敏账户快照
 ```
 
-界面当前显示这条链路的启动状态，并在就绪后持续显示去敏的当前账户观察、首批可见模型、已注册 Project、默认三级路由配置和每个首屏 Project 的路由绑定状态。用户可以通过原生目录选择器注册工作区，明确配置 `fast`、`standard`、`deep` 的模型与 reasoning effort，再把 Project 显式绑定到该默认路由配置；绑定完成后，还可以为该 Project 创建持久 Task，查看和修订当前 Requirement，使用 `deep` 档位生成只读候选计划，在二次确认后把它设为权威 confirmed Plan，再以独立操作创建持久 Task Node/DAG。这些状态都会写入 `state/harness.db` 并在桌面重启后恢复。节点调度、Run、审批/证据、thread/turn、自动任务分类和智能路由执行尚未开放，不能把“就绪”“已确认计划”或“已有 DAG”理解为任务已经可执行。
+界面当前显示这条链路的启动状态，并在就绪后持续显示去敏的当前账户观察、首批可见模型、已注册 Project、默认三级路由配置和每个首屏 Project 的路由绑定状态。用户可以通过原生目录选择器注册工作区，明确配置 `fast`、`standard`、`deep` 的模型与 reasoning effort，再把 Project 显式绑定到该默认路由配置；绑定完成后，还可以为该 Project 创建持久 Task，查看和修订当前 Requirement，使用 `deep` 档位生成只读候选计划，在二次确认后把它设为权威 confirmed Plan，再以独立操作创建持久 Task Node/DAG。Harness 会从权威 DAG 派生只读串行调度预览，说明下一依赖合格节点或尚未满足的门禁；这些状态都会写入 `state/harness.db` 并在桌面重启后恢复。节点状态流转、Run、审批/证据、thread/turn、自动任务分类和智能路由执行尚未开放，不能把“就绪”“已确认计划”“已有 DAG”或“依赖合格”理解为任务已经可执行。
 
 ## 前置条件
 
@@ -69,7 +69,7 @@ Task 详情读取同时携带 Project ID 与 Task ID；daemon 只在 Project 已
 
 candidate Plan 生成只在 Project 绑定默认路由、`deep` 目标当前可用且 Requirement 没有未保存草稿时开放；它使用固定只读、禁网分析，不授予执行权限。确认采用两步操作：先点“确认此计划”，再阅读影响说明并点“确认并设为权威计划”。Renderer 只回传页面所见 Task version 和 candidate Plan 修订号；main 重读隐藏 UUID 后提交，daemon 最终复核 Task 归属、ownership、Requirement 和候选修订。若 Task 已变化则只刷新详情并要求重新审阅；结果未知时不自动重放。确认会生成新的 confirmed Plan Revision，并在存在 active graph 时使旧 DAG 失效，但不会创建新 DAG、Run、工具调用或权限；界面会先显示 `CONFIRMED PLAN / WAITING FOR DAG` 与 `EXECUTION LOCKED`。
 
-只有当前没有 candidate 和 active Graph、confirmed Plan 仍绑定 active Requirement、页面没有未保存草稿且同一 Task 没有其他写入时，“创建任务节点与 DAG”才可用。Renderer 只提交页面所见 Task version 与 confirmed Plan 修订号；main 重读隐藏 fence，daemon 再为每个 confirmed step 生成一个稳定节点，复制标题、描述和验收条件，并按步骤顺序建立保守串行依赖。所有节点原子初始化为 `pending`，界面显示 `ACTIVE DAG / EXECUTION LOCKED`、Graph 修订号、节点和依赖；该操作不调用模型、不生成 Run、不把节点置为 `ready`，也不授予任何工具权限。冲突只刷新当前权威详情，未知结果不自动重放；重启后从 SQLite 恢复同一 Graph Revision。
+只有当前没有 candidate 和 active Graph、confirmed Plan 仍绑定 active Requirement、页面没有未保存草稿且同一 Task 没有其他写入时，“创建任务节点与 DAG”才可用。Renderer 只提交页面所见 Task version 与 confirmed Plan 修订号；main 重读隐藏 fence，daemon 再为每个 confirmed step 生成一个稳定节点，复制标题、描述和验收条件，并按步骤顺序建立保守串行依赖。所有节点原子初始化为 `pending`，界面显示 `ACTIVE DAG / EXECUTION LOCKED`、Graph 修订号、节点和依赖，并在 `SERIAL SCHEDULER` 面板显示 `dependency_eligible`、`awaiting_claim`、`busy`、`blocked` 或 `complete` 的只读派生结果。`dependency_eligible` 只证明节点依赖已完成，不等于 `ready`，也不代表审批、路由、执行权限或验收证据已经满足；该操作不调用模型、不生成 Run、不改变节点状态，也不授予任何工具权限。预览若观察到多个 ready/running、ready 与 running 并存或活动节点依赖未完成，会保守返回 `blocked`。冲突只刷新当前权威详情，未知结果不自动重放；重启后从 SQLite 恢复同一 Graph Revision，并重新派生相同预览。
 
 ## Electron 首次安装与代理
 
@@ -89,5 +89,5 @@ ELECTRON_GET_USE_PROXY=1 pnpm desktop:start
 - 模型主动分页和刷新。
 - Project 主动分页、编辑、重命名和删除，以及物理目录身份复核、macOS security-scoped bookmark 与 Windows 路径授权恢复。
 - 任意 Project 路由 profile 管理、自动任务分类、执行前复核和实际模型路由执行。
-- Task 标题编辑、删除、移动、主动分页，以及节点调度/Run、对话、审批、证据和路由执行 UI。
+- Task 标题编辑、删除、移动、主动分页，以及节点状态推进/Run、对话、审批、证据和路由执行 UI。
 - 数据库导出、备份、恢复、重置或迁移操作 UI。

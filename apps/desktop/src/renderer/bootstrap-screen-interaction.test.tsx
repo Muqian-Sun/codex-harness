@@ -524,6 +524,7 @@ describe("Project Task interaction", () => {
       confirmedPlan: { ...plan, revisionNumber: 1 },
       activeGraph: {
         revisionNumber: 1,
+        schedulePreview: { state: "dependency_eligible" as const, nodeNumber: 1 },
         nodes: [
           {
             nodeNumber: 1,
@@ -658,6 +659,7 @@ describe("Project Task interaction", () => {
     };
     const graph = {
       revisionNumber: 1,
+      schedulePreview: { state: "dependency_eligible" as const, nodeNumber: 1 },
       nodes: [
         {
           nodeNumber: 1,
@@ -765,8 +767,24 @@ describe("Project Task interaction", () => {
     const graphElement = findElementByType(active, TaskGraph);
     expect(graphElement?.props.graph).toBe(graph);
     expect(JSON.stringify(TaskGraph({ graph }))).toContain("EXECUTION LOCKED");
+    expect(JSON.stringify(TaskGraph({ graph }))).toContain("T01 的依赖已满足");
+    expect(JSON.stringify(TaskGraph({ graph }))).toContain("审批、路由与证据门禁尚未开放");
     expect(JSON.stringify(TaskGraph({ graph }))).toContain("起始节点");
     expect(JSON.stringify(TaskGraph({ graph }))).toContain("No Run is created.");
+    for (const [schedulePreview, expectedHeadline, expectedExplanation] of [
+      [
+        { state: "awaiting_claim" as const, nodeNumber: 1 },
+        "T01 等待串行领取",
+        "当前产品仍不创建 Run",
+      ],
+      [{ state: "busy" as const, nodeNumber: 1 }, "T01 正在运行", "不会同时领取第二个节点"],
+      [{ state: "blocked" as const, blockerNodeNumbers: [1] }, "阻塞于 T01", "不会绕过依赖"],
+      [{ state: "complete" as const }, "DAG 已完成", "所有节点的权威状态均为 succeeded"],
+    ] as const) {
+      const rendered = JSON.stringify(TaskGraph({ graph: { ...graph, schedulePreview } }));
+      expect(rendered).toContain(expectedHeadline);
+      expect(rendered).toContain(expectedExplanation);
+    }
     expect(taskGraphMaterializationFeedback("idle", false)).toContain("不调用模型");
     expect(taskGraphMaterializationFeedback("idle", true)).toContain("pending");
     expect(taskGraphMaterializationFeedback("materializing", false)).toContain("原子提交");

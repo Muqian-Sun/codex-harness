@@ -1010,6 +1010,7 @@ describe("desktop application controller", () => {
                   status: "pending" as const,
                 },
               ],
+              schedulePreview: { state: "dependency_eligible" as const, nodeId },
               topologicalOrder: [nodeId],
             },
     });
@@ -1182,6 +1183,7 @@ describe("desktop application controller", () => {
         stage: "active_graph",
         activeGraph: {
           revisionNumber: 1,
+          schedulePreview: { state: "dependency_eligible", nodeNumber: 1 },
           nodes: [
             {
               nodeNumber: 1,

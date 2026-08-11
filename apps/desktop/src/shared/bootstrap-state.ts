@@ -206,9 +206,16 @@ export type DesktopProjectTaskGraphNode = Readonly<{
   dependsOnNodeNumbers: readonly number[];
   status: DesktopProjectTaskGraphNodeStatus;
 }>;
+export type DesktopProjectTaskSchedulePreview =
+  | Readonly<{ state: "dependency_eligible"; nodeNumber: number }>
+  | Readonly<{ state: "awaiting_claim"; nodeNumber: number }>
+  | Readonly<{ state: "busy"; nodeNumber: number }>
+  | Readonly<{ state: "blocked"; blockerNodeNumbers: readonly number[] }>
+  | Readonly<{ state: "complete" }>;
 export type DesktopProjectTaskGraph = Readonly<{
   revisionNumber: number;
   nodes: readonly DesktopProjectTaskGraphNode[];
+  schedulePreview: DesktopProjectTaskSchedulePreview;
 }>;
 export type DesktopProjectTaskDetail = Readonly<{
   projectId: string;
@@ -1669,6 +1676,7 @@ function projectDesktopProjectTaskGraph(
     "nodes",
     "revisionId",
     "revisionNumber",
+    "schedulePreview",
     "topologicalOrder",
   ]);
   const confirmedPlan = exactRecord(confirmedPlanInput, [
@@ -1778,9 +1786,17 @@ function projectDesktopProjectTaskGraph(
   ) {
     return undefined;
   }
+  const schedulePreview = projectDesktopProjectTaskSchedule(graph.schedulePreview, orderIndex);
+  if (
+    schedulePreview === undefined ||
+    !schedulePreviewMatchesDesktopGraph(schedulePreview, projected as DesktopProjectTaskGraphNode[])
+  ) {
+    return undefined;
+  }
   return Object.freeze({
     revisionNumber: graph.revisionNumber,
     nodes: Object.freeze(projected as DesktopProjectTaskGraphNode[]),
+    schedulePreview,
   });
 }
 
@@ -1791,7 +1807,7 @@ function decodeProjectedDesktopTaskGraph(
   if (input === null) {
     return null;
   }
-  const graph = exactRecord(input, ["nodes", "revisionNumber"]);
+  const graph = exactRecord(input, ["nodes", "revisionNumber", "schedulePreview"]);
   if (
     graph === undefined ||
     confirmedPlan === null ||
@@ -1856,10 +1872,140 @@ function decodeProjectedDesktopTaskGraph(
   ) {
     return undefined;
   }
+  const schedulePreview = decodeProjectedDesktopTaskSchedule(graph.schedulePreview);
+  if (
+    schedulePreview === undefined ||
+    !schedulePreviewMatchesDesktopGraph(schedulePreview, nodes as DesktopProjectTaskGraphNode[])
+  ) {
+    return undefined;
+  }
   return Object.freeze({
     revisionNumber: graph.revisionNumber,
     nodes: Object.freeze(nodes as DesktopProjectTaskGraphNode[]),
+    schedulePreview,
   });
+}
+
+function projectDesktopProjectTaskSchedule(
+  input: unknown,
+  orderIndex: ReadonlyMap<unknown, number>,
+): DesktopProjectTaskSchedulePreview | undefined {
+  const terminal = exactRecord(input, ["state"]);
+  if (terminal?.state === "complete") {
+    return Object.freeze({ state: "complete" });
+  }
+  const node = exactRecord(input, ["nodeId", "state"]);
+  if (
+    node !== undefined &&
+    ["dependency_eligible", "awaiting_claim", "busy"].includes(String(node.state))
+  ) {
+    const index = orderIndex.get(node.nodeId);
+    return index === undefined
+      ? undefined
+      : Object.freeze({
+          state: node.state as "dependency_eligible" | "awaiting_claim" | "busy",
+          nodeNumber: index + 1,
+        });
+  }
+  const blocked = exactRecord(input, ["blockerNodeIds", "state"]);
+  if (
+    blocked?.state !== "blocked" ||
+    !Array.isArray(blocked.blockerNodeIds) ||
+    blocked.blockerNodeIds.length < 1 ||
+    blocked.blockerNodeIds.length > MAX_TASK_PLAN_STEPS ||
+    new Set(blocked.blockerNodeIds).size !== blocked.blockerNodeIds.length
+  ) {
+    return undefined;
+  }
+  const blockerNodeNumbers = blocked.blockerNodeIds.map((nodeId) => {
+    const index = orderIndex.get(nodeId);
+    return index === undefined ? undefined : index + 1;
+  });
+  return blockerNodeNumbers.some((nodeNumber) => nodeNumber === undefined)
+    ? undefined
+    : Object.freeze({
+        state: "blocked",
+        blockerNodeNumbers: Object.freeze(blockerNodeNumbers as number[]),
+      });
+}
+
+function decodeProjectedDesktopTaskSchedule(
+  input: unknown,
+): DesktopProjectTaskSchedulePreview | undefined {
+  const terminal = exactRecord(input, ["state"]);
+  if (terminal?.state === "complete") {
+    return Object.freeze({ state: "complete" });
+  }
+  const node = exactRecord(input, ["nodeNumber", "state"]);
+  if (
+    node !== undefined &&
+    ["dependency_eligible", "awaiting_claim", "busy"].includes(String(node.state)) &&
+    isPositiveSafeInteger(node.nodeNumber)
+  ) {
+    return Object.freeze({
+      state: node.state as "dependency_eligible" | "awaiting_claim" | "busy",
+      nodeNumber: node.nodeNumber,
+    });
+  }
+  const blocked = exactRecord(input, ["blockerNodeNumbers", "state"]);
+  if (
+    blocked?.state !== "blocked" ||
+    !Array.isArray(blocked.blockerNodeNumbers) ||
+    blocked.blockerNodeNumbers.length < 1 ||
+    blocked.blockerNodeNumbers.length > MAX_TASK_PLAN_STEPS ||
+    blocked.blockerNodeNumbers.some((nodeNumber) => !isPositiveSafeInteger(nodeNumber)) ||
+    new Set(blocked.blockerNodeNumbers).size !== blocked.blockerNodeNumbers.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    state: "blocked",
+    blockerNodeNumbers: Object.freeze([...blocked.blockerNodeNumbers] as number[]),
+  });
+}
+
+function schedulePreviewMatchesDesktopGraph(
+  preview: DesktopProjectTaskSchedulePreview,
+  nodes: readonly DesktopProjectTaskGraphNode[],
+): boolean {
+  const ready = nodes.filter((node) => node.status === "ready");
+  const running = nodes.filter((node) => node.status === "running");
+  const dependenciesSucceeded = (node: DesktopProjectTaskGraphNode) =>
+    node.dependsOnNodeNumbers.every(
+      (dependencyNumber) => nodes[dependencyNumber - 1]?.status === "succeeded",
+    );
+  if (
+    ready.length > 1 ||
+    running.length > 1 ||
+    (ready.length > 0 && running.length > 0) ||
+    [...ready, ...running].some((node) => !dependenciesSucceeded(node))
+  ) {
+    return false;
+  }
+  if (running[0] !== undefined) {
+    return preview.state === "busy" && preview.nodeNumber === running[0].nodeNumber;
+  }
+  if (ready[0] !== undefined) {
+    return preview.state === "awaiting_claim" && preview.nodeNumber === ready[0].nodeNumber;
+  }
+  const candidate = nodes.find((node) => node.status === "pending" && dependenciesSucceeded(node));
+  if (candidate !== undefined) {
+    return preview.state === "dependency_eligible" && preview.nodeNumber === candidate.nodeNumber;
+  }
+  if (nodes.every((node) => node.status === "succeeded")) {
+    return preview.state === "complete";
+  }
+  const blockerNodeNumbers = nodes
+    .filter((node) => ["blocked", "cancelled", "failed", "interrupted"].includes(node.status))
+    .map((node) => node.nodeNumber);
+  return (
+    preview.state === "blocked" &&
+    blockerNodeNumbers.length > 0 &&
+    blockerNodeNumbers.length === preview.blockerNodeNumbers.length &&
+    blockerNodeNumbers.every(
+      (nodeNumber, index) => nodeNumber === preview.blockerNodeNumbers[index],
+    )
+  );
 }
 
 function planMatchesRequirement(plan: unknown, requirement: unknown): boolean {

@@ -1389,6 +1389,11 @@ export function TaskGraph({
         </div>
         <small>EXECUTION LOCKED · {graph.nodes.length} NODES</small>
       </header>
+      <div className="task-schedule-preview" data-task-schedule-state={graph.schedulePreview.state}>
+        <span>SERIAL SCHEDULER</span>
+        <strong>{taskScheduleHeadline(graph.schedulePreview)}</strong>
+        <small>{taskScheduleExplanation(graph.schedulePreview)}</small>
+      </div>
       <ol>
         {graph.nodes.map((node) => (
           <li key={node.nodeNumber} data-task-node-status={node.status}>
@@ -1420,6 +1425,47 @@ export function TaskGraph({
       </ol>
     </section>
   );
+}
+
+function taskScheduleHeadline(
+  preview: NonNullable<DesktopProjectTaskDetail["activeGraph"]>["schedulePreview"],
+): string {
+  if (preview.state === "complete") {
+    return "DAG 已完成";
+  }
+  if (preview.state === "blocked") {
+    return `阻塞于 ${preview.blockerNodeNumbers.map(formatTaskNodeNumber).join("、")}`;
+  }
+  const node = formatTaskNodeNumber(preview.nodeNumber);
+  if (preview.state === "busy") {
+    return `${node} 正在运行`;
+  }
+  if (preview.state === "awaiting_claim") {
+    return `${node} 等待串行领取`;
+  }
+  return `${node} 的依赖已满足`;
+}
+
+function taskScheduleExplanation(
+  preview: NonNullable<DesktopProjectTaskDetail["activeGraph"]>["schedulePreview"],
+): string {
+  if (preview.state === "dependency_eligible") {
+    return "仅完成依赖预检；审批、路由与证据门禁尚未开放。";
+  }
+  if (preview.state === "awaiting_claim") {
+    return "节点已就绪，但当前产品仍不创建 Run。";
+  }
+  if (preview.state === "busy") {
+    return "串行策略不会同时领取第二个节点。";
+  }
+  if (preview.state === "blocked") {
+    return "必须先处理终止或阻塞节点，调度器不会绕过依赖。";
+  }
+  return "所有节点的权威状态均为 succeeded。";
+}
+
+function formatTaskNodeNumber(nodeNumber: number): string {
+  return `T${String(nodeNumber).padStart(2, "0")}`;
 }
 
 export function RequirementItems({

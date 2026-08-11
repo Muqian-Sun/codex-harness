@@ -500,12 +500,41 @@ const TaskGraphNodeSchema = z
   })
   .strict();
 
+const TaskSchedulePreviewSchema = z.discriminatedUnion("state", [
+  z
+    .object({
+      state: z.literal("dependency_eligible"),
+      nodeId: z.string().regex(UUID_PATTERN),
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal("awaiting_claim"),
+      nodeId: z.string().regex(UUID_PATTERN),
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal("busy"),
+      nodeId: z.string().regex(UUID_PATTERN),
+    })
+    .strict(),
+  z
+    .object({
+      state: z.literal("blocked"),
+      blockerNodeIds: z.array(z.string().regex(UUID_PATTERN)).min(1).max(MAX_TASK_PLAN_STEPS),
+    })
+    .strict(),
+  z.object({ state: z.literal("complete") }).strict(),
+]);
+
 const TaskGraphRevisionSchema = z
   .object({
     revisionId: z.string().regex(UUID_PATTERN),
     revisionNumber: NonNegativeSafeIntegerSchema.min(1),
     basedOnPlanRevisionId: z.string().regex(UUID_PATTERN),
     nodes: z.array(TaskGraphNodeSchema).min(1).max(MAX_TASK_PLAN_STEPS),
+    schedulePreview: TaskSchedulePreviewSchema,
     topologicalOrder: z.array(z.string().regex(UUID_PATTERN)).min(1).max(MAX_TASK_PLAN_STEPS),
   })
   .strict()
@@ -569,7 +598,65 @@ const TaskGraphRevisionSchema = z
         });
       }
     });
+    if (!schedulePreviewMatchesGraph(value.schedulePreview, value.nodes, value.topologicalOrder)) {
+      context.addIssue({
+        code: "custom",
+        path: ["schedulePreview"],
+        message: "Task schedule preview must match the authoritative graph state",
+      });
+    }
   });
+
+function schedulePreviewMatchesGraph(
+  preview: z.infer<typeof TaskSchedulePreviewSchema>,
+  nodes: readonly z.infer<typeof TaskGraphNodeSchema>[],
+  topologicalOrder: readonly string[],
+): boolean {
+  const nodesById = new Map(nodes.map((node) => [node.nodeId, node]));
+  const orderedNodes = topologicalOrder.map((nodeId) => nodesById.get(nodeId));
+  if (orderedNodes.some((node) => node === undefined)) {
+    return false;
+  }
+  const ordered = orderedNodes as readonly z.infer<typeof TaskGraphNodeSchema>[];
+  const ready = ordered.filter((node) => node.status === "ready");
+  const running = ordered.filter((node) => node.status === "running");
+  const dependenciesSucceeded = (node: z.infer<typeof TaskGraphNodeSchema>) =>
+    node.dependsOnNodeIds.every(
+      (dependencyId) => nodesById.get(dependencyId)?.status === "succeeded",
+    );
+  if (
+    ready.length > 1 ||
+    running.length > 1 ||
+    (ready.length > 0 && running.length > 0) ||
+    [...ready, ...running].some((node) => !dependenciesSucceeded(node))
+  ) {
+    return false;
+  }
+  if (running[0] !== undefined) {
+    return preview.state === "busy" && preview.nodeId === running[0].nodeId;
+  }
+  if (ready[0] !== undefined) {
+    return preview.state === "awaiting_claim" && preview.nodeId === ready[0].nodeId;
+  }
+  const candidate = ordered.find(
+    (node) => node.status === "pending" && dependenciesSucceeded(node),
+  );
+  if (candidate !== undefined) {
+    return preview.state === "dependency_eligible" && preview.nodeId === candidate.nodeId;
+  }
+  if (ordered.every((node) => node.status === "succeeded")) {
+    return preview.state === "complete";
+  }
+  const blockerNodeIds = ordered
+    .filter((node) => ["blocked", "cancelled", "failed", "interrupted"].includes(node.status))
+    .map((node) => node.nodeId);
+  return (
+    preview.state === "blocked" &&
+    blockerNodeIds.length > 0 &&
+    blockerNodeIds.length === preview.blockerNodeIds.length &&
+    blockerNodeIds.every((nodeId, index) => nodeId === preview.blockerNodeIds[index])
+  );
+}
 
 const TaskSummarySchema = z
   .object({
@@ -957,11 +1044,18 @@ export type HarnessTaskGraphNode = Readonly<{
   dependsOnNodeIds: readonly string[];
   status: HarnessTaskNodeStatus;
 }>;
+export type HarnessTaskSchedulePreview =
+  | Readonly<{ state: "dependency_eligible"; nodeId: string }>
+  | Readonly<{ state: "awaiting_claim"; nodeId: string }>
+  | Readonly<{ state: "busy"; nodeId: string }>
+  | Readonly<{ state: "blocked"; blockerNodeIds: readonly string[] }>
+  | Readonly<{ state: "complete" }>;
 export type HarnessTaskGraphRevision = Readonly<{
   revisionId: string;
   revisionNumber: number;
   basedOnPlanRevisionId: string;
   nodes: readonly HarnessTaskGraphNode[];
+  schedulePreview: HarnessTaskSchedulePreview;
   topologicalOrder: readonly string[];
 }>;
 export type HarnessTaskDetailParams = Readonly<{

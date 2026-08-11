@@ -731,6 +731,7 @@ describe("desktop bootstrap state", () => {
             status: "pending",
           },
         ],
+        schedulePreview: { state: "dependency_eligible", nodeId },
         topologicalOrder: [nodeId],
       },
     };
@@ -739,6 +740,7 @@ describe("desktop bootstrap state", () => {
       stage: "active_graph",
       activeGraph: {
         revisionNumber: 1,
+        schedulePreview: { state: "dependency_eligible", nodeNumber: 1 },
         nodes: [
           {
             nodeNumber: 1,
@@ -751,6 +753,30 @@ describe("desktop bootstrap state", () => {
     });
     expect(JSON.stringify(graphDetail)).not.toContain(graphId);
     expect(JSON.stringify(graphDetail)).not.toContain(nodeId);
+    for (const [status, schedulePreview, expectedPreview] of [
+      ["ready", { state: "awaiting_claim", nodeId }, { state: "awaiting_claim", nodeNumber: 1 }],
+      ["running", { state: "busy", nodeId }, { state: "busy", nodeNumber: 1 }],
+      ["succeeded", { state: "complete" }, { state: "complete" }],
+      [
+        "failed",
+        { state: "blocked", blockerNodeIds: [nodeId] },
+        { state: "blocked", blockerNodeNumbers: [1] },
+      ],
+    ] as const) {
+      const projected = projectDesktopProjectTaskDetail(
+        {
+          ...graphRaw,
+          activeGraph: {
+            ...graphRaw.activeGraph,
+            nodes: [{ ...graphRaw.activeGraph.nodes[0], status }],
+            schedulePreview,
+          },
+        },
+        PROJECT.projectId,
+        taskId,
+      );
+      expect(projected.activeGraph?.schedulePreview).toEqual(expectedPreview);
+    }
     const materialization = {
       projectId: PROJECT.projectId,
       taskId,
@@ -762,6 +788,28 @@ describe("desktop bootstrap state", () => {
       ...confirmedCatalog,
       tasks: [{ ...confirmedCatalog.tasks[0], taskVersion: 6, stage: "active_graph" }],
     };
+    for (const [status, schedulePreview] of [
+      ["ready", { state: "awaiting_claim", nodeNumber: 1 }],
+      ["running", { state: "busy", nodeNumber: 1 }],
+      ["succeeded", { state: "complete" }],
+      ["failed", { state: "blocked", blockerNodeNumbers: [1] }],
+    ] as const) {
+      const scheduledDetail = {
+        ...graphDetail,
+        activeGraph: {
+          ...graphDetail.activeGraph!,
+          nodes: [{ ...graphDetail.activeGraph!.nodes[0]!, status }],
+          schedulePreview,
+        },
+      };
+      expect(
+        decodeDesktopProjectTaskGraphMaterializationResult(
+          { status: "materialized", taskId, detail: scheduledDetail, catalog: graphCatalog },
+          PROJECT.projectId,
+          taskId,
+        ),
+      ).toMatchObject({ status: "materialized", detail: scheduledDetail });
+    }
     expect(
       decodeDesktopProjectTaskGraphMaterializationResult(
         { status: "materialized", taskId, detail: graphDetail, catalog: graphCatalog },
@@ -791,6 +839,84 @@ describe("desktop bootstrap state", () => {
               ],
             },
           },
+          catalog: graphCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        {
+          status: "materialized",
+          taskId,
+          detail: {
+            ...graphDetail,
+            activeGraph: {
+              ...graphDetail.activeGraph!,
+              schedulePreview: { state: "blocked", blockerNodeNumbers: [] },
+            },
+          },
+          catalog: graphCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        {
+          status: "materialized",
+          taskId,
+          detail: {
+            ...graphDetail,
+            activeGraph: {
+              ...graphDetail.activeGraph!,
+              schedulePreview: { state: "blocked", blockerNodeNumbers: [1] },
+            },
+          },
+          catalog: graphCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    const unmetReadyDetail = {
+      ...graphDetail,
+      confirmedPlan: {
+        ...graphDetail.confirmedPlan!,
+        steps: [
+          ...graphDetail.confirmedPlan!.steps,
+          {
+            title: "第二步",
+            description: "必须等待第一步成功。",
+            acceptanceCriteria: [],
+          },
+        ],
+      },
+      activeGraph: {
+        ...graphDetail.activeGraph!,
+        nodes: [
+          graphDetail.activeGraph!.nodes[0]!,
+          {
+            nodeNumber: 2,
+            sourcePlanStepNumber: 2,
+            title: "第二步",
+            description: "必须等待第一步成功。",
+            acceptanceCriteria: [],
+            dependsOnNodeNumbers: [1],
+            status: "ready" as const,
+          },
+        ],
+        schedulePreview: { state: "awaiting_claim" as const, nodeNumber: 2 },
+      },
+    };
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        {
+          status: "materialized",
+          taskId,
+          detail: unmetReadyDetail,
           catalog: graphCatalog,
         },
         PROJECT.projectId,
@@ -855,6 +981,18 @@ describe("desktop bootstrap state", () => {
       {
         ...graphRaw.activeGraph,
         nodes: [{ ...graphRaw.activeGraph.nodes[0], dependsOnNodeIds: [nodeId] }],
+      },
+      {
+        ...graphRaw.activeGraph,
+        schedulePreview: { state: "dependency_eligible", nodeId: graphId },
+      },
+      {
+        ...graphRaw.activeGraph,
+        schedulePreview: { state: "blocked", blockerNodeIds: [nodeId] },
+      },
+      {
+        ...graphRaw.activeGraph,
+        schedulePreview: { state: "blocked", blockerNodeIds: [] },
       },
     ]) {
       expect(() =>

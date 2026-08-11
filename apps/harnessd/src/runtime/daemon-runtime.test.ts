@@ -1120,6 +1120,7 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
           revisionId: graphCommandId,
           revisionNumber: 1,
           basedOnPlanRevisionId: confirmationCommandId,
+          schedulePreview: { state: "dependency_eligible" },
           nodes: [{ status: "pending", dependsOnNodeIds: [] }],
         },
       },

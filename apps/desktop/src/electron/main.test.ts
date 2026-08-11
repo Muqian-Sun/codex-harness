@@ -518,6 +518,7 @@ describe("desktop Electron main Project Task IPC", () => {
         },
         activeGraph: {
           revisionNumber: 1,
+          schedulePreview: { state: "dependency_eligible", nodeNumber: 1 },
           nodes: [
             {
               nodeNumber: 1,

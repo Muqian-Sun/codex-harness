@@ -218,9 +218,16 @@ type PreloadProjectTaskGraphNode = Readonly<{
   dependsOnNodeNumbers: readonly number[];
   status: string;
 }>;
+type PreloadProjectTaskSchedulePreview =
+  | Readonly<{ state: "dependency_eligible"; nodeNumber: number }>
+  | Readonly<{ state: "awaiting_claim"; nodeNumber: number }>
+  | Readonly<{ state: "busy"; nodeNumber: number }>
+  | Readonly<{ state: "blocked"; blockerNodeNumbers: readonly number[] }>
+  | Readonly<{ state: "complete" }>;
 type PreloadProjectTaskGraph = Readonly<{
   revisionNumber: number;
   nodes: readonly PreloadProjectTaskGraphNode[];
+  schedulePreview: PreloadProjectTaskSchedulePreview;
 }>;
 type PreloadProjectTaskDetail = Readonly<{
   projectId: string;
@@ -904,7 +911,7 @@ function decodeProjectTaskGraph(
   if (input === null) {
     return null;
   }
-  const graph = exactRecord(input, ["nodes", "revisionNumber"]);
+  const graph = exactRecord(input, ["nodes", "revisionNumber", "schedulePreview"]);
   if (
     graph === undefined ||
     confirmedPlan === null ||
@@ -962,14 +969,102 @@ function decodeProjectTaskGraph(
   const coveredSteps = new Set(
     nodes.map((node) => node?.sourcePlanStepNumber).filter((value) => value !== undefined),
   );
-  return nodes.some((node) => node === undefined) ||
+  if (
+    nodes.some((node) => node === undefined) ||
     totalBytes > MAX_TASK_PLAN_TOTAL_BYTES ||
     coveredSteps.size !== confirmedPlan.steps.length
-    ? undefined
-    : Object.freeze({
-        revisionNumber: graph.revisionNumber,
-        nodes: Object.freeze(nodes as PreloadProjectTaskGraphNode[]),
-      });
+  ) {
+    return undefined;
+  }
+  const schedulePreview = decodeProjectTaskSchedule(graph.schedulePreview);
+  if (
+    schedulePreview === undefined ||
+    !scheduleMatchesProjectTaskGraph(schedulePreview, nodes as PreloadProjectTaskGraphNode[])
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    revisionNumber: graph.revisionNumber,
+    nodes: Object.freeze(nodes as PreloadProjectTaskGraphNode[]),
+    schedulePreview,
+  });
+}
+
+function decodeProjectTaskSchedule(input: unknown): PreloadProjectTaskSchedulePreview | undefined {
+  const terminal = exactRecord(input, ["state"]);
+  if (terminal?.state === "complete") {
+    return Object.freeze({ state: "complete" });
+  }
+  const node = exactRecord(input, ["nodeNumber", "state"]);
+  if (
+    node !== undefined &&
+    ["dependency_eligible", "awaiting_claim", "busy"].includes(String(node.state)) &&
+    isPositiveSafeInteger(node.nodeNumber)
+  ) {
+    return Object.freeze({
+      state: node.state as "dependency_eligible" | "awaiting_claim" | "busy",
+      nodeNumber: node.nodeNumber,
+    });
+  }
+  const blocked = exactRecord(input, ["blockerNodeNumbers", "state"]);
+  if (
+    blocked?.state !== "blocked" ||
+    !Array.isArray(blocked.blockerNodeNumbers) ||
+    blocked.blockerNodeNumbers.length < 1 ||
+    blocked.blockerNodeNumbers.length > MAX_TASK_PLAN_STEPS ||
+    blocked.blockerNodeNumbers.some((nodeNumber) => !isPositiveSafeInteger(nodeNumber)) ||
+    new Set(blocked.blockerNodeNumbers).size !== blocked.blockerNodeNumbers.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    state: "blocked",
+    blockerNodeNumbers: Object.freeze([...blocked.blockerNodeNumbers] as number[]),
+  });
+}
+
+function scheduleMatchesProjectTaskGraph(
+  preview: PreloadProjectTaskSchedulePreview,
+  nodes: readonly PreloadProjectTaskGraphNode[],
+): boolean {
+  const ready = nodes.filter((node) => node.status === "ready");
+  const running = nodes.filter((node) => node.status === "running");
+  const dependenciesSucceeded = (node: PreloadProjectTaskGraphNode) =>
+    node.dependsOnNodeNumbers.every(
+      (dependencyNumber) => nodes[dependencyNumber - 1]?.status === "succeeded",
+    );
+  if (
+    ready.length > 1 ||
+    running.length > 1 ||
+    (ready.length > 0 && running.length > 0) ||
+    [...ready, ...running].some((node) => !dependenciesSucceeded(node))
+  ) {
+    return false;
+  }
+  if (running[0] !== undefined) {
+    return preview.state === "busy" && preview.nodeNumber === running[0].nodeNumber;
+  }
+  if (ready[0] !== undefined) {
+    return preview.state === "awaiting_claim" && preview.nodeNumber === ready[0].nodeNumber;
+  }
+  const candidate = nodes.find((node) => node.status === "pending" && dependenciesSucceeded(node));
+  if (candidate !== undefined) {
+    return preview.state === "dependency_eligible" && preview.nodeNumber === candidate.nodeNumber;
+  }
+  if (nodes.every((node) => node.status === "succeeded")) {
+    return preview.state === "complete";
+  }
+  const blockerNodeNumbers = nodes
+    .filter((node) => ["blocked", "cancelled", "failed", "interrupted"].includes(node.status))
+    .map((node) => node.nodeNumber);
+  return (
+    preview.state === "blocked" &&
+    blockerNodeNumbers.length > 0 &&
+    blockerNodeNumbers.length === preview.blockerNodeNumbers.length &&
+    blockerNodeNumbers.every(
+      (nodeNumber, index) => nodeNumber === preview.blockerNodeNumbers[index],
+    )
+  );
 }
 
 function decodeProjectTaskRequirement(input: unknown): PreloadProjectTaskRequirement | undefined {
