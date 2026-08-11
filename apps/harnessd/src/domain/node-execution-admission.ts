@@ -88,10 +88,11 @@ const TOOL_CLASSES: Readonly<Record<HarnessRouteOperationKind, readonly string[]
 
 export function evaluateNodeExecutionAdmission(
   task: TaskPlanRecord,
+  nodeId: string,
   operations: readonly HarnessRouteOperation[],
   userConfirmed: boolean,
 ): NodeExecutionAdmissionEvaluation {
-  const features = buildActiveRouteFeatures(task, operations);
+  const features = buildActiveRouteFeatures(task, nodeId, operations);
   const kinds = new Set(operations.map((operation) => operation.kind));
   let rejectionReason: HarnessExecutionAdmissionRejectionReason | null = null;
   if (!userConfirmed) {
@@ -128,13 +129,22 @@ export function evaluateNodeExecutionAdmission(
 
 export function buildActiveRouteFeatures(
   task: TaskPlanRecord,
+  nodeId: string,
   operations: readonly HarnessRouteOperation[],
 ): ModelRouteFeatures {
   const kinds = new Set(operations.map((operation) => operation.kind));
   const graphSize = task.activeGraph?.nodes.length ?? 0;
+  const dependencyCount =
+    task.activeGraph?.nodes.reduce((total, node) => total + node.dependsOnNodeIds.length, 0) ?? 0;
+  const dependencyClosureSize = countDependencyClosure(task, nodeId);
   const requirementSize =
     task.activeRequirement.constraints.length + task.activeRequirement.acceptanceCriteria.length;
-  const structuralSize = Math.max(graphSize, requirementSize);
+  const structuralSize = Math.max(
+    graphSize,
+    dependencyCount,
+    dependencyClosureSize,
+    requirementSize,
+  );
   const complexity = structuralSize >= 9 ? "high" : structuralSize >= 3 ? "medium" : "low";
   const tools = new Set([...kinds].flatMap((kind) => TOOL_CLASSES[kind]));
   const toolBreadth: ModelRouteToolBreadth =
@@ -158,12 +168,32 @@ export function buildActiveRouteFeatures(
     schemaVersion: 1,
     taskKind: deriveTaskKind(kinds),
     complexity,
-    scope: graphSize <= 1 ? "isolated" : complexity === "high" ? "cross_system" : "module",
+    scope:
+      graphSize <= 1 && dependencyCount === 0
+        ? "isolated"
+        : complexity === "high"
+          ? "cross_system"
+          : "module",
     ambiguity: "low",
-    estimatedSteps: Math.max(1, graphSize),
+    estimatedSteps: Math.max(1, graphSize, dependencyClosureSize + 1),
     toolBreadth,
     safety,
   });
+}
+
+function countDependencyClosure(task: TaskPlanRecord, nodeId: string): number {
+  const graph = task.activeGraph;
+  if (graph === null) return 0;
+  const nodes = new Map(graph.nodes.map((node) => [node.nodeId, node]));
+  const visited = new Set<string>();
+  const pending = [...(nodes.get(nodeId)?.dependsOnNodeIds ?? [])];
+  while (pending.length > 0) {
+    const dependencyId = pending.pop()!;
+    if (visited.has(dependencyId)) continue;
+    visited.add(dependencyId);
+    pending.push(...(nodes.get(dependencyId)?.dependsOnNodeIds ?? []));
+  }
+  return visited.size;
 }
 
 function deriveTaskKind(kinds: ReadonlySet<HarnessRouteOperationKind>): ModelRouteTaskKind {

@@ -22,6 +22,7 @@ import {
   type ShadowModelRouteDecision,
 } from "./model-route-classifier.js";
 import type { NodeExecutionPermissionEnvelope } from "./node-execution-admission.js";
+import type { NodeOperationManifestPlanningFence } from "./node-operation-manifest-repository.js";
 import type { VerifiedMacosWorkspaceSnapshot } from "../runtime/macos-workspace-admission-observer.js";
 
 const STREAM_TYPE = "execution.node_admission";
@@ -47,6 +48,7 @@ export type RouteActivation = Readonly<{
   graphRevisionId: string;
   manifestId: string;
   manifestStateVersion: number;
+  manifestPlanningFence: NodeOperationManifestPlanningFence;
   routingBindingVersion: number;
   profileId: string;
   profileVersion: number;
@@ -72,6 +74,7 @@ export type NodeExecutionAdmissionRecord = Readonly<{
   taskId: string;
   nodeId: string;
   manifestId: string;
+  operationKinds: readonly (typeof TASK_OPERATION_KINDS)[number][];
   occurredAtMs: number;
   status: "activated" | "denied";
   rejectionReason: HarnessExecutionAdmissionRejectionReason | null;
@@ -252,6 +255,7 @@ function decodeRecord(input: unknown): NodeExecutionAdmissionRecord {
       "manifestId",
       "nodeId",
       "occurredAtMs",
+      "operationKinds",
       "projectId",
       "rejectionReason",
       "routeActivation",
@@ -272,6 +276,7 @@ function decodeRecord(input: unknown): NodeExecutionAdmissionRecord {
           : fail();
     const routeActivation =
       record.routeActivation === null ? null : decodeRouteActivation(record.routeActivation);
+    const operationKinds = decodeOperationKinds(record.operationKinds);
     if (
       record.schemaVersion !== 1 ||
       (status === "activated") !== (rejectionReason === null && routeActivation !== null)
@@ -287,6 +292,7 @@ function decodeRecord(input: unknown): NodeExecutionAdmissionRecord {
       taskId: uuid(record.taskId),
       nodeId: uuid(record.nodeId),
       manifestId: uuid(record.manifestId),
+      operationKinds,
       occurredAtMs: nonNegative(record.occurredAtMs),
       status,
       rejectionReason,
@@ -299,7 +305,8 @@ function decodeRecord(input: unknown): NodeExecutionAdmissionRecord {
         routeActivation.projectId !== normalized.projectId ||
         routeActivation.taskId !== normalized.taskId ||
         routeActivation.nodeId !== normalized.nodeId ||
-        routeActivation.manifestId !== normalized.manifestId)
+        routeActivation.manifestId !== normalized.manifestId ||
+        !sameStringArray(routeActivation.permission.allowedOperationKinds, operationKinds))
     ) {
       fail();
     }
@@ -319,6 +326,7 @@ function decodeRouteActivation(input: unknown): RouteActivation {
     "executionAuthorized",
     "graphRevisionId",
     "manifestId",
+    "manifestPlanningFence",
     "manifestStateVersion",
     "nodeId",
     "ownershipVersion",
@@ -347,6 +355,7 @@ function decodeRouteActivation(input: unknown): RouteActivation {
   const decision = decodeShadowModelRouteDecision(record.routeDecision);
   const permission = decodePermission(record.permission);
   const workspace = decodeWorkspace(record.workspace);
+  const manifestPlanningFence = decodeManifestPlanningFence(record.manifestPlanningFence);
   const configurationRevisionId = uuid(record.configurationRevisionId);
   const profileVersion = positive(record.profileVersion);
   const normalizedCatalog = Object.freeze({
@@ -356,12 +365,22 @@ function decodeRouteActivation(input: unknown): RouteActivation {
     observedAtMs: nonNegative(catalog.observedAtMs),
   });
   const userConfirmedAtMs = nonNegative(record.userConfirmedAtMs);
+  const taskId = uuid(record.taskId);
+  const nodeId = uuid(record.nodeId);
+  const requirementRevisionId = uuid(record.requirementRevisionId);
+  const planRevisionId = uuid(record.planRevisionId);
+  const graphRevisionId = uuid(record.graphRevisionId);
   if (
     decision.resolvedTarget.configurationRevisionId !== configurationRevisionId ||
     decision.resolvedTarget.configurationRevisionNumber !== profileVersion ||
     decision.resolvedTarget.provider !== normalizedCatalog.provider ||
     normalizedCatalog.observedAtMs > userConfirmedAtMs ||
-    workspace.observedAtMs > userConfirmedAtMs
+    workspace.observedAtMs > userConfirmedAtMs ||
+    manifestPlanningFence.taskId !== taskId ||
+    manifestPlanningFence.nodeId !== nodeId ||
+    manifestPlanningFence.requirementRevisionId !== requirementRevisionId ||
+    manifestPlanningFence.planRevisionId !== planRevisionId ||
+    manifestPlanningFence.graphRevisionId !== graphRevisionId
   ) {
     fail();
   }
@@ -372,15 +391,16 @@ function decodeRouteActivation(input: unknown): RouteActivation {
     decisionId: uuid(record.decisionId),
     projectId: uuid(record.projectId),
     projectVersion: positive(record.projectVersion),
-    taskId: uuid(record.taskId),
+    taskId,
     taskVersion: positive(record.taskVersion),
     ownershipVersion: positive(record.ownershipVersion),
-    nodeId: uuid(record.nodeId),
-    requirementRevisionId: uuid(record.requirementRevisionId),
-    planRevisionId: uuid(record.planRevisionId),
-    graphRevisionId: uuid(record.graphRevisionId),
+    nodeId,
+    requirementRevisionId,
+    planRevisionId,
+    graphRevisionId,
     manifestId: uuid(record.manifestId),
     manifestStateVersion: positive(record.manifestStateVersion),
+    manifestPlanningFence,
     routingBindingVersion: positive(record.routingBindingVersion),
     profileId: uuid(record.profileId),
     profileVersion,
@@ -390,6 +410,30 @@ function decodeRouteActivation(input: unknown): RouteActivation {
     permission,
     workspace,
     userConfirmedAtMs,
+  });
+}
+
+function decodeManifestPlanningFence(input: unknown): NodeOperationManifestPlanningFence {
+  const record = exactRecord(input, [
+    "digest",
+    "graphRevisionId",
+    "nodeDigest",
+    "nodeId",
+    "planRevisionId",
+    "requirementRevisionId",
+    "schemaVersion",
+    "taskId",
+  ]);
+  if (record.schemaVersion !== 1) fail();
+  return Object.freeze({
+    schemaVersion: 1,
+    taskId: uuid(record.taskId),
+    requirementRevisionId: uuid(record.requirementRevisionId),
+    planRevisionId: uuid(record.planRevisionId),
+    graphRevisionId: uuid(record.graphRevisionId),
+    nodeId: uuid(record.nodeId),
+    nodeDigest: requireSha256(record.nodeDigest),
+    digest: requireSha256(record.digest),
   });
 }
 
@@ -412,20 +456,7 @@ function decodePermission(input: unknown): NodeExecutionPermissionEnvelope {
   ) {
     fail();
   }
-  const allowedOperationKinds = record.allowedOperationKinds.map((kind) => {
-    const normalized = text(kind);
-    if (!TASK_OPERATION_KINDS.includes(normalized as (typeof TASK_OPERATION_KINDS)[number])) {
-      fail();
-    }
-    return normalized as (typeof TASK_OPERATION_KINDS)[number];
-  });
-  if (
-    allowedOperationKinds.length < 1 ||
-    allowedOperationKinds.length > 256 ||
-    new Set(allowedOperationKinds).size !== allowedOperationKinds.length
-  ) {
-    fail();
-  }
+  const allowedOperationKinds = decodeOperationKinds(record.allowedOperationKinds);
   return Object.freeze({
     schemaVersion: 1,
     policyVersion: "node-execution-permission-policy-v1",
@@ -434,6 +465,19 @@ function decodePermission(input: unknown): NodeExecutionPermissionEnvelope {
     networkAccess: false,
     allowedOperationKinds: Object.freeze(allowedOperationKinds),
   });
+}
+
+function decodeOperationKinds(input: unknown): readonly (typeof TASK_OPERATION_KINDS)[number][] {
+  if (!Array.isArray(input)) fail();
+  const kinds = input.map((kind) => {
+    const normalized = text(kind);
+    if (!TASK_OPERATION_KINDS.includes(normalized as (typeof TASK_OPERATION_KINDS)[number])) {
+      fail();
+    }
+    return normalized as (typeof TASK_OPERATION_KINDS)[number];
+  });
+  if (kinds.length < 1 || kinds.length > 256 || new Set(kinds).size !== kinds.length) fail();
+  return Object.freeze(kinds);
 }
 
 function decodeWorkspace(input: unknown): VerifiedMacosWorkspaceSnapshot {
@@ -499,6 +543,10 @@ function sameCommand(
     left.manifestId === right.manifestId &&
     left.decisionId === right.decisionId
   );
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function exactRecord(input: unknown, expectedKeys: readonly string[]): Record<string, unknown> {

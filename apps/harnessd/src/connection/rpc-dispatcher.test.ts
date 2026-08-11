@@ -1043,10 +1043,10 @@ describe("RPC dispatcher execution admission", () => {
     activationId: params.activationId,
     taskId: params.taskId,
     nodeId: params.nodeId,
+    operationKinds: ["answer"],
     rejectionReason: "workspace_dirty",
     route: null,
     permission: null,
-    evidence: null,
   } as const;
 
   it("dispatches asynchronously and validates the public result", async () => {

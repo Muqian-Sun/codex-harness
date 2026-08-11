@@ -1224,6 +1224,7 @@ describe("method contracts", () => {
       activationId: params.activationId,
       taskId: params.taskId,
       nodeId: params.nodeId,
+      operationKinds: ["answer"],
       rejectionReason: null,
       route: { tier: "fast", provider: "openai", model: "fast", reasoningEffort: "low" },
       permission: {
@@ -1232,14 +1233,14 @@ describe("method contracts", () => {
         networkAccess: false,
         allowedOperationKinds: ["answer"],
       },
-      evidence: {
-        manifestId: params.manifestId,
-        catalogSnapshotId: "00000000-0000-4000-8000-000000000911",
-        workspaceDigest: "a".repeat(64),
-        gitHead: "b".repeat(40),
-      },
     } as const;
     expect(decodeResponseResult("task.execution.activate", activated).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.execution.activate", {
+        ...activated,
+        evidence: { workspaceDigest: "a".repeat(64) },
+      }).ok,
+    ).toBe(false);
     expect(
       decodeResponseResult("task.execution.activate", {
         ...activated,
@@ -1262,7 +1263,6 @@ describe("method contracts", () => {
         rejectionReason: "workspace_dirty",
         route: null,
         permission: null,
-        evidence: null,
       }).ok,
     ).toBe(true);
     expect(
@@ -1271,7 +1271,6 @@ describe("method contracts", () => {
         status: "denied",
         route: null,
         permission: null,
-        evidence: null,
       }).ok,
     ).toBe(false);
   });

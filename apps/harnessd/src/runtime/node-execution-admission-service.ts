@@ -143,6 +143,7 @@ export class NodeExecutionAdmissionService {
       const before = this.#capture(params);
       const evaluation = evaluateNodeExecutionAdmission(
         before.task,
+        params.nodeId,
         before.manifest.operations,
         params.userConfirmed,
       );
@@ -290,6 +291,7 @@ function materializeAdmissionRecord(
         graphRevisionId: params.graphRevisionId,
         manifestId: params.manifestId,
         manifestStateVersion: params.expectedManifestStateVersion,
+        manifestPlanningFence: state.manifest.planningFence,
         routingBindingVersion: params.expectedRoutingBindingVersion,
         profileId: state.profile.profileId,
         profileVersion: params.expectedProfileVersion,
@@ -315,6 +317,9 @@ function materializeAdmissionRecord(
     taskId: params.taskId,
     nodeId: params.nodeId,
     manifestId: params.manifestId,
+    operationKinds: Object.freeze(
+      state.manifest.operations.map((operation) => operation.kind).sort(),
+    ),
     occurredAtMs,
     status: routeActivation === null ? "denied" : "activated",
     rejectionReason: routeActivation === null ? (rejectionReason ?? "workspace_unavailable") : null,
@@ -340,6 +345,7 @@ function resultFromRecord(
     activationId: record.activationId,
     taskId: record.taskId,
     nodeId: record.nodeId,
+    operationKinds: record.operationKinds,
     rejectionReason: record.rejectionReason,
     route:
       activation === null
@@ -358,15 +364,6 @@ function resultFromRecord(
             commandExecution: activation.permission.commandExecution,
             networkAccess: false as const,
             allowedOperationKinds: activation.permission.allowedOperationKinds,
-          }),
-    evidence:
-      activation === null
-        ? null
-        : Object.freeze({
-            manifestId: activation.manifestId,
-            catalogSnapshotId: activation.catalog.snapshotId,
-            workspaceDigest: activation.workspace.workspaceDigest,
-            gitHead: activation.workspace.gitHead,
           }),
   };
   const decoded = decodeResponseResult("task.execution.activate", result);

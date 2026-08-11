@@ -54,7 +54,7 @@ function operations(...kinds: readonly HarnessRouteOperationKind[]) {
 
 describe("node execution admission policy", () => {
   it("routes a confirmed answer to fast and grants a read-only envelope", () => {
-    const result = evaluateNodeExecutionAdmission(task(), operations("answer"), true);
+    const result = evaluateNodeExecutionAdmission(task(), id(100), operations("answer"), true);
 
     expect(result).toMatchObject({
       rejectionReason: null,
@@ -76,12 +76,13 @@ describe("node execution admission policy", () => {
 
   it("routes ordinary code work to standard and requires command-backed validation", () => {
     expect(
-      evaluateNodeExecutionAdmission(task(), operations("modify_workspace"), true),
+      evaluateNodeExecutionAdmission(task(), id(100), operations("modify_workspace"), true),
     ).toMatchObject({ rejectionReason: "validation_command_required", permission: null });
 
     expect(
       evaluateNodeExecutionAdmission(
         task(),
+        id(100),
         operations("modify_workspace", "run_workspace_command"),
         true,
       ),
@@ -93,7 +94,9 @@ describe("node execution admission policy", () => {
   });
 
   it("rejects missing confirmation and every operation outside the MVP envelope", () => {
-    expect(evaluateNodeExecutionAdmission(task(), operations("answer"), false)).toMatchObject({
+    expect(
+      evaluateNodeExecutionAdmission(task(), id(100), operations("answer"), false),
+    ).toMatchObject({
       rejectionReason: "user_confirmation_required",
       permission: null,
     });
@@ -109,20 +112,26 @@ describe("node execution admission policy", () => {
       "concurrent_change",
       "user_interaction",
     ] as const) {
-      expect(evaluateNodeExecutionAdmission(task(), operations(kind), true)).toMatchObject({
-        rejectionReason: "operation_not_allowed",
-        permission: null,
-      });
+      expect(evaluateNodeExecutionAdmission(task(), id(100), operations(kind), true)).toMatchObject(
+        {
+          rejectionReason: "operation_not_allowed",
+          permission: null,
+        },
+      );
     }
   });
 
   it("raises architecture, systemic, structural, tool and safety signals deterministically", () => {
-    expect(buildActiveRouteFeatures(task(3), operations("architecture_decision"))).toMatchObject({
+    expect(
+      buildActiveRouteFeatures(task(3), id(100), operations("architecture_decision")),
+    ).toMatchObject({
       taskKind: "architecture",
       complexity: "medium",
       scope: "module",
     });
-    expect(buildActiveRouteFeatures(task(9), operations("systemic_diagnosis"))).toMatchObject({
+    expect(
+      buildActiveRouteFeatures(task(9), id(100), operations("systemic_diagnosis")),
+    ).toMatchObject({
       taskKind: "systemic_diagnosis",
       complexity: "high",
       scope: "cross_system",
@@ -131,6 +140,7 @@ describe("node execution admission policy", () => {
     expect(
       buildActiveRouteFeatures(
         task(1, 9),
+        id(100),
         operations("irreversible_action", "public_api_change", "permission_boundary_change"),
       ),
     ).toMatchObject({
@@ -146,6 +156,7 @@ describe("node execution admission policy", () => {
     expect(
       buildActiveRouteFeatures(
         task(),
+        id(100),
         operations("database_migration", "concurrent_change", "production_change"),
       ),
     ).toMatchObject({

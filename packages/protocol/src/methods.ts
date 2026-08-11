@@ -1170,15 +1170,6 @@ const ExecutionPermissionSummarySchema = z
     }
   });
 
-const ExecutionAdmissionEvidenceSummarySchema = z
-  .object({
-    manifestId: z.string().regex(UUID_PATTERN),
-    catalogSnapshotId: z.string().regex(UUID_PATTERN),
-    workspaceDigest: z.string().regex(/^[0-9a-f]{64}$/),
-    gitHead: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),
-  })
-  .strict();
-
 export const TaskExecutionActivateParamsSchema = z
   .object({
     activationId: z.string().regex(UUID_PATTERN),
@@ -1229,25 +1220,32 @@ export const TaskExecutionActivateResultSchema = z
     activationId: z.string().regex(UUID_PATTERN),
     taskId: z.string().regex(UUID_PATTERN),
     nodeId: z.string().regex(UUID_PATTERN),
+    operationKinds: z.array(z.enum(TASK_OPERATION_KINDS)).min(1).max(256),
     rejectionReason: z.enum(EXECUTION_ADMISSION_REJECTION_REASONS).nullable(),
     route: ExecutionRouteSummarySchema.nullable(),
     permission: ExecutionPermissionSummarySchema.nullable(),
-    evidence: ExecutionAdmissionEvidenceSummarySchema.nullable(),
   })
   .strict()
   .superRefine((value, context) => {
     const activated = value.status === "activated" || value.status === "existing";
     const activatedFields =
-      value.rejectionReason === null &&
-      value.route !== null &&
-      value.permission !== null &&
-      value.evidence !== null;
+      value.rejectionReason === null && value.route !== null && value.permission !== null;
     const deniedFields =
-      value.rejectionReason !== null &&
-      value.route === null &&
-      value.permission === null &&
-      value.evidence === null;
-    if ((activated && !activatedFields) || (!activated && !deniedFields)) {
+      value.rejectionReason !== null && value.route === null && value.permission === null;
+    const operationKindsAreUnique =
+      new Set(value.operationKinds).size === value.operationKinds.length;
+    const permissionMatchesOperations =
+      value.permission === null ||
+      (value.permission.allowedOperationKinds.length === value.operationKinds.length &&
+        value.permission.allowedOperationKinds.every(
+          (kind, index) => kind === value.operationKinds[index],
+        ));
+    if (
+      (activated && !activatedFields) ||
+      (!activated && !deniedFields) ||
+      !operationKindsAreUnique ||
+      !permissionMatchesOperations
+    ) {
       context.addIssue({
         code: "custom",
         path: ["status"],

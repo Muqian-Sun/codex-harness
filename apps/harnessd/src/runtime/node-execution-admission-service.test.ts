@@ -284,14 +284,9 @@ describe("node execution admission service", () => {
 
     await expect(context.service.activate(context.params)).resolves.toMatchObject({
       status: "activated",
+      operationKinds: ["answer"],
       route: { tier: "fast", provider: "openai", model: "fast", reasoningEffort: "low" },
       permission: { workspaceMode: "read_only", commandExecution: false, networkAccess: false },
-      evidence: {
-        manifestId: MANIFEST_ID,
-        catalogSnapshotId: id(15),
-        workspaceDigest: WORKSPACE_DIGEST,
-        gitHead: "a".repeat(40),
-      },
     });
     expect(context.observe).toHaveBeenCalledOnce();
     expect(
@@ -312,6 +307,7 @@ describe("node execution admission service", () => {
     ).resolves.toMatchObject({
       status: "denied",
       rejectionReason: "user_confirmation_required",
+      operationKinds: ["answer"],
       route: null,
       permission: null,
     });
@@ -322,6 +318,7 @@ describe("node execution admission service", () => {
     await expect(forbidden.service.activate(forbidden.params)).resolves.toMatchObject({
       status: "denied",
       rejectionReason: "operation_not_allowed",
+      operationKinds: ["network_read"],
     });
     expect(forbidden.observe).not.toHaveBeenCalled();
     forbidden.store.close();
