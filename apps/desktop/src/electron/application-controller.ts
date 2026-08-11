@@ -12,6 +12,7 @@ import {
   failedBootstrapState,
   decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskCandidatePlanConfirmation,
   decodeDesktopProjectTaskCandidatePlanGeneration,
   decodeDesktopProjectTaskRequirementRevision,
   decodeDesktopProjectTaskSelection,
@@ -31,6 +32,7 @@ import {
   type DesktopProjectSelectionResult,
   type DesktopProjectRoutingBindingMutationResult,
   type DesktopProjectTaskCatalogResult,
+  type DesktopProjectTaskCandidatePlanConfirmationResult,
   type DesktopProjectTaskCandidatePlanMutationResult,
   type DesktopProjectTaskDetailResult,
   type DesktopProjectTaskMutationResult,
@@ -55,7 +57,12 @@ export type DesktopSupervisorHandle = Pick<
   | "setRoutingConfiguration"
   | "stop"
 > &
-  Partial<Pick<DaemonProcessSupervisor, "generateProjectTaskCandidatePlan">>;
+  Partial<
+    Pick<
+      DaemonProcessSupervisor,
+      "confirmProjectTaskCandidatePlan" | "generateProjectTaskCandidatePlan"
+    >
+  >;
 
 export type DesktopApplicationControllerConfig = Readonly<{
   stateStore: BootstrapStateStore;
@@ -498,6 +505,85 @@ export class DesktopApplicationController {
         generation.taskId,
       );
       const catalog = projectDesktopProjectTaskCatalog(rawCatalog, generation.projectId);
+      return this.#stateStore.current.phase === "ready"
+        ? Object.freeze({ status: result.status, taskId: result.taskId, detail, catalog })
+        : Object.freeze({ status: "unavailable" });
+    } catch (error: unknown) {
+      return error instanceof HarnessRpcClientError && error.remoteCode === "rpc.conflict"
+        ? Object.freeze({ status: "conflict" })
+        : Object.freeze({ status: "unavailable" });
+    }
+  }
+
+  async confirmProjectTaskCandidatePlan(
+    input: unknown,
+  ): Promise<DesktopProjectTaskCandidatePlanConfirmationResult> {
+    const confirmation = decodeDesktopProjectTaskCandidatePlanConfirmation(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (
+      confirmation === undefined ||
+      state.phase !== "ready" ||
+      supervisor === undefined ||
+      typeof supervisor.confirmProjectTaskCandidatePlan !== "function" ||
+      !state.projects.projects.some((project) => project.projectId === confirmation.projectId)
+    ) {
+      return Object.freeze({ status: "unavailable" });
+    }
+
+    try {
+      const current = await supervisor.readProjectTaskDetail({
+        projectId: confirmation.projectId,
+        taskId: confirmation.taskId,
+      });
+      projectDesktopProjectTaskDetail(current, confirmation.projectId, confirmation.taskId);
+      if (
+        current.taskVersion !== confirmation.expectedTaskVersion ||
+        current.candidatePlan === null ||
+        current.candidatePlan.revisionNumber !== confirmation.candidatePlanRevisionNumber
+      ) {
+        return Object.freeze({ status: "conflict" });
+      }
+      const result = await supervisor.confirmProjectTaskCandidatePlan({
+        commandId: randomUUID(),
+        projectId: confirmation.projectId,
+        taskId: confirmation.taskId,
+        expectedTaskVersion: current.taskVersion,
+        expectedOwnershipVersion: current.ownershipVersion,
+        previousRequirementRevisionId: current.activeRequirement.revisionId,
+        candidatePlanRevisionId: current.candidatePlan.revisionId,
+      });
+      if (
+        (result.status !== "confirmed" && result.status !== "existing") ||
+        result.taskId !== confirmation.taskId ||
+        this.#stateStore.current.phase !== "ready"
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const [rawDetail, rawCatalog] = await Promise.all([
+        supervisor.readProjectTaskDetail({
+          projectId: confirmation.projectId,
+          taskId: confirmation.taskId,
+        }),
+        supervisor.readProjectTaskCatalogPage({
+          projectId: confirmation.projectId,
+          cursor: null,
+          limit: 12,
+        }),
+      ]);
+      const detail = projectDesktopProjectTaskDetail(
+        rawDetail,
+        confirmation.projectId,
+        confirmation.taskId,
+      );
+      const catalog = projectDesktopProjectTaskCatalog(rawCatalog, confirmation.projectId);
+      if (
+        detail.stage !== "confirmed_plan" ||
+        detail.candidatePlan !== null ||
+        detail.confirmedPlan === null
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
       return this.#stateStore.current.phase === "ready"
         ? Object.freeze({ status: result.status, taskId: result.taskId, detail, catalog })
         : Object.freeze({ status: "unavailable" });

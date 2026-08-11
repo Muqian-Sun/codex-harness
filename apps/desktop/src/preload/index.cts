@@ -8,6 +8,7 @@ const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_defau
 const READ_PROJECT_TASK_CATALOG_CHANNEL = "desktop.task.catalog_page";
 const CREATE_PROJECT_TASK_CHANNEL = "desktop.task.create";
 const READ_PROJECT_TASK_DETAIL_CHANNEL = "desktop.task.detail";
+const CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.confirm_candidate";
 const GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.generate_candidate";
 const REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL = "desktop.task.requirement.revise";
 const FAILURE_CODES = new Set([
@@ -205,6 +206,7 @@ type PreloadProjectTaskDetail = Readonly<{
   stage: PreloadProjectTaskSummary["stage"];
   activeRequirement: PreloadProjectTaskRequirement;
   candidatePlan: PreloadProjectTaskCandidatePlan | null;
+  confirmedPlan: PreloadProjectTaskCandidatePlan | null;
 }>;
 type PreloadProjectTaskSelection = Readonly<{ projectId: string; taskId: string }>;
 type PreloadProjectTaskDetailResult =
@@ -232,6 +234,20 @@ type PreloadProjectTaskCandidatePlanGeneration = Readonly<{
 type PreloadProjectTaskCandidatePlanMutationResult =
   | Readonly<{
       status: "generated" | "existing";
+      taskId: string;
+      detail: PreloadProjectTaskDetail;
+      catalog: PreloadProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+type PreloadProjectTaskCandidatePlanConfirmation = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  candidatePlanRevisionNumber: number;
+}>;
+type PreloadProjectTaskCandidatePlanConfirmationResult =
+  | Readonly<{
+      status: "confirmed" | "existing";
       taskId: string;
       detail: PreloadProjectTaskDetail;
       catalog: PreloadProjectTaskCatalog;
@@ -591,6 +607,31 @@ function decodeProjectTaskCandidatePlanGeneration(
   });
 }
 
+function decodeProjectTaskCandidatePlanConfirmation(
+  input: unknown,
+): PreloadProjectTaskCandidatePlanConfirmation | undefined {
+  const record = exactRecord(input, [
+    "candidatePlanRevisionNumber",
+    "expectedTaskVersion",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.candidatePlanRevisionNumber)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    candidatePlanRevisionNumber: record.candidatePlanRevisionNumber,
+  });
+}
+
 function decodeProjectTaskCandidatePlanMutationResult(
   input: unknown,
   expected: PreloadProjectTaskCandidatePlanGeneration,
@@ -620,10 +661,43 @@ function decodeProjectTaskCandidatePlanMutationResult(
   });
 }
 
+function decodeProjectTaskCandidatePlanConfirmationResult(
+  input: unknown,
+  expected: PreloadProjectTaskCandidatePlanConfirmation,
+): PreloadProjectTaskCandidatePlanConfirmationResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  const detail = decodeProjectTaskDetail(record?.detail);
+  const catalog = decodeProjectTaskCatalog(record?.catalog);
+  if (
+    record === undefined ||
+    (record.status !== "confirmed" && record.status !== "existing") ||
+    record.taskId !== expected.taskId ||
+    detail?.projectId !== expected.projectId ||
+    detail.taskId !== expected.taskId ||
+    detail.stage !== "confirmed_plan" ||
+    detail.candidatePlan !== null ||
+    detail.confirmedPlan === null ||
+    catalog?.projectId !== expected.projectId
+  ) {
+    throw new Error("The desktop Project Task candidate Plan confirmation result is invalid.");
+  }
+  return Object.freeze({
+    status: record.status,
+    taskId: expected.taskId,
+    detail,
+    catalog,
+  });
+}
+
 function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | undefined {
   const record = exactRecord(input, [
     "activeRequirement",
     "candidatePlan",
+    "confirmedPlan",
     "projectId",
     "stage",
     "taskId",
@@ -632,6 +706,7 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
   ]);
   const requirement = decodeProjectTaskRequirement(record?.activeRequirement);
   const candidatePlan = decodeProjectTaskCandidatePlan(record?.candidatePlan);
+  const confirmedPlan = decodeProjectTaskCandidatePlan(record?.confirmedPlan);
   if (
     !isUuid(record?.projectId) ||
     !isUuid(record.taskId) ||
@@ -641,7 +716,8 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
     !TASK_STAGES.has(record.stage) ||
     requirement === undefined ||
     candidatePlan === undefined ||
-    !candidatePlanMatchesStage(record.candidatePlan, record.stage)
+    confirmedPlan === undefined ||
+    !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage)
   ) {
     return undefined;
   }
@@ -653,6 +729,7 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
     stage: record.stage as PreloadProjectTaskSummary["stage"],
     activeRequirement: requirement,
     candidatePlan,
+    confirmedPlan,
   });
 }
 
@@ -700,9 +777,17 @@ function decodeProjectTaskCandidatePlan(
       });
 }
 
-function candidatePlanMatchesStage(candidate: unknown, stage: unknown): boolean {
+function plansMatchStage(candidate: unknown, confirmed: unknown, stage: unknown): boolean {
   const stageHasCandidate = stage === "candidate_plan" || stage === "active_graph_with_candidate";
-  return (candidate !== null) === stageHasCandidate;
+  const stageRequiresConfirmed =
+    stage === "confirmed_plan" ||
+    stage === "active_graph" ||
+    stage === "active_graph_with_candidate";
+  return (
+    (candidate !== null) === stageHasCandidate &&
+    (!stageRequiresConfirmed || confirmed !== null) &&
+    (stage !== "requirements_only" || confirmed === null)
+  );
 }
 
 function decodeProjectTaskRequirement(input: unknown): PreloadProjectTaskRequirement | undefined {
@@ -1291,6 +1376,18 @@ const desktopApi = Object.freeze({
     return decodeProjectTaskCandidatePlanMutationResult(
       await ipcRenderer.invoke(GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL, generation),
       generation,
+    );
+  },
+  async confirmProjectTaskCandidatePlan(
+    input: PreloadProjectTaskCandidatePlanConfirmation,
+  ): Promise<PreloadProjectTaskCandidatePlanConfirmationResult> {
+    const confirmation = decodeProjectTaskCandidatePlanConfirmation(input);
+    if (confirmation === undefined) {
+      throw new TypeError("A valid desktop Project Task candidate Plan confirmation is required.");
+    }
+    return decodeProjectTaskCandidatePlanConfirmationResult(
+      await ipcRenderer.invoke(CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL, confirmation),
+      confirmation,
     );
   },
   onBootstrapState(listener: (state: PreloadBootstrapState) => void): () => void {

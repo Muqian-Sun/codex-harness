@@ -38,6 +38,7 @@ const harness = vi.hoisted(() => {
           acceptanceCriteria: [],
         },
         candidatePlan: null,
+        confirmedPlan: null,
       },
     };
   });
@@ -46,6 +47,10 @@ const harness = vi.hoisted(() => {
     return { status: "unavailable" as const };
   });
   const generateProjectTaskCandidatePlan = vi.fn(async (input: unknown): Promise<unknown> => {
+    void input;
+    return { status: "unavailable" as const };
+  });
+  const confirmProjectTaskCandidatePlan = vi.fn(async (input: unknown): Promise<unknown> => {
     void input;
     return { status: "unavailable" as const };
   });
@@ -78,6 +83,7 @@ const harness = vi.hoisted(() => {
     readProjectTaskDetail,
     reviseProjectTaskRequirement,
     generateProjectTaskCandidatePlan,
+    confirmProjectTaskCandidatePlan,
     ipcHandlers,
     webContents,
     window,
@@ -221,6 +227,10 @@ vi.mock("./application-controller.js", () => {
         return await harness.generateProjectTaskCandidatePlan(input);
       }
 
+      async confirmProjectTaskCandidatePlan(input: unknown): Promise<unknown> {
+        return await harness.confirmProjectTaskCandidatePlan(input);
+      }
+
       async setRoutingConfiguration(): Promise<Readonly<{ status: "unavailable" }>> {
         return { status: "unavailable" };
       }
@@ -294,11 +304,12 @@ describe("desktop Electron main Project Task IPC", () => {
     await expect(create(event, creation)).resolves.toEqual({ status: "unavailable" });
   });
 
-  it("validates Task detail and serializes Requirement revisions per Task", async () => {
+  it("validates Task detail and serializes all Task writes per Task", async () => {
     await import("./main.js");
     const read = harness.ipcHandlers.get("desktop.task.detail")!;
     const revise = harness.ipcHandlers.get("desktop.task.requirement.revise")!;
     const generate = harness.ipcHandlers.get("desktop.task.plan.generate_candidate")!;
+    const confirm = harness.ipcHandlers.get("desktop.task.plan.confirm_candidate")!;
     const event = { sender: harness.webContents, senderFrame: {} };
     const taskId = "00000000-0000-4000-8000-000000000894";
     const selection = { projectId: PROJECT_ID, taskId };
@@ -329,6 +340,7 @@ describe("desktop Electron main Project Task IPC", () => {
           acceptanceCriteria: [],
         },
         candidatePlan: null,
+        confirmedPlan: null,
       },
     });
     await expect(read(event, selection)).resolves.toEqual({ status: "unavailable" });
@@ -378,6 +390,8 @@ describe("desktop Electron main Project Task IPC", () => {
     );
     await expect(generate(event, generation)).resolves.toEqual({ status: "unavailable" });
     await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
+    const confirmation = { ...generation, candidatePlanRevisionNumber: 1 };
+    await expect(confirm(event, confirmation)).resolves.toEqual({ status: "unavailable" });
     resolveGeneration({ status: "unavailable" });
     await expect(pendingGeneration).resolves.toEqual({ status: "unavailable" });
 
@@ -391,6 +405,62 @@ describe("desktop Electron main Project Task IPC", () => {
     await expect(generate(event, generation)).resolves.toMatchObject({
       status: "generated",
       taskId,
+    });
+
+    await expect(
+      confirm(event, { ...confirmation, candidatePlanRevisionNumber: 0 }),
+    ).rejects.toThrow("candidate Plan confirmation is invalid");
+    let resolveConfirmation!: (value: Readonly<{ status: "unavailable" }>) => void;
+    harness.confirmProjectTaskCandidatePlan.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveConfirmation = resolve;
+        }),
+    );
+    const pendingConfirmation = confirm(event, confirmation);
+    await vi.waitFor(() =>
+      expect(harness.confirmProjectTaskCandidatePlan).toHaveBeenCalledWith(confirmation),
+    );
+    await expect(confirm(event, confirmation)).resolves.toEqual({ status: "unavailable" });
+    await expect(generate(event, generation)).resolves.toEqual({ status: "unavailable" });
+    await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
+    resolveConfirmation({ status: "unavailable" });
+    await expect(pendingConfirmation).resolves.toEqual({ status: "unavailable" });
+
+    harness.confirmProjectTaskCandidatePlan.mockResolvedValueOnce({
+      status: "confirmed",
+      taskId,
+      detail: {
+        projectId: PROJECT_ID,
+        taskId,
+        taskVersion: 2,
+        title: "Task",
+        stage: "confirmed_plan",
+        activeRequirement: {
+          revisionNumber: 1,
+          sourceText: "Requirement",
+          objective: "Requirement",
+          constraints: [],
+          acceptanceCriteria: [],
+        },
+        candidatePlan: null,
+        confirmedPlan: {
+          revisionNumber: 2,
+          steps: [
+            {
+              title: "Confirmed step",
+              description: "Still not executable.",
+              acceptanceCriteria: [],
+            },
+          ],
+        },
+      },
+      catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
+    });
+    await expect(confirm(event, confirmation)).resolves.toMatchObject({
+      status: "confirmed",
+      taskId,
+      detail: { stage: "confirmed_plan" },
     });
   });
 });

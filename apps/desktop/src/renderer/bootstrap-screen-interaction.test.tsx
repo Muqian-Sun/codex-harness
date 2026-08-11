@@ -15,6 +15,7 @@ const hooks = vi.hoisted(() => ({
     vi.fn(),
     vi.fn(),
     vi.fn(),
+    vi.fn(),
   ],
   values: [] as unknown[],
 }));
@@ -44,6 +45,7 @@ import {
   RequirementItems,
   SettingsWorkspace,
   taskCandidatePlanFeedback,
+  taskCandidatePlanConfirmationFeedback,
 } from "./bootstrap-screen.js";
 
 const PROJECTS = {
@@ -140,6 +142,9 @@ function findTaskControl(
     | "data-task-open"
     | "data-task-new"
     | "data-task-plan-generate"
+    | "data-task-plan-confirm"
+    | "data-task-plan-confirm-commit"
+    | "data-task-plan-confirm-cancel"
     | "data-task-project-select"
     | "data-task-revise"
     | "data-task-revision-source"
@@ -369,6 +374,12 @@ describe("Project Task interaction", () => {
     expect(taskCandidatePlanFeedback("unavailable", "default_bound", routing, false)).toContain(
       "结果当前未知",
     );
+    expect(taskCandidatePlanConfirmationFeedback("reviewing")).toContain("第二次");
+    expect(taskCandidatePlanConfirmationFeedback("confirming")).toContain("正在复核");
+    expect(taskCandidatePlanConfirmationFeedback("confirmed")).toContain("下一步需单独创建 DAG");
+    expect(taskCandidatePlanConfirmationFeedback("existing")).toContain("已经落盘");
+    expect(taskCandidatePlanConfirmationFeedback("conflict")).toContain("重新审阅");
+    expect(taskCandidatePlanConfirmationFeedback("unavailable")).toContain("结果当前未知");
   });
 
   it("generates and renders an explicitly unconfirmed candidate Plan", async () => {
@@ -386,6 +397,7 @@ describe("Project Task interaction", () => {
         acceptanceCriteria: [],
       },
       candidatePlan: null,
+      confirmedPlan: null,
     } as const;
     const generatedDetail = {
       ...detail,
@@ -478,6 +490,219 @@ describe("Project Task interaction", () => {
     expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: generatedDetail });
   });
 
+  it("requires two explicit actions to confirm a candidate and keeps execution locked", async () => {
+    const taskId = "00000000-0000-4000-8000-000000000893";
+    const plan = {
+      revisionNumber: 2,
+      steps: [
+        {
+          title: "Confirm candidate",
+          description: "Promote only after a second explicit action.",
+          acceptanceCriteria: ["No DAG or Run is created."],
+        },
+      ],
+    };
+    const detail = {
+      projectId: PROJECT_ID,
+      taskId,
+      taskVersion: 5,
+      title: "Confirmation Task",
+      stage: "active_graph_with_candidate" as const,
+      activeRequirement: {
+        revisionNumber: 1,
+        sourceText: "Confirm only after review.",
+        objective: "Confirm only after review.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      candidatePlan: plan,
+      confirmedPlan: { ...plan, revisionNumber: 1 },
+    };
+    const confirmedDetail = {
+      ...detail,
+      taskVersion: 6,
+      stage: "confirmed_plan" as const,
+      candidatePlan: null,
+      confirmedPlan: { ...plan, revisionNumber: 3 },
+    };
+    const catalog = {
+      projectId: PROJECT_ID,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT_ID,
+          taskVersion: 6,
+          title: detail.title,
+          objective: detail.activeRequirement.objective,
+          stage: "confirmed_plan" as const,
+        },
+      ],
+      hasMore: false,
+    };
+    const confirmProjectTaskCandidatePlan = vi.fn(async () => ({
+      status: "confirmed" as const,
+      taskId,
+      detail: confirmedDetail,
+      catalog,
+    }));
+    Object.assign(globalThis, {
+      codexHarness: {
+        confirmProjectTaskCandidatePlan,
+        readProjectTaskCatalog: vi.fn(),
+        readProjectTaskDetail: vi.fn(),
+      },
+    });
+    const render = (currentDetail: typeof detail | typeof confirmedDetail, status: string) => {
+      hooks.cursor = 0;
+      hooks.effects = [];
+      hooks.values = [
+        PROJECT_ID,
+        { status: "loaded", catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false } },
+        taskId,
+        { status: "loaded", detail: currentDetail },
+        "",
+        "",
+        currentDetail.activeRequirement.sourceText,
+        "idle",
+        "idle",
+        "idle",
+        status,
+      ];
+      return ProjectTaskPanel({
+        projects: PROJECTS,
+        projectRoutingBindings: {
+          bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+        },
+      });
+    };
+
+    const initial = render(detail, "idle");
+    const begin = findTaskControl(initial, "data-task-plan-confirm");
+    expect(begin.props.disabled).toBe(false);
+    (begin.props.onClick as () => void)();
+    expect(hooks.setters[10]).toHaveBeenLastCalledWith("reviewing");
+    expect(confirmProjectTaskCandidatePlan).not.toHaveBeenCalled();
+
+    const review = render(detail, "reviewing");
+    expect(JSON.stringify(review)).toContain("使当前 DAG 失效");
+    const commit = findTaskControl(review, "data-task-plan-confirm-commit");
+    (commit.props.onClick as () => void)();
+    await vi.waitFor(() =>
+      expect(confirmProjectTaskCandidatePlan).toHaveBeenCalledWith({
+        projectId: PROJECT_ID,
+        taskId,
+        expectedTaskVersion: 5,
+        candidatePlanRevisionNumber: 2,
+      }),
+    );
+    expect(hooks.setters[10]).toHaveBeenCalledWith("confirming");
+    expect(hooks.setters[10]).toHaveBeenLastCalledWith("confirmed");
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: confirmedDetail });
+    expect(hooks.setters[1]).toHaveBeenCalledWith({ status: "loaded", catalog });
+
+    const authority = render(confirmedDetail, "confirmed");
+    const confirmedPlan = findElementByType(authority, CandidatePlan);
+    expect(confirmedPlan?.props.kind).toBe("confirmed");
+    expect(JSON.stringify(authority)).toContain("WAITING FOR DAG");
+    expect(JSON.stringify(authority)).toContain("EXECUTION LOCKED");
+  });
+
+  it("refreshes authority after confirmation conflicts and contains confirmation failures", async () => {
+    const taskId = "00000000-0000-4000-8000-000000000894";
+    const detail = {
+      projectId: PROJECT_ID,
+      taskId,
+      taskVersion: 4,
+      title: "Concurrent confirmation Task",
+      stage: "candidate_plan" as const,
+      activeRequirement: {
+        revisionNumber: 2,
+        sourceText: "Refresh after a stale confirmation.",
+        objective: "Refresh after a stale confirmation.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      candidatePlan: {
+        revisionNumber: 2,
+        basedOnRequirementRevisionNumber: 2,
+        status: "candidate" as const,
+        steps: [
+          {
+            title: "Review concurrent authority",
+            description: "Do not confirm a stale candidate.",
+            acceptanceCriteria: ["The current authority is reloaded."],
+          },
+        ],
+      },
+      confirmedPlan: null,
+    };
+    const catalog = {
+      projectId: PROJECT_ID,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT_ID,
+          taskVersion: detail.taskVersion,
+          title: detail.title,
+          objective: detail.activeRequirement.objective,
+          stage: detail.stage,
+        },
+      ],
+      hasMore: false,
+    };
+    const confirmProjectTaskCandidatePlan = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "conflict" })
+      .mockRejectedValueOnce(new Error("contained"));
+    const readProjectTaskDetail = vi.fn(async () => ({ status: "loaded" as const, detail }));
+    const readProjectTaskCatalog = vi.fn(async () => ({ status: "loaded" as const, catalog }));
+    Object.assign(globalThis, {
+      codexHarness: {
+        confirmProjectTaskCandidatePlan,
+        readProjectTaskCatalog,
+        readProjectTaskDetail,
+      },
+    });
+    const render = () => {
+      hooks.cursor = 0;
+      hooks.effects = [];
+      hooks.values = [
+        PROJECT_ID,
+        { status: "loaded", catalog },
+        taskId,
+        { status: "loaded", detail },
+        "",
+        "",
+        detail.activeRequirement.sourceText,
+        "idle",
+        "idle",
+        "idle",
+        "reviewing",
+      ];
+      return ProjectTaskPanel({
+        projects: PROJECTS,
+        projectRoutingBindings: {
+          bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+        },
+      });
+    };
+
+    const conflicted = render();
+    expect(JSON.stringify(conflicted)).toContain("不会创建 DAG、Run");
+    (findTaskControl(conflicted, "data-task-plan-confirm-commit").props.onClick as () => void)();
+    await vi.waitFor(() => expect(hooks.setters[10]).toHaveBeenLastCalledWith("conflict"));
+    expect(readProjectTaskDetail).toHaveBeenCalledWith({ projectId: PROJECT_ID, taskId });
+    expect(readProjectTaskCatalog).toHaveBeenCalledWith(PROJECT_ID);
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail });
+    expect(hooks.setters[1]).toHaveBeenCalledWith({ status: "loaded", catalog });
+    expect(hooks.setters[6]).toHaveBeenCalledWith(detail.activeRequirement.sourceText);
+    expect(hooks.setters[9]).toHaveBeenCalledWith("idle");
+
+    const unavailable = render();
+    (findTaskControl(unavailable, "data-task-plan-confirm-commit").props.onClick as () => void)();
+    await vi.waitFor(() => expect(hooks.setters[10]).toHaveBeenLastCalledWith("unavailable"));
+  });
+
   it("refreshes authority after generation conflicts and contains unknown failures", async () => {
     const taskId = "00000000-0000-4000-8000-000000000892";
     const detail = {
@@ -494,6 +719,7 @@ describe("Project Task interaction", () => {
         acceptanceCriteria: [],
       },
       candidatePlan: null,
+      confirmedPlan: null,
     };
     const catalog = {
       projectId: PROJECT_ID,
@@ -809,6 +1035,8 @@ describe("Project Task interaction", () => {
         constraints: ["Do not execute."],
         acceptanceCriteria: ["Persist the revision."],
       },
+      candidatePlan: null,
+      confirmedPlan: null,
     };
     const revisedDetail = {
       ...detail,

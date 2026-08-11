@@ -927,6 +927,20 @@ a:focus-visible {
   background: rgba(255, 253, 248, 0.68);
 }
 
+.task-candidate-plan[data-task-plan-kind="confirmed"] {
+  border-color: rgba(78, 109, 94, 0.22);
+}
+
+.task-candidate-plan[data-task-plan-kind="confirmed"] > header {
+  border-bottom-color: rgba(78, 109, 94, 0.14);
+  background: rgba(78, 109, 94, 0.06);
+}
+
+.task-candidate-plan[data-task-plan-kind="confirmed"] > header strong,
+.task-candidate-plan[data-task-plan-kind="confirmed"] > header small {
+  color: var(--moss);
+}
+
 .task-candidate-plan > header {
   display: flex;
   align-items: center;
@@ -1011,6 +1025,136 @@ a:focus-visible {
 .plan-generate-button {
   width: 100%;
   margin-top: 10px;
+}
+
+.task-plan-authority-summary {
+  margin-bottom: 9px;
+  padding: 10px 11px;
+  border: 1px solid rgba(78, 109, 94, 0.16);
+  border-radius: 11px;
+  background: rgba(78, 109, 94, 0.055);
+}
+
+.task-plan-authority-summary span,
+.task-plan-authority-summary strong {
+  display: block;
+}
+
+.task-plan-authority-summary span {
+  color: var(--moss);
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+
+.task-plan-authority-summary strong {
+  margin-top: 3px;
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 13px;
+}
+
+.task-plan-authority-summary p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.plan-confirm-button {
+  width: 100%;
+  min-height: 34px;
+  margin-top: 10px;
+  border: 1px solid rgba(167, 107, 50, 0.3);
+  border-radius: 9px;
+  color: #76502d;
+  font-size: 10px;
+  font-weight: 800;
+  background: var(--amber-wash);
+  transition:
+    border-color 130ms ease,
+    background 130ms ease,
+    transform 130ms ease;
+}
+
+.plan-confirm-button:hover:not(:disabled) {
+  border-color: rgba(167, 107, 50, 0.48);
+  background: #f0dfca;
+  transform: translateY(-1px);
+}
+
+.plan-confirm-button:disabled {
+  color: var(--faint);
+  border-color: var(--line);
+  background: #e9e5dc;
+}
+
+.plan-confirmation-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid rgba(167, 107, 50, 0.28);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(250, 239, 224, 0.95), rgba(255, 253, 248, 0.95));
+  box-shadow: 0 8px 24px rgba(65, 49, 32, 0.07);
+}
+
+.plan-confirmation-card > span {
+  color: var(--amber);
+  font-size: 7px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.plan-confirmation-card > strong {
+  display: block;
+  margin-top: 5px;
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 15px;
+}
+
+.plan-confirmation-card > p {
+  margin: 6px 0 0;
+  color: #735b43;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.plan-confirmation-card > div {
+  display: grid;
+  grid-template-columns: 0.72fr 1.28fr;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.plan-confirmation-card button {
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink-soft);
+  font-size: 8px;
+  font-weight: 800;
+  background: rgba(255, 253, 248, 0.78);
+}
+
+.plan-confirmation-card button:last-child {
+  color: #fffaf3;
+  border-color: var(--amber);
+  background: var(--amber);
+}
+
+.plan-confirmation-card button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.plan-confirmation-card button:disabled {
+  opacity: 0.58;
+}
+
+.plan-confirmation-feedback {
+  display: block;
+  margin: 8px 2px 0;
+  color: #806648;
+  font-size: 8px;
+  line-height: 1.45;
 }
 
 .plan-feedback {

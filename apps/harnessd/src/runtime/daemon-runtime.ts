@@ -352,6 +352,7 @@ export class DaemonRuntime {
       createProjectTask: (params) => this.#createProjectTask(params),
       readProjectTaskDetail: (params) => this.#readProjectTaskDetail(params),
       reviseProjectTaskRequirement: (params) => this.#reviseProjectTaskRequirement(params),
+      confirmProjectTaskCandidatePlan: (params) => this.#confirmProjectTaskCandidatePlan(params),
       generateProjectTaskCandidatePlan: (params) => this.#generateProjectTaskCandidatePlan(params),
       readRoutingConfiguration: () => this.#readRoutingConfiguration(),
       setRoutingConfiguration: (params) => this.#setRoutingConfiguration(params),
@@ -584,6 +585,18 @@ export class DaemonRuntime {
     }
     try {
       return service.reviseRequirement(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(isProjectTaskConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
+  #confirmProjectTaskCandidatePlan(params: unknown): unknown {
+    const service = this.#projectTaskService;
+    if (service === undefined) {
+      throw new RpcProviderError("unavailable");
+    }
+    try {
+      return service.confirmCandidatePlan(params);
     } catch (error: unknown) {
       throw new RpcProviderError(isProjectTaskConflict(error) ? "conflict" : "unavailable");
     }

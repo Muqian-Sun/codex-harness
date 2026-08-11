@@ -15,6 +15,10 @@ await smokeEventStore();
 const { smokeTaskPlanStore } = await import("./smoke-task-plan-store.mjs");
 await smokeTaskPlanStore();
 
+const { smokeProjectTaskPlanConfirmation } =
+  await import("./smoke-project-task-plan-confirmation.mjs");
+await smokeProjectTaskPlanConfirmation();
+
 const { smokeModelRoutingConfiguration } = await import("./smoke-model-routing-config.mjs");
 await smokeModelRoutingConfiguration();
 

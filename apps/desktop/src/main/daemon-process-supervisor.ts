@@ -28,6 +28,8 @@ import {
   type HarnessRoutingConfigurationSetParams,
   type HarnessTaskCatalogPageParams,
   type HarnessTaskCatalogPageResult,
+  type HarnessTaskCandidatePlanConfirmParams,
+  type HarnessTaskCandidatePlanConfirmResult,
   type HarnessTaskCandidatePlanGenerateParams,
   type HarnessTaskCandidatePlanGenerateResult,
   type HarnessTaskCreateParams,
@@ -527,6 +529,12 @@ export class DaemonProcessSupervisor {
     params: HarnessTaskCandidatePlanGenerateParams,
   ): Promise<HarnessTaskCandidatePlanGenerateResult> {
     return await this.client.generateProjectTaskCandidatePlan(params);
+  }
+
+  async confirmProjectTaskCandidatePlan(
+    params: HarnessTaskCandidatePlanConfirmParams,
+  ): Promise<HarnessTaskCandidatePlanConfirmResult> {
+    return await this.client.confirmProjectTaskCandidatePlan(params);
   }
 
   async reviseProjectTaskRequirement(

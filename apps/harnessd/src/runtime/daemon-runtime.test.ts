@@ -1054,6 +1054,41 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       },
     });
 
+    const confirmationCommandId = "00000000-0000-4000-8000-00000000099a";
+    const confirmationPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("plan-confirm", "task.plan.confirm_candidate", {
+        commandId: confirmationCommandId,
+        projectId,
+        taskId,
+        expectedTaskVersion: 2,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: requirementRevisionId,
+        candidatePlanRevisionId: generationParams.commandId,
+      }),
+    );
+    await expect(confirmationPromise).resolves.toMatchObject({
+      kind: "response",
+      id: "plan-confirm",
+      result: { status: "confirmed", taskId },
+    });
+    const confirmedDetailPromise = readFrame(socket);
+    sendFrame(socket, rpc("confirmed-detail", "task.detail", { projectId, taskId }));
+    await expect(confirmedDetailPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        taskVersion: 3,
+        stage: "confirmed_plan",
+        candidatePlan: null,
+        confirmedPlan: {
+          revisionId: confirmationCommandId,
+          basedOnRequirementRevisionId: requirementRevisionId,
+          steps: [{ title: "写入候选步骤" }],
+        },
+      },
+    });
+
     const stalePromise = readFrame(socket);
     sendFrame(
       socket,

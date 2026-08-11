@@ -9,6 +9,10 @@ import {
   decodeDesktopProjectRoutingBindingMutationResult,
   decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopProjectTaskCatalogResult,
+  decodeDesktopProjectTaskCandidatePlanConfirmation,
+  decodeDesktopProjectTaskCandidatePlanConfirmationResult,
+  decodeDesktopProjectTaskCandidatePlanGeneration,
+  decodeDesktopProjectTaskCandidatePlanMutationResult,
   decodeDesktopProjectTaskCreation,
   decodeDesktopProjectTaskDetailResult,
   decodeDesktopProjectTaskMutationResult,
@@ -563,6 +567,7 @@ describe("desktop bootstrap state", () => {
           },
         ],
       },
+      confirmedPlan: null,
     };
     const detail = projectDesktopProjectTaskDetail(raw, PROJECT.projectId, taskId);
     expect(detail).toEqual({
@@ -588,6 +593,7 @@ describe("desktop bootstrap state", () => {
           },
         ],
       },
+      confirmedPlan: null,
     });
     expect(JSON.stringify(detail)).not.toContain(raw.activeRequirement.revisionId);
     expect(JSON.stringify(detail)).not.toContain(raw.latestPlanRevisionId);
@@ -641,6 +647,78 @@ describe("desktop bootstrap state", () => {
         taskId,
       ),
     ).toEqual({ status: "conflict" });
+
+    const generation = { ...selection, expectedTaskVersion: detail.taskVersion };
+    expect(decodeDesktopProjectTaskCandidatePlanGeneration(generation)).toEqual(generation);
+    expect(
+      decodeDesktopProjectTaskCandidatePlanMutationResult(
+        { status: "generated", taskId, detail, catalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({ status: "generated", taskId, detail, catalog });
+    const confirmation = {
+      ...generation,
+      candidatePlanRevisionNumber: detail.candidatePlan!.revisionNumber,
+    };
+    expect(decodeDesktopProjectTaskCandidatePlanConfirmation(confirmation)).toEqual(confirmation);
+    const confirmedRaw = {
+      ...raw,
+      taskVersion: 5,
+      stage: "confirmed_plan",
+      latestPlanRevisionId: "00000000-0000-4000-8000-000000000887",
+      candidatePlan: null,
+      confirmedPlan: {
+        ...raw.candidatePlan,
+        revisionId: "00000000-0000-4000-8000-000000000887",
+        revisionNumber: 2,
+      },
+    };
+    const confirmedDetail = projectDesktopProjectTaskDetail(
+      confirmedRaw,
+      PROJECT.projectId,
+      taskId,
+    );
+    expect(confirmedDetail).toMatchObject({
+      stage: "confirmed_plan",
+      candidatePlan: null,
+      confirmedPlan: { revisionNumber: 2, steps: [{ title: "生成候选计划" }] },
+    });
+    expect(JSON.stringify(confirmedDetail)).not.toContain(confirmedRaw.confirmedPlan.revisionId);
+    const confirmedCatalog = {
+      ...catalog,
+      tasks: [{ ...catalog.tasks[0], taskVersion: 5, stage: "confirmed_plan" }],
+    };
+    expect(
+      decodeDesktopProjectTaskCandidatePlanConfirmationResult(
+        {
+          status: "confirmed",
+          taskId,
+          detail: confirmedDetail,
+          catalog: confirmedCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({
+      status: "confirmed",
+      taskId,
+      detail: confirmedDetail,
+      catalog: confirmedCatalog,
+    });
+    expect(
+      decodeDesktopProjectTaskCandidatePlanConfirmation({
+        ...confirmation,
+        candidatePlanRevisionNumber: 0,
+      }),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskCandidatePlanConfirmationResult(
+        { status: "confirmed", taskId, detail, catalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
 
     const otherTaskId = "00000000-0000-4000-8000-000000000885";
     expect(decodeDesktopProjectTaskSelection({ ...selection, extra: true })).toBeUndefined();

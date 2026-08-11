@@ -125,6 +125,7 @@ const PROJECT_TASK_DETAIL = Object.freeze({
   }),
   latestPlanRevisionId: null,
   candidatePlan: null,
+  confirmedPlan: null,
 });
 
 const PROJECT_TASK_REVISED = Object.freeze({
@@ -162,6 +163,11 @@ function context(
     createProjectTask: () => PROJECT_TASK_CREATED,
     readProjectTaskDetail: () => PROJECT_TASK_DETAIL,
     reviseProjectTaskRequirement: () => PROJECT_TASK_REVISED,
+    confirmProjectTaskCandidatePlan: () => ({
+      schemaVersion: 1,
+      status: "confirmed",
+      taskId: PROJECT_TASK_DETAIL.taskId,
+    }),
     readRoutingConfiguration: () => ROUTING_CONFIGURATION,
     setRoutingConfiguration: () => ROUTING_CONFIGURATION,
   };
@@ -620,6 +626,20 @@ describe("RPC dispatcher Project Task methods", () => {
     expectedProfileVersion: 1,
     expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000916",
   };
+  const confirmParams = {
+    commandId: "00000000-0000-4000-8000-000000000917",
+    projectId: PROJECT.projectId,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    expectedTaskVersion: 2,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: PROJECT_TASK_DETAIL.activeRequirement.revisionId,
+    candidatePlanRevisionId: generateParams.commandId,
+  };
+  const confirmed = {
+    schemaVersion: 1 as const,
+    status: "confirmed" as const,
+    taskId: PROJECT_TASK_CREATED.taskId,
+  };
 
   it("awaits candidate Plan generation and maps its stable outcomes", async () => {
     const base = context(() => ACCOUNT_STATUS);
@@ -676,7 +696,7 @@ describe("RPC dispatcher Project Task methods", () => {
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
   });
 
-  it("passes strict catalog, creation, detail, and revision inputs to their providers", () => {
+  it("passes strict catalog, creation, detail, revision, and confirmation inputs to providers", () => {
     const readProjectTaskCatalogPage = vi.fn(() => PROJECT_TASK_CATALOG);
     const createProjectTask = vi.fn(() => PROJECT_TASK_CREATED);
     const base = context(() => ACCOUNT_STATUS);
@@ -714,6 +734,15 @@ describe("RPC dispatcher Project Task methods", () => {
       }).envelope,
     ).toMatchObject({ kind: "response", result: PROJECT_TASK_REVISED });
     expect(reviseProjectTaskRequirement).toHaveBeenCalledWith(reviseParams);
+
+    const confirmProjectTaskCandidatePlan = vi.fn(() => confirmed);
+    expect(
+      dispatchRpcRequest(request("task.plan.confirm_candidate", confirmParams), {
+        ...base,
+        confirmProjectTaskCandidatePlan,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: confirmed });
+    expect(confirmProjectTaskCandidatePlan).toHaveBeenCalledWith(confirmParams);
   });
 
   it("rejects malformed Task parameters before consulting providers", () => {
@@ -721,6 +750,7 @@ describe("RPC dispatcher Project Task methods", () => {
     const createProjectTask = vi.fn(() => PROJECT_TASK_CREATED);
     const readProjectTaskDetail = vi.fn(() => PROJECT_TASK_DETAIL);
     const reviseProjectTaskRequirement = vi.fn(() => PROJECT_TASK_REVISED);
+    const confirmProjectTaskCandidatePlan = vi.fn(() => confirmed);
     const base = context(() => ACCOUNT_STATUS);
     expect(
       dispatchRpcRequest(request("task.catalog_page", { ...catalogParams, limit: 13 }), {
@@ -749,10 +779,17 @@ describe("RPC dispatcher Project Task methods", () => {
         { ...base, reviseProjectTaskRequirement },
       ).envelope,
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(
+      dispatchRpcRequest(
+        request("task.plan.confirm_candidate", { ...confirmParams, expectedTaskVersion: 0 }),
+        { ...base, confirmProjectTaskCandidatePlan },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
     expect(readProjectTaskCatalogPage).not.toHaveBeenCalled();
     expect(createProjectTask).not.toHaveBeenCalled();
     expect(readProjectTaskDetail).not.toHaveBeenCalled();
     expect(reviseProjectTaskRequirement).not.toHaveBeenCalled();
+    expect(confirmProjectTaskCandidatePlan).not.toHaveBeenCalled();
   });
 
   it("maps Task conflicts and invalid provider results to stable public errors", () => {
@@ -762,6 +799,7 @@ describe("RPC dispatcher Project Task methods", () => {
       ["task.create", createParams, "createProjectTask"],
       ["task.detail", detailParams, "readProjectTaskDetail"],
       ["task.requirement.revise", reviseParams, "reviseProjectTaskRequirement"],
+      ["task.plan.confirm_candidate", confirmParams, "confirmProjectTaskCandidatePlan"],
     ] as const) {
       const conflict = dispatchRpcRequest(request(method, params), {
         ...base,

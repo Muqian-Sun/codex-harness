@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import {
   decodeDesktopProjectTaskCreation,
+  decodeDesktopProjectTaskCandidatePlanConfirmation,
   decodeDesktopProjectTaskCandidatePlanGeneration,
   decodeDesktopProjectTaskRequirementRevision,
 } from "../shared/bootstrap-state.js";
@@ -17,6 +18,8 @@ import type {
   DesktopProjectSummary,
   DesktopProjectTaskCatalog,
   DesktopProjectTaskCatalogResult,
+  DesktopProjectTaskCandidatePlanConfirmation,
+  DesktopProjectTaskCandidatePlanConfirmationResult,
   DesktopProjectTaskCandidatePlanGeneration,
   DesktopProjectTaskCandidatePlanMutationResult,
   DesktopProjectTaskCreation,
@@ -470,6 +473,12 @@ export function ProjectTaskPanel({
   const [planStatus, setPlanStatus] = useState<
     "idle" | "generating" | DesktopProjectTaskCandidatePlanMutationResult["status"]
   >("idle");
+  const [planConfirmationStatus, setPlanConfirmationStatus] = useState<
+    | "idle"
+    | "reviewing"
+    | "confirming"
+    | DesktopProjectTaskCandidatePlanConfirmationResult["status"]
+  >("idle");
 
   useEffect(() => {
     if (
@@ -494,6 +503,7 @@ export function ProjectTaskPanel({
     setRequirementSource("");
     setRevisionStatus("idle");
     setPlanStatus("idle");
+    setPlanConfirmationStatus("idle");
     void desktopTaskApi()
       .readProjectTaskCatalog(selectedProjectId)
       .then((result) => {
@@ -527,6 +537,7 @@ export function ProjectTaskPanel({
     setDetailState({ status: "loading" });
     setRevisionStatus("idle");
     setPlanStatus("idle");
+    setPlanConfirmationStatus("idle");
     void desktopTaskApi()
       .readProjectTaskDetail({ projectId: selectedProjectId, taskId: selectedTaskId })
       .then((result) => {
@@ -568,7 +579,10 @@ export function ProjectTaskPanel({
     creation !== undefined &&
     selectedBinding?.status === "default_bound" &&
     mutationStatus !== "creating" &&
-    revisionStatus !== "revising";
+    revisionStatus !== "revising" &&
+    planStatus !== "generating" &&
+    planConfirmationStatus !== "reviewing" &&
+    planConfirmationStatus !== "confirming";
   const requirementRevision =
     detailState.status !== "loaded"
       ? undefined
@@ -584,7 +598,9 @@ export function ProjectTaskPanel({
     requirementSource !== detailState.detail.activeRequirement.sourceText &&
     revisionStatus !== "revising" &&
     mutationStatus !== "creating" &&
-    planStatus !== "generating";
+    planStatus !== "generating" &&
+    planConfirmationStatus !== "reviewing" &&
+    planConfirmationStatus !== "confirming";
   const planGeneration =
     detailState.status !== "loaded"
       ? undefined
@@ -602,9 +618,32 @@ export function ProjectTaskPanel({
     requirementSource === detailState.detail.activeRequirement.sourceText &&
     mutationStatus !== "creating" &&
     revisionStatus !== "revising" &&
-    planStatus !== "generating";
+    planStatus !== "generating" &&
+    planConfirmationStatus !== "reviewing" &&
+    planConfirmationStatus !== "confirming";
+  const planConfirmation =
+    detailState.status !== "loaded" || detailState.detail.candidatePlan === null
+      ? undefined
+      : decodeDesktopProjectTaskCandidatePlanConfirmation({
+          projectId: detailState.detail.projectId,
+          taskId: detailState.detail.taskId,
+          expectedTaskVersion: detailState.detail.taskVersion,
+          candidatePlanRevisionNumber: detailState.detail.candidatePlan.revisionNumber,
+        });
+  const canBeginPlanConfirmation =
+    planConfirmation !== undefined &&
+    detailState.status === "loaded" &&
+    requirementSource === detailState.detail.activeRequirement.sourceText &&
+    mutationStatus !== "creating" &&
+    revisionStatus !== "revising" &&
+    planStatus !== "generating" &&
+    planConfirmationStatus !== "confirming";
   const taskMutationPending =
-    mutationStatus === "creating" || revisionStatus === "revising" || planStatus === "generating";
+    mutationStatus === "creating" ||
+    revisionStatus === "revising" ||
+    planStatus === "generating" ||
+    planConfirmationStatus === "reviewing" ||
+    planConfirmationStatus === "confirming";
 
   const createTask = async (): Promise<void> => {
     if (!canCreate || creation === undefined) {
@@ -662,6 +701,7 @@ export function ProjectTaskPanel({
       return;
     }
     setPlanStatus("generating");
+    setPlanConfirmationStatus("idle");
     try {
       const result = await desktopTaskApi().generateProjectTaskCandidatePlan(planGeneration);
       if (result.status === "generated" || result.status === "existing") {
@@ -687,6 +727,41 @@ export function ProjectTaskPanel({
       setPlanStatus(result.status);
     } catch {
       setPlanStatus("unavailable");
+    }
+  };
+
+  const confirmCandidatePlan = async (): Promise<void> => {
+    if (planConfirmationStatus !== "reviewing" || planConfirmation === undefined) {
+      return;
+    }
+    setPlanConfirmationStatus("confirming");
+    try {
+      const result = await desktopTaskApi().confirmProjectTaskCandidatePlan(planConfirmation);
+      if (result.status === "confirmed" || result.status === "existing") {
+        setCatalogState({ status: "loaded", catalog: result.catalog });
+        setDetailState({ status: "loaded", detail: result.detail });
+        setRequirementSource(result.detail.activeRequirement.sourceText);
+        setPlanStatus("idle");
+      } else if (result.status === "conflict") {
+        const [currentDetail, currentCatalog] = await Promise.allSettled([
+          desktopTaskApi().readProjectTaskDetail({
+            projectId: planConfirmation.projectId,
+            taskId: planConfirmation.taskId,
+          }),
+          desktopTaskApi().readProjectTaskCatalog(planConfirmation.projectId),
+        ]);
+        if (currentDetail.status === "fulfilled" && currentDetail.value.status === "loaded") {
+          setDetailState({ status: "loaded", detail: currentDetail.value.detail });
+          setRequirementSource(currentDetail.value.detail.activeRequirement.sourceText);
+        }
+        if (currentCatalog.status === "fulfilled" && currentCatalog.value.status === "loaded") {
+          setCatalogState({ status: "loaded", catalog: currentCatalog.value.catalog });
+        }
+        setPlanStatus("idle");
+      }
+      setPlanConfirmationStatus(result.status);
+    } catch {
+      setPlanConfirmationStatus("unavailable");
     }
   };
 
@@ -730,6 +805,7 @@ export function ProjectTaskPanel({
             setRequirementSource("");
             setRevisionStatus("idle");
             setPlanStatus("idle");
+            setPlanConfirmationStatus("idle");
           }}
         >
           <span aria-hidden="true">＋</span>
@@ -750,6 +826,7 @@ export function ProjectTaskPanel({
               setMutationStatus("idle");
               setRevisionStatus("idle");
               setPlanStatus("idle");
+              setPlanConfirmationStatus("idle");
             }}
           >
             {projects.projects.length === 0 ? <option value="">尚无 Project</option> : null}
@@ -792,6 +869,7 @@ export function ProjectTaskPanel({
                       setRequirementSource("");
                       setRevisionStatus("idle");
                       setPlanStatus("idle");
+                      setPlanConfirmationStatus("idle");
                     }}
                   >
                     <span className="task-list-icon" aria-hidden="true">
@@ -910,6 +988,9 @@ export function ProjectTaskPanel({
                       if (revisionStatus !== "revising") {
                         setRevisionStatus("idle");
                       }
+                      if (planConfirmationStatus !== "confirming") {
+                        setPlanConfirmationStatus("idle");
+                      }
                     }}
                   />
                 </label>
@@ -1000,25 +1081,111 @@ export function ProjectTaskPanel({
           <span aria-hidden="true">!</span>
           <div>
             <strong>执行保持锁定</strong>
-            <p>候选计划只用于审阅，不会创建 DAG、Run 或工具调用。</p>
+            <p>确认只设置权威计划，不会创建 DAG、Run 或工具调用。</p>
           </div>
         </div>
         {detailState.status === "loaded" ? (
           <div className="inspector-plan-content">
             <div className="task-plan-divider" aria-hidden="true">
-              <span>CANDIDATE PLAN</span>
+              <span>
+                {detailState.detail.candidatePlan !== null
+                  ? "CANDIDATE PLAN"
+                  : detailState.detail.confirmedPlan !== null
+                    ? "CONFIRMED PLAN"
+                    : "PLAN"}
+              </span>
               <i />
-              <small>UNCONFIRMED</small>
+              <small>
+                {detailState.detail.candidatePlan !== null
+                  ? "UNCONFIRMED"
+                  : detailState.detail.confirmedPlan !== null
+                    ? "WAITING FOR DAG"
+                    : "NOT CREATED"}
+              </small>
             </div>
-            {detailState.detail.candidatePlan === null ? (
+            {detailState.detail.candidatePlan !== null ? (
+              <>
+                {detailState.detail.confirmedPlan !== null ? (
+                  <div className="task-plan-authority-summary" data-task-plan-authority-summary>
+                    <span>CURRENT AUTHORITY</span>
+                    <strong>
+                      P{detailState.detail.confirmedPlan.revisionNumber} ·{" "}
+                      {detailState.detail.confirmedPlan.steps.length} STEPS
+                    </strong>
+                    <p>新候选尚未替换当前权威计划。</p>
+                  </div>
+                ) : null}
+                <CandidatePlan plan={detailState.detail.candidatePlan} kind="candidate" />
+                {planConfirmationStatus === "reviewing" ||
+                planConfirmationStatus === "confirming" ? (
+                  <div
+                    className="plan-confirmation-card"
+                    data-task-plan-confirmation
+                    role="group"
+                    aria-labelledby="plan-confirmation-title"
+                    aria-describedby="plan-confirmation-description"
+                  >
+                    <span>AUTHORITY CHANGE</span>
+                    <strong id="plan-confirmation-title">
+                      确认 P{detailState.detail.candidatePlan.revisionNumber}？
+                    </strong>
+                    <p id="plan-confirmation-description">
+                      {detailState.detail.stage === "active_graph_with_candidate"
+                        ? "这会把候选步骤设为新的权威计划，并使当前 DAG 失效。不会创建新 DAG、Run 或启动执行。"
+                        : "这会把候选步骤复制为新的权威 Plan Revision。不会创建 DAG、Run 或启动执行。"}
+                    </p>
+                    <div>
+                      <button
+                        type="button"
+                        data-task-plan-confirm-cancel
+                        disabled={planConfirmationStatus === "confirming"}
+                        onClick={() => setPlanConfirmationStatus("idle")}
+                      >
+                        返回审阅
+                      </button>
+                      <button
+                        type="button"
+                        data-task-plan-confirm-commit
+                        disabled={planConfirmationStatus === "confirming"}
+                        onClick={() => void confirmCandidatePlan()}
+                      >
+                        {planConfirmationStatus === "confirming"
+                          ? "正在提交确认"
+                          : "确认并设为权威计划"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="plan-confirm-button"
+                    data-task-plan-confirm
+                    disabled={!canBeginPlanConfirmation}
+                    onClick={() => setPlanConfirmationStatus("reviewing")}
+                  >
+                    确认此计划
+                  </button>
+                )}
+              </>
+            ) : detailState.detail.confirmedPlan !== null ? (
+              <CandidatePlan plan={detailState.detail.confirmedPlan} kind="confirmed" />
+            ) : (
               <div className="task-plan-empty">
                 <span aria-hidden="true">◇</span>
                 <strong>还没有候选计划</strong>
                 <p>高级档位会只读分析当前 Project，并生成一份持久、可审阅的步骤清单。</p>
               </div>
-            ) : (
-              <CandidatePlan plan={detailState.detail.candidatePlan} />
             )}
+            {detailState.detail.candidatePlan !== null || planConfirmationStatus !== "idle" ? (
+              <span
+                className="plan-confirmation-feedback"
+                data-task-plan-confirmation-status={planConfirmationStatus}
+                data-task-plan-confirm-feedback
+                aria-live="polite"
+              >
+                {taskCandidatePlanConfirmationFeedback(planConfirmationStatus)}
+              </span>
+            ) : null}
             <button
               type="button"
               className="plan-generate-button"
@@ -1060,15 +1227,25 @@ export function ProjectTaskPanel({
 
 export function CandidatePlan({
   plan,
-}: Readonly<{ plan: NonNullable<DesktopProjectTaskDetail["candidatePlan"]> }>) {
+  kind = "candidate",
+}: Readonly<{
+  plan: NonNullable<DesktopProjectTaskDetail["candidatePlan"]>;
+  kind?: "candidate" | "confirmed";
+}>) {
   return (
-    <section className="task-candidate-plan" data-task-plan-revision={plan.revisionNumber}>
+    <section
+      className="task-candidate-plan"
+      data-task-plan-kind={kind}
+      data-task-plan-revision={plan.revisionNumber}
+    >
       <header>
         <div>
           <span>PLAN REVISION</span>
           <strong>P{plan.revisionNumber}</strong>
         </div>
-        <small>{plan.steps.length} STEPS · REVIEW REQUIRED</small>
+        <small>
+          {plan.steps.length} STEPS · {kind === "confirmed" ? "AUTHORITATIVE" : "REVIEW REQUIRED"}
+        </small>
       </header>
       <ol>
         {plan.steps.map((step, index) => (
@@ -1193,6 +1370,31 @@ export function taskCandidatePlanFeedback(
       return "分析期间 Task、路由或模型目录已变化；结果未写入，已刷新当前状态。";
     case "unavailable":
       return "结果当前未知；请重启并核对 Plan 修订号，不要盲目重复生成。";
+  }
+}
+
+export function taskCandidatePlanConfirmationFeedback(
+  status:
+    | "idle"
+    | "reviewing"
+    | "confirming"
+    | DesktopProjectTaskCandidatePlanConfirmationResult["status"],
+): string {
+  switch (status) {
+    case "idle":
+      return "确认需要再次核对；确认本身不会创建 DAG 或启动执行。";
+    case "reviewing":
+      return "请核对权威状态变化；仍需第二次明确确认。";
+    case "confirming":
+      return "正在复核 Task、Requirement 与候选 Plan 栅栏并提交确认。";
+    case "confirmed":
+      return "权威 Plan Revision 已持久化；执行仍锁定，下一步需单独创建 DAG。";
+    case "existing":
+      return "相同确认命令已经落盘，已重新读取当前权威计划。";
+    case "conflict":
+      return "Task 或候选计划已经变化；已刷新权威详情，请重新审阅后再确认。";
+    case "unavailable":
+      return "结果当前未知；请重启并核对 confirmed Plan 修订号，不要盲目重复确认。";
   }
 }
 
@@ -1513,6 +1715,9 @@ function desktopTaskApi(): Readonly<{
   generateProjectTaskCandidatePlan(
     input: DesktopProjectTaskCandidatePlanGeneration,
   ): Promise<DesktopProjectTaskCandidatePlanMutationResult>;
+  confirmProjectTaskCandidatePlan(
+    input: DesktopProjectTaskCandidatePlanConfirmation,
+  ): Promise<DesktopProjectTaskCandidatePlanConfirmationResult>;
 }> {
   return (
     globalThis as unknown as {
@@ -1530,6 +1735,9 @@ function desktopTaskApi(): Readonly<{
         generateProjectTaskCandidatePlan(
           input: DesktopProjectTaskCandidatePlanGeneration,
         ): Promise<DesktopProjectTaskCandidatePlanMutationResult>;
+        confirmProjectTaskCandidatePlan(
+          input: DesktopProjectTaskCandidatePlanConfirmation,
+        ): Promise<DesktopProjectTaskCandidatePlanConfirmationResult>;
       }>;
     }
   ).codexHarness;
