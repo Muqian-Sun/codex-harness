@@ -59,6 +59,14 @@ const harness = vi.hoisted(() => {
     void input;
     return { status: "unavailable" as const };
   });
+  const generateProjectTaskOperationManifest = vi.fn(async (input: unknown): Promise<unknown> => {
+    void input;
+    return { status: "unavailable" as const };
+  });
+  const confirmProjectTaskOperationManifest = vi.fn(async (input: unknown): Promise<unknown> => {
+    void input;
+    return { status: "unavailable" as const };
+  });
   const appEvents = new Map<string, (...arguments_: unknown[]) => unknown>();
   const webContents = {
     executeJavaScript: vi.fn(async () => true),
@@ -90,6 +98,8 @@ const harness = vi.hoisted(() => {
     generateProjectTaskCandidatePlan,
     confirmProjectTaskCandidatePlan,
     materializeProjectTaskGraph,
+    generateProjectTaskOperationManifest,
+    confirmProjectTaskOperationManifest,
     ipcHandlers,
     webContents,
     window,
@@ -241,6 +251,14 @@ vi.mock("./application-controller.js", () => {
         return await harness.materializeProjectTaskGraph(input);
       }
 
+      async generateProjectTaskOperationManifest(input: unknown): Promise<unknown> {
+        return await harness.generateProjectTaskOperationManifest(input);
+      }
+
+      async confirmProjectTaskOperationManifest(input: unknown): Promise<unknown> {
+        return await harness.confirmProjectTaskOperationManifest(input);
+      }
+
       async setRoutingConfiguration(): Promise<Readonly<{ status: "unavailable" }>> {
         return { status: "unavailable" };
       }
@@ -321,6 +339,12 @@ describe("desktop Electron main Project Task IPC", () => {
     const generate = harness.ipcHandlers.get("desktop.task.plan.generate_candidate")!;
     const confirm = harness.ipcHandlers.get("desktop.task.plan.confirm_candidate")!;
     const materialize = harness.ipcHandlers.get("desktop.task.graph.materialize")!;
+    const generateManifest = harness.ipcHandlers.get(
+      "desktop.task.operation_manifest.generate_candidate",
+    )!;
+    const confirmManifest = harness.ipcHandlers.get(
+      "desktop.task.operation_manifest.confirm_candidate",
+    )!;
     const event = { sender: harness.webContents, senderFrame: {} };
     const taskId = "00000000-0000-4000-8000-000000000894";
     const selection = { projectId: PROJECT_ID, taskId };
@@ -518,6 +542,7 @@ describe("desktop Electron main Project Task IPC", () => {
         },
         activeGraph: {
           revisionNumber: 1,
+          operationManifest: null,
           schedulePreview: { state: "dependency_eligible", nodeNumber: 1 },
           nodes: [
             {
@@ -534,10 +559,120 @@ describe("desktop Electron main Project Task IPC", () => {
       },
       catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
     });
-    await expect(materialize(event, graphMaterialization)).resolves.toMatchObject({
+    const materializedResult = await materialize(event, graphMaterialization);
+    expect(materializedResult).toMatchObject({
       status: "materialized",
       taskId,
       detail: { stage: "active_graph" },
+    });
+    const graphDetail = (materializedResult as { detail: Record<string, unknown> }).detail;
+
+    const manifestGeneration = {
+      ...selection,
+      expectedTaskVersion: 3,
+      nodeNumber: 1,
+      expectedManifestStateVersion: 0,
+    };
+    const manifestConfirmation = {
+      ...selection,
+      expectedTaskVersion: 3,
+      nodeNumber: 1,
+      manifestStateVersion: 1,
+    };
+    await expect(generateManifest(event, { ...manifestGeneration, nodeNumber: 0 })).rejects.toThrow(
+      "operation manifest generation is invalid",
+    );
+    await expect(
+      generateManifest({ sender: {}, senderFrame: {} }, manifestGeneration),
+    ).rejects.toThrow("not authorized");
+    await expect(
+      confirmManifest({ sender: {}, senderFrame: {} }, manifestConfirmation),
+    ).rejects.toThrow("not authorized");
+    let resolveManifestGeneration!: (value: Readonly<{ status: "unavailable" }>) => void;
+    harness.generateProjectTaskOperationManifest.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveManifestGeneration = resolve;
+        }),
+    );
+    const pendingManifestGeneration = generateManifest(event, manifestGeneration);
+    await vi.waitFor(() =>
+      expect(harness.generateProjectTaskOperationManifest).toHaveBeenCalledWith(manifestGeneration),
+    );
+    await expect(generateManifest(event, manifestGeneration)).resolves.toEqual({
+      status: "unavailable",
+    });
+    await expect(confirmManifest(event, manifestConfirmation)).resolves.toEqual({
+      status: "unavailable",
+    });
+    await expect(materialize(event, graphMaterialization)).resolves.toEqual({
+      status: "unavailable",
+    });
+    resolveManifestGeneration({ status: "unavailable" });
+    await expect(pendingManifestGeneration).resolves.toEqual({ status: "unavailable" });
+
+    const candidateManifestDetail = {
+      ...graphDetail,
+      activeGraph: {
+        ...(graphDetail.activeGraph as Record<string, unknown>),
+        operationManifest: {
+          nodeNumber: 1,
+          stateVersion: 1,
+          status: "candidate",
+          operations: [{ operationNumber: 1, kind: "inspect_workspace" }],
+        },
+      },
+    };
+    harness.generateProjectTaskOperationManifest.mockResolvedValueOnce({
+      status: "generated",
+      taskId,
+      detail: candidateManifestDetail,
+      catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
+    });
+    await expect(generateManifest(event, manifestGeneration)).resolves.toMatchObject({
+      status: "generated",
+      taskId,
+      detail: { activeGraph: { operationManifest: { status: "candidate" } } },
+    });
+    expect(harness.generateProjectTaskOperationManifest).toHaveBeenLastCalledWith(
+      manifestGeneration,
+    );
+
+    await expect(
+      confirmManifest(event, { ...manifestConfirmation, manifestStateVersion: 0 }),
+    ).rejects.toThrow("operation manifest confirmation is invalid");
+    const confirmedManifestDetail = {
+      ...candidateManifestDetail,
+      activeGraph: {
+        ...candidateManifestDetail.activeGraph,
+        operationManifest: {
+          ...candidateManifestDetail.activeGraph.operationManifest,
+          stateVersion: 2,
+          status: "confirmed",
+        },
+      },
+    };
+    harness.confirmProjectTaskOperationManifest.mockResolvedValueOnce({
+      status: "confirmed",
+      taskId,
+      detail: confirmedManifestDetail,
+      catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
+    });
+    await expect(confirmManifest(event, manifestConfirmation)).resolves.toMatchObject({
+      status: "confirmed",
+      taskId,
+      detail: { activeGraph: { operationManifest: { status: "confirmed" } } },
+    });
+    expect(harness.confirmProjectTaskOperationManifest).toHaveBeenLastCalledWith(
+      manifestConfirmation,
+    );
+    harness.generateProjectTaskOperationManifest.mockRejectedValueOnce(new Error("contained"));
+    await expect(generateManifest(event, manifestGeneration)).resolves.toEqual({
+      status: "unavailable",
+    });
+    harness.confirmProjectTaskOperationManifest.mockRejectedValueOnce(new Error("contained"));
+    await expect(confirmManifest(event, manifestConfirmation)).resolves.toEqual({
+      status: "unavailable",
     });
     harness.materializeProjectTaskGraph.mockRejectedValueOnce(new Error("contained"));
     await expect(materialize(event, graphMaterialization)).resolves.toEqual({

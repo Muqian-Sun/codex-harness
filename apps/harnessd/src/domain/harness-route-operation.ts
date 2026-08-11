@@ -1,28 +1,15 @@
-import { validateJsonValue } from "@codex-harness/protocol";
+import {
+  TASK_OPERATION_KINDS,
+  validateJsonValue,
+  type HarnessTaskOperationKind,
+} from "@codex-harness/protocol";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_OPERATIONS = 256;
 
-export const HARNESS_ROUTE_OPERATION_KINDS = Object.freeze([
-  "answer",
-  "inspect_workspace",
-  "modify_workspace",
-  "run_workspace_command",
-  "network_read",
-  "credential_access",
-  "external_write",
-  "database_migration",
-  "production_change",
-  "irreversible_action",
-  "permission_boundary_change",
-  "public_api_change",
-  "concurrent_change",
-  "architecture_decision",
-  "systemic_diagnosis",
-  "user_interaction",
-] as const);
+export const HARNESS_ROUTE_OPERATION_KINDS = TASK_OPERATION_KINDS;
 
-export type HarnessRouteOperationKind = (typeof HARNESS_ROUTE_OPERATION_KINDS)[number];
+export type HarnessRouteOperationKind = HarnessTaskOperationKind;
 
 export type HarnessRouteOperation = Readonly<{
   operationId: string;

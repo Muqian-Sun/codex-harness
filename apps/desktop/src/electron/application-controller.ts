@@ -15,6 +15,8 @@ import {
   decodeDesktopProjectTaskCandidatePlanConfirmation,
   decodeDesktopProjectTaskCandidatePlanGeneration,
   decodeDesktopProjectTaskGraphMaterialization,
+  decodeDesktopProjectTaskOperationManifestConfirmation,
+  decodeDesktopProjectTaskOperationManifestGeneration,
   decodeDesktopProjectTaskRequirementRevision,
   decodeDesktopProjectTaskSelection,
   decodeDesktopRoutingConfigurationUpdate,
@@ -37,6 +39,8 @@ import {
   type DesktopProjectTaskCandidatePlanMutationResult,
   type DesktopProjectTaskDetailResult,
   type DesktopProjectTaskGraphMaterializationResult,
+  type DesktopProjectTaskOperationManifestConfirmationResult,
+  type DesktopProjectTaskOperationManifestGenerationResult,
   type DesktopProjectTaskMutationResult,
   type DesktopProjectTaskRequirementMutationResult,
 } from "../shared/bootstrap-state.js";
@@ -65,6 +69,8 @@ export type DesktopSupervisorHandle = Pick<
       | "confirmProjectTaskCandidatePlan"
       | "generateProjectTaskCandidatePlan"
       | "materializeProjectTaskGraph"
+      | "generateProjectTaskOperationManifest"
+      | "confirmProjectTaskOperationManifest"
     >
   >;
 
@@ -670,6 +676,223 @@ export class DesktopApplicationController {
         detail.confirmedPlan === null ||
         detail.activeGraph === null
       ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      return this.#stateStore.current.phase === "ready"
+        ? Object.freeze({ status: result.status, taskId: result.taskId, detail, catalog })
+        : Object.freeze({ status: "unavailable" });
+    } catch (error: unknown) {
+      return error instanceof HarnessRpcClientError && error.remoteCode === "rpc.conflict"
+        ? Object.freeze({ status: "conflict" })
+        : Object.freeze({ status: "unavailable" });
+    }
+  }
+
+  async generateProjectTaskOperationManifest(
+    input: unknown,
+  ): Promise<DesktopProjectTaskOperationManifestGenerationResult> {
+    const generation = decodeDesktopProjectTaskOperationManifestGeneration(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    const project =
+      generation === undefined || state.phase !== "ready"
+        ? undefined
+        : state.projects.projects.find((candidate) => candidate.projectId === generation.projectId);
+    const binding =
+      generation === undefined || state.phase !== "ready"
+        ? undefined
+        : state.projectRoutingBindings.bindings.find(
+            (candidate) => candidate.projectId === generation.projectId,
+          );
+    if (
+      generation === undefined ||
+      state.phase !== "ready" ||
+      supervisor === undefined ||
+      typeof supervisor.generateProjectTaskOperationManifest !== "function" ||
+      project === undefined ||
+      binding?.status !== "default_bound" ||
+      binding.bindingVersion === null ||
+      !state.routing.configured ||
+      state.routing.configurationRevisionId === null ||
+      state.routing.availability?.deep !== "observed_available"
+    ) {
+      return Object.freeze({ status: "unavailable" });
+    }
+
+    try {
+      const current = await supervisor.readProjectTaskDetail({
+        projectId: generation.projectId,
+        taskId: generation.taskId,
+      });
+      const visibleCurrent = projectDesktopProjectTaskDetail(
+        current,
+        generation.projectId,
+        generation.taskId,
+      );
+      const graph = current.activeGraph;
+      const visibleGraph = visibleCurrent.activeGraph;
+      const nodeId = graph?.topologicalOrder[generation.nodeNumber - 1];
+      const rawManifest = graph?.operationManifest ?? null;
+      if (
+        current.taskVersion !== generation.expectedTaskVersion ||
+        visibleCurrent.stage !== "active_graph" ||
+        current.confirmedPlan === null ||
+        current.latestPlanRevisionId !== current.confirmedPlan.revisionId ||
+        graph === null ||
+        visibleGraph === null ||
+        visibleGraph.schedulePreview.state !== "dependency_eligible" ||
+        visibleGraph.schedulePreview.nodeNumber !== generation.nodeNumber ||
+        nodeId === undefined ||
+        graph.schedulePreview.state !== "dependency_eligible" ||
+        graph.schedulePreview.nodeId !== nodeId ||
+        (visibleGraph.operationManifest?.stateVersion ?? 0) !==
+          generation.expectedManifestStateVersion ||
+        (rawManifest?.stateVersion ?? 0) !== generation.expectedManifestStateVersion
+      ) {
+        return Object.freeze({ status: "conflict" });
+      }
+      const result = await supervisor.generateProjectTaskOperationManifest({
+        commandId: randomUUID(),
+        projectId: generation.projectId,
+        taskId: generation.taskId,
+        nodeId,
+        expectedProjectVersion: project.projectVersion,
+        expectedTaskVersion: current.taskVersion,
+        expectedOwnershipVersion: current.ownershipVersion,
+        previousRequirementRevisionId: current.activeRequirement.revisionId,
+        confirmedPlanRevisionId: current.confirmedPlan.revisionId,
+        graphRevisionId: graph.revisionId,
+        expectedManifestStateVersion: generation.expectedManifestStateVersion,
+        previousManifestId: rawManifest?.manifestId ?? null,
+        expectedRoutingBindingVersion: binding.bindingVersion,
+        expectedProfileVersion: state.routing.profileVersion,
+        expectedConfigurationRevisionId: state.routing.configurationRevisionId,
+      });
+      if (
+        (result.status !== "generated" && result.status !== "existing") ||
+        result.taskId !== generation.taskId ||
+        result.nodeId !== nodeId ||
+        this.#stateStore.current.phase !== "ready"
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const [rawDetail, rawCatalog] = await Promise.all([
+        supervisor.readProjectTaskDetail({
+          projectId: generation.projectId,
+          taskId: generation.taskId,
+        }),
+        supervisor.readProjectTaskCatalogPage({
+          projectId: generation.projectId,
+          cursor: null,
+          limit: 12,
+        }),
+      ]);
+      const detail = projectDesktopProjectTaskDetail(
+        rawDetail,
+        generation.projectId,
+        generation.taskId,
+      );
+      const catalog = projectDesktopProjectTaskCatalog(rawCatalog, generation.projectId);
+      if (detail.activeGraph?.operationManifest === null || detail.activeGraph === null) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      return this.#stateStore.current.phase === "ready"
+        ? Object.freeze({ status: result.status, taskId: result.taskId, detail, catalog })
+        : Object.freeze({ status: "unavailable" });
+    } catch (error: unknown) {
+      return error instanceof HarnessRpcClientError && error.remoteCode === "rpc.conflict"
+        ? Object.freeze({ status: "conflict" })
+        : Object.freeze({ status: "unavailable" });
+    }
+  }
+
+  async confirmProjectTaskOperationManifest(
+    input: unknown,
+  ): Promise<DesktopProjectTaskOperationManifestConfirmationResult> {
+    const confirmation = decodeDesktopProjectTaskOperationManifestConfirmation(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (
+      confirmation === undefined ||
+      state.phase !== "ready" ||
+      supervisor === undefined ||
+      typeof supervisor.confirmProjectTaskOperationManifest !== "function" ||
+      !state.projects.projects.some((project) => project.projectId === confirmation.projectId)
+    ) {
+      return Object.freeze({ status: "unavailable" });
+    }
+
+    try {
+      const current = await supervisor.readProjectTaskDetail({
+        projectId: confirmation.projectId,
+        taskId: confirmation.taskId,
+      });
+      const visibleCurrent = projectDesktopProjectTaskDetail(
+        current,
+        confirmation.projectId,
+        confirmation.taskId,
+      );
+      const graph = current.activeGraph;
+      const visibleManifest = visibleCurrent.activeGraph?.operationManifest;
+      const manifest = graph?.operationManifest;
+      const nodeId = graph?.topologicalOrder[confirmation.nodeNumber - 1];
+      if (
+        current.taskVersion !== confirmation.expectedTaskVersion ||
+        visibleCurrent.stage !== "active_graph" ||
+        current.confirmedPlan === null ||
+        current.latestPlanRevisionId !== current.confirmedPlan.revisionId ||
+        graph === null ||
+        graph.schedulePreview.state !== "dependency_eligible" ||
+        nodeId === undefined ||
+        graph.schedulePreview.nodeId !== nodeId ||
+        visibleManifest?.nodeNumber !== confirmation.nodeNumber ||
+        visibleManifest.stateVersion !== confirmation.manifestStateVersion ||
+        visibleManifest.status !== "candidate" ||
+        manifest?.nodeId !== nodeId ||
+        manifest.stateVersion !== confirmation.manifestStateVersion ||
+        manifest.status !== "candidate"
+      ) {
+        return Object.freeze({ status: "conflict" });
+      }
+      const result = await supervisor.confirmProjectTaskOperationManifest({
+        commandId: randomUUID(),
+        projectId: confirmation.projectId,
+        taskId: confirmation.taskId,
+        nodeId,
+        manifestId: manifest.manifestId,
+        expectedTaskVersion: current.taskVersion,
+        expectedOwnershipVersion: current.ownershipVersion,
+        previousRequirementRevisionId: current.activeRequirement.revisionId,
+        confirmedPlanRevisionId: current.confirmedPlan.revisionId,
+        graphRevisionId: graph.revisionId,
+        expectedManifestStateVersion: confirmation.manifestStateVersion,
+      });
+      if (
+        (result.status !== "confirmed" && result.status !== "existing") ||
+        result.taskId !== confirmation.taskId ||
+        result.nodeId !== nodeId ||
+        this.#stateStore.current.phase !== "ready"
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const [rawDetail, rawCatalog] = await Promise.all([
+        supervisor.readProjectTaskDetail({
+          projectId: confirmation.projectId,
+          taskId: confirmation.taskId,
+        }),
+        supervisor.readProjectTaskCatalogPage({
+          projectId: confirmation.projectId,
+          cursor: null,
+          limit: 12,
+        }),
+      ]);
+      const detail = projectDesktopProjectTaskDetail(
+        rawDetail,
+        confirmation.projectId,
+        confirmation.taskId,
+      );
+      const catalog = projectDesktopProjectTaskCatalog(rawCatalog, confirmation.projectId);
+      if (detail.activeGraph?.operationManifest?.status !== "confirmed") {
         return Object.freeze({ status: "unavailable" });
       }
       return this.#stateStore.current.phase === "ready"

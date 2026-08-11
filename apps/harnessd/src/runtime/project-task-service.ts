@@ -13,12 +13,20 @@ import {
   type HarnessTaskDetailResult,
   type HarnessTaskGraphMaterializeParams,
   type HarnessTaskGraphMaterializeResult,
+  type HarnessTaskOperationManifestConfirmParams,
+  type HarnessTaskOperationManifestConfirmResult,
   type HarnessTaskRequirementReviseParams,
   type HarnessTaskRequirementReviseResult,
   type HarnessTaskStage,
   type HarnessTaskSummary,
   type JsonValue,
 } from "@codex-harness/protocol";
+
+import {
+  NodeOperationManifestError,
+  NodeOperationManifestRepository,
+  type NodeOperationManifestRecord,
+} from "../domain/node-operation-manifest-repository.js";
 
 import {
   ProjectRegistryError,
@@ -44,6 +52,7 @@ import type { StoredEvent } from "../persistence/event-store.js";
 
 const PLAN_CONFIRMATION_ACTOR = "desktop.project_task.plan_confirmation";
 const GRAPH_MATERIALIZATION_ACTOR = "desktop.project_task.graph_materialization";
+const MANIFEST_CONFIRMATION_ACTOR = "desktop.project_task.operation_manifest_confirmation";
 const TASK_PLAN_STREAM = "task.plan";
 const PLAN_REVISED_EVENT = "task.plan_revised";
 const GRAPH_COMMITTED_EVENT = "task.graph_committed";
@@ -80,6 +89,7 @@ export class ProjectTaskService {
   readonly #bindings: ProjectRoutingProfileBindingRepository;
   readonly #tasks: TaskPlanRepository;
   readonly #ownerships: TaskProjectOwnershipRepository;
+  readonly #manifests: NodeOperationManifestRepository;
   readonly #dependencies: NormalizedServiceDependencies;
 
   constructor(
@@ -99,6 +109,7 @@ export class ProjectTaskService {
       this.#bindings = new ProjectRoutingProfileBindingRepository(stateStore.events);
       this.#tasks = new TaskPlanRepository(stateStore.events);
       this.#ownerships = new TaskProjectOwnershipRepository(stateStore.events);
+      this.#manifests = new NodeOperationManifestRepository(stateStore.events);
       this.#dependencies = Object.freeze({
         now: dependencies.now,
         newId: dependencies.newId ?? PRODUCTION_DEPENDENCIES.newId,
@@ -216,11 +227,13 @@ export class ProjectTaskService {
       if (ownership.projectId !== params.projectId) {
         throw new ProjectTaskServiceError("conflict");
       }
+      const task = this.#tasks.readTask(params.taskId);
       return validateDetailResult(
         taskDetail(
-          this.#tasks.readTask(params.taskId),
+          task,
           ownership.projectId,
           ownership.ownershipVersion,
+          this.#currentManifest(task),
         ),
         params,
       );
@@ -455,6 +468,101 @@ export class ProjectTaskService {
     }
   }
 
+  confirmOperationManifest(input: unknown): HarnessTaskOperationManifestConfirmResult {
+    const decoded = decodeRequestParams("task.operation_manifest.confirm_candidate", input);
+    if (!decoded.ok) {
+      throw new ProjectTaskServiceError("conflict");
+    }
+    const params = decoded.value as HarnessTaskOperationManifestConfirmParams;
+
+    try {
+      this.#assertAvailable();
+      const existing = this.#stateStore.events.readByEventId(params.commandId);
+      const occurredAtMs =
+        existing === undefined ? requireTimestamp(this.#dependencies.now()) : existing.occurredAtMs;
+      if (existing === undefined) {
+        const project = this.#projects.readProject(params.projectId);
+        const ownership = this.#ownerships.readOwnership(params.taskId);
+        const task = this.#tasks.readTask(params.taskId);
+        const preview =
+          task.activeGraph === null ? null : previewSerialTaskSchedule(task.activeGraph);
+        const manifest = this.#manifests.readCurrentManifest(params.taskId, params.nodeId);
+        if (
+          ownership.projectId !== params.projectId ||
+          ownership.ownershipVersion !== params.expectedOwnershipVersion ||
+          task.taskVersion !== params.expectedTaskVersion ||
+          task.activeRequirement.revisionId !== params.previousRequirementRevisionId ||
+          task.confirmedPlan?.revisionId !== params.confirmedPlanRevisionId ||
+          task.latestPlan?.revisionId !== params.confirmedPlanRevisionId ||
+          task.latestPlan.status !== "confirmed" ||
+          task.activeGraph?.revisionId !== params.graphRevisionId ||
+          preview?.state !== "dependency_eligible" ||
+          preview.nodeId !== params.nodeId ||
+          manifest.manifestId !== params.manifestId ||
+          manifest.stateVersion !== params.expectedManifestStateVersion ||
+          manifest.status !== "candidate"
+        ) {
+          throw new ProjectTaskServiceError("conflict");
+        }
+        if (
+          occurredAtMs < project.updatedAtMs ||
+          occurredAtMs < ownership.updatedAtMs ||
+          occurredAtMs < task.updatedAtMs ||
+          occurredAtMs < manifest.updatedAtMs
+        ) {
+          throw new ProjectTaskServiceError("conflict");
+        }
+      }
+      const confirmed = this.#manifests.confirm({
+        eventId: params.commandId,
+        taskId: params.taskId,
+        nodeId: params.nodeId,
+        manifestId: params.manifestId,
+        expectedTaskVersion: params.expectedTaskVersion,
+        expectedGraphRevisionId: params.graphRevisionId,
+        expectedManifestStateVersion: params.expectedManifestStateVersion,
+        occurredAtMs,
+        metadata: {
+          actor: MANIFEST_CONFIRMATION_ACTOR,
+          correlationId: operationManifestConfirmationFingerprint(params),
+        },
+      });
+      return validateOperationManifestConfirmationResult({
+        schemaVersion: 1,
+        status: confirmed.duplicate ? "existing" : "confirmed",
+        taskId: params.taskId,
+        nodeId: params.nodeId,
+      });
+    } catch (error: unknown) {
+      throw mapServiceError(error);
+    }
+  }
+
+  #currentManifest(task: TaskPlanRecord): NodeOperationManifestRecord | null {
+    if (task.activeGraph === null) {
+      return null;
+    }
+    const preview = previewSerialTaskSchedule(task.activeGraph);
+    if (
+      preview.state !== "dependency_eligible" &&
+      preview.state !== "awaiting_claim" &&
+      preview.state !== "busy"
+    ) {
+      return null;
+    }
+    try {
+      return this.#manifests.readCurrentManifest(task.taskId, preview.nodeId);
+    } catch (error: unknown) {
+      if (
+        error instanceof NodeOperationManifestError &&
+        (error.code === "not_found" || error.code === "stale")
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   #assertAvailable(): void {
     if (this.#stateStore.state !== "ready") {
       throw new ProjectTaskServiceError("unavailable");
@@ -477,6 +585,7 @@ function taskDetail(
   task: TaskPlanRecord,
   projectId: string,
   ownershipVersion: number,
+  operationManifest: NodeOperationManifestRecord | null,
 ): HarnessTaskDetailResult {
   const candidatePlan =
     task.latestPlan?.status === "candidate" &&
@@ -518,6 +627,20 @@ function taskDetail(
                 }),
               ),
             ),
+            operationManifest:
+              operationManifest === null
+                ? null
+                : Object.freeze({
+                    manifestId: operationManifest.manifestId,
+                    nodeId: operationManifest.nodeId,
+                    stateVersion: operationManifest.stateVersion,
+                    status: operationManifest.status,
+                    operations: Object.freeze(
+                      operationManifest.operations.map((operation) =>
+                        Object.freeze({ ...operation }),
+                      ),
+                    ),
+                  }),
             schedulePreview: previewSerialTaskSchedule(task.activeGraph),
             topologicalOrder: Object.freeze([...task.activeGraph.topologicalOrder]),
           }),
@@ -664,6 +787,17 @@ function validateDetailResult(
                 }),
               ),
             ),
+            operationManifest:
+              result.activeGraph.operationManifest === null
+                ? null
+                : Object.freeze({
+                    ...result.activeGraph.operationManifest,
+                    operations: Object.freeze(
+                      result.activeGraph.operationManifest.operations.map((operation) =>
+                        Object.freeze({ ...operation }),
+                      ),
+                    ),
+                  }),
             schedulePreview:
               result.activeGraph.schedulePreview.state === "blocked"
                 ? Object.freeze({
@@ -692,6 +826,16 @@ function validateGraphMaterializationResult(input: unknown): HarnessTaskGraphMat
     throw new ProjectTaskServiceError("unavailable");
   }
   return Object.freeze(decoded.value as unknown as HarnessTaskGraphMaterializeResult);
+}
+
+function validateOperationManifestConfirmationResult(
+  input: unknown,
+): HarnessTaskOperationManifestConfirmResult {
+  const decoded = decodeResponseResult("task.operation_manifest.confirm_candidate", input);
+  if (!decoded.ok) {
+    throw new ProjectTaskServiceError("unavailable");
+  }
+  return Object.freeze(decoded.value as unknown as HarnessTaskOperationManifestConfirmResult);
 }
 
 function validateRequirementRevisionResult(input: unknown): HarnessTaskRequirementReviseResult {
@@ -744,6 +888,28 @@ function graphMaterializationFingerprint(params: HarnessTaskGraphMaterializePara
         params.previousRequirementRevisionId,
         params.confirmedPlanRevisionId,
         params.previousGraphRevisionId,
+      ]),
+    )
+    .digest("hex");
+}
+
+function operationManifestConfirmationFingerprint(
+  params: HarnessTaskOperationManifestConfirmParams,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        params.commandId,
+        params.projectId,
+        params.taskId,
+        params.nodeId,
+        params.manifestId,
+        params.expectedTaskVersion,
+        params.expectedOwnershipVersion,
+        params.previousRequirementRevisionId,
+        params.confirmedPlanRevisionId,
+        params.graphRevisionId,
+        params.expectedManifestStateVersion,
       ]),
     )
     .digest("hex");
@@ -834,8 +1000,12 @@ function mapServiceError(error: unknown): ProjectTaskServiceError {
     (error instanceof ProjectRegistryError ||
       error instanceof ProjectRoutingProfileBindingError ||
       error instanceof TaskPlanError ||
-      error instanceof TaskProjectOwnershipError) &&
-    (error.code === "conflict" || error.code === "invalid_input" || error.code === "not_found")
+      error instanceof TaskProjectOwnershipError ||
+      error instanceof NodeOperationManifestError) &&
+    (error.code === "conflict" ||
+      error.code === "invalid_input" ||
+      error.code === "not_found" ||
+      error.code === "stale")
   ) {
     return new ProjectTaskServiceError("conflict");
   }

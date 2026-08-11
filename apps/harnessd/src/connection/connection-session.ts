@@ -54,6 +54,8 @@ export type ConnectionSessionConfig = Readonly<{
   confirmProjectTaskCandidatePlan?: (params: JsonValue) => unknown;
   materializeProjectTaskGraph?: (params: JsonValue) => unknown;
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
+  generateProjectTaskOperationManifest?: (params: JsonValue) => unknown | Promise<unknown>;
+  confirmProjectTaskOperationManifest?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
@@ -136,6 +138,8 @@ export class ConnectionSession {
   readonly #confirmProjectTaskCandidatePlan: (params: JsonValue) => unknown;
   readonly #materializeProjectTaskGraph: (params: JsonValue) => unknown;
   readonly #generateProjectTaskCandidatePlan: (params: JsonValue) => unknown | Promise<unknown>;
+  readonly #generateProjectTaskOperationManifest: (params: JsonValue) => unknown | Promise<unknown>;
+  readonly #confirmProjectTaskOperationManifest: (params: JsonValue) => unknown;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
@@ -178,7 +182,11 @@ export class ConnectionSession {
       (config.materializeProjectTaskGraph !== undefined &&
         typeof config.materializeProjectTaskGraph !== "function") ||
       (config.generateProjectTaskCandidatePlan !== undefined &&
-        typeof config.generateProjectTaskCandidatePlan !== "function")
+        typeof config.generateProjectTaskCandidatePlan !== "function") ||
+      (config.generateProjectTaskOperationManifest !== undefined &&
+        typeof config.generateProjectTaskOperationManifest !== "function") ||
+      (config.confirmProjectTaskOperationManifest !== undefined &&
+        typeof config.confirmProjectTaskOperationManifest !== "function")
     ) {
       throw new Error("Invalid connection session configuration.");
     }
@@ -209,6 +217,10 @@ export class ConnectionSession {
     this.#materializeProjectTaskGraph = config.materializeProjectTaskGraph ?? (() => null);
     this.#generateProjectTaskCandidatePlan =
       config.generateProjectTaskCandidatePlan ?? (() => null);
+    this.#generateProjectTaskOperationManifest =
+      config.generateProjectTaskOperationManifest ?? (() => null);
+    this.#confirmProjectTaskOperationManifest =
+      config.confirmProjectTaskOperationManifest ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
     this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
@@ -393,6 +405,8 @@ export class ConnectionSession {
       confirmProjectTaskCandidatePlan: this.#confirmProjectTaskCandidatePlan,
       materializeProjectTaskGraph: this.#materializeProjectTaskGraph,
       generateProjectTaskCandidatePlan: this.#generateProjectTaskCandidatePlan,
+      generateProjectTaskOperationManifest: this.#generateProjectTaskOperationManifest,
+      confirmProjectTaskOperationManifest: this.#confirmProjectTaskOperationManifest,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
     });

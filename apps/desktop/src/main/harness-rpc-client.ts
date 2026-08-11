@@ -42,6 +42,10 @@ import {
   type HarnessTaskDetailResult as ProtocolTaskDetailResult,
   type HarnessTaskGraphMaterializeParams as ProtocolTaskGraphMaterializeParams,
   type HarnessTaskGraphMaterializeResult as ProtocolTaskGraphMaterializeResult,
+  type HarnessTaskOperationManifestConfirmParams as ProtocolTaskOperationManifestConfirmParams,
+  type HarnessTaskOperationManifestConfirmResult as ProtocolTaskOperationManifestConfirmResult,
+  type HarnessTaskOperationManifestGenerateParams as ProtocolTaskOperationManifestGenerateParams,
+  type HarnessTaskOperationManifestGenerateResult as ProtocolTaskOperationManifestGenerateResult,
   type HarnessTaskRequirementReviseParams as ProtocolTaskRequirementReviseParams,
   type HarnessTaskRequirementReviseResult as ProtocolTaskRequirementReviseResult,
   type RpcEvent,
@@ -151,6 +155,14 @@ export type HarnessTaskDetailParams = Readonly<ProtocolTaskDetailParams>;
 export type HarnessTaskDetailResult = Readonly<ProtocolTaskDetailResult>;
 export type HarnessTaskGraphMaterializeParams = Readonly<ProtocolTaskGraphMaterializeParams>;
 export type HarnessTaskGraphMaterializeResult = Readonly<ProtocolTaskGraphMaterializeResult>;
+export type HarnessTaskOperationManifestGenerateParams =
+  Readonly<ProtocolTaskOperationManifestGenerateParams>;
+export type HarnessTaskOperationManifestGenerateResult =
+  Readonly<ProtocolTaskOperationManifestGenerateResult>;
+export type HarnessTaskOperationManifestConfirmParams =
+  Readonly<ProtocolTaskOperationManifestConfirmParams>;
+export type HarnessTaskOperationManifestConfirmResult =
+  Readonly<ProtocolTaskOperationManifestConfirmResult>;
 export type HarnessTaskRequirementReviseParams = Readonly<ProtocolTaskRequirementReviseParams>;
 export type HarnessTaskRequirementReviseResult = Readonly<ProtocolTaskRequirementReviseResult>;
 export type HarnessAccountStatusObservation = Readonly<{
@@ -438,6 +450,27 @@ export class HarnessRpcClient {
       "task.graph.materialize",
       params as unknown as JsonValue,
     )) as unknown as HarnessTaskGraphMaterializeResult;
+  }
+
+  async generateProjectTaskOperationManifest(
+    params: HarnessTaskOperationManifestGenerateParams,
+  ): Promise<HarnessTaskOperationManifestGenerateResult> {
+    return (
+      await this.#requestObservation(
+        "task.operation_manifest.generate_candidate",
+        params as unknown as JsonValue,
+        CANDIDATE_PLAN_REQUEST_TIMEOUT_MS,
+      )
+    ).value as unknown as HarnessTaskOperationManifestGenerateResult;
+  }
+
+  async confirmProjectTaskOperationManifest(
+    params: HarnessTaskOperationManifestConfirmParams,
+  ): Promise<HarnessTaskOperationManifestConfirmResult> {
+    return (await this.request(
+      "task.operation_manifest.confirm_candidate",
+      params as unknown as JsonValue,
+    )) as unknown as HarnessTaskOperationManifestConfirmResult;
   }
 
   async reviseProjectTaskRequirement(

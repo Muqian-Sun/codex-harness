@@ -40,6 +40,8 @@ function createSession(options?: {
   confirmProjectTaskCandidatePlan?: (params: JsonValue) => unknown;
   materializeProjectTaskGraph?: (params: JsonValue) => unknown;
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
+  generateProjectTaskOperationManifest?: (params: JsonValue) => unknown | Promise<unknown>;
+  confirmProjectTaskOperationManifest?: (params: JsonValue) => unknown;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }): ConnectionSession {
@@ -81,6 +83,12 @@ function createSession(options?: {
     ...(options?.generateProjectTaskCandidatePlan === undefined
       ? {}
       : { generateProjectTaskCandidatePlan: options.generateProjectTaskCandidatePlan }),
+    ...(options?.generateProjectTaskOperationManifest === undefined
+      ? {}
+      : { generateProjectTaskOperationManifest: options.generateProjectTaskOperationManifest }),
+    ...(options?.confirmProjectTaskOperationManifest === undefined
+      ? {}
+      : { confirmProjectTaskOperationManifest: options.confirmProjectTaskOperationManifest }),
     ...(options?.readRoutingConfiguration === undefined
       ? {}
       : { readRoutingConfiguration: options.readRoutingConfiguration }),
@@ -434,6 +442,19 @@ describe("daemon connection session", () => {
       status: "materialized",
       taskId,
     }));
+    const manifestNodeId = "00000000-0000-4000-8000-000000000918";
+    const generateProjectTaskOperationManifest = vi.fn(async () => ({
+      schemaVersion: 1,
+      status: "generated",
+      taskId,
+      nodeId: manifestNodeId,
+    }));
+    const confirmProjectTaskOperationManifest = vi.fn(() => ({
+      schemaVersion: 1,
+      status: "confirmed",
+      taskId,
+      nodeId: manifestNodeId,
+    }));
     const session = createSession({
       readProjectTaskCatalogPage,
       createProjectTask,
@@ -441,6 +462,8 @@ describe("daemon connection session", () => {
       reviseProjectTaskRequirement,
       confirmProjectTaskCandidatePlan,
       materializeProjectTaskGraph,
+      generateProjectTaskOperationManifest,
+      confirmProjectTaskOperationManifest,
     });
     await authenticate(session);
     const catalogParams = { projectId, cursor: null, limit: 12 };
@@ -523,11 +546,97 @@ describe("daemon connection session", () => {
     ).toMatchObject({ kind: "response", result: { status: "materialized", taskId } });
     expect(materializeProjectTaskGraph).toHaveBeenCalledWith(graphParams);
 
+    const generateManifestParams = {
+      commandId: "00000000-0000-4000-8000-000000000919",
+      projectId,
+      taskId,
+      nodeId: manifestNodeId,
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 4,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+      confirmedPlanRevisionId: confirmParams.commandId,
+      graphRevisionId: graphParams.commandId,
+      expectedManifestStateVersion: 0,
+      previousManifestId: null,
+      expectedRoutingBindingVersion: 1,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: "00000000-0000-4000-8000-00000000091a",
+    };
+    expect(
+      sentValues(
+        await session.receive(
+          frame(
+            rpc(
+              "task-operation-generate",
+              "task.operation_manifest.generate_candidate",
+              generateManifestParams,
+            ),
+          ),
+        ),
+      )[0],
+    ).toMatchObject({ kind: "response", result: { status: "generated", nodeId: manifestNodeId } });
+    expect(generateProjectTaskOperationManifest).toHaveBeenCalledWith(generateManifestParams);
+
+    const confirmManifestParams = {
+      commandId: "00000000-0000-4000-8000-00000000091b",
+      projectId,
+      taskId,
+      nodeId: manifestNodeId,
+      manifestId: "00000000-0000-4000-8000-00000000091c",
+      expectedTaskVersion: 4,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+      confirmedPlanRevisionId: confirmParams.commandId,
+      graphRevisionId: graphParams.commandId,
+      expectedManifestStateVersion: 1,
+    };
+    expect(
+      sentValues(
+        await session.receive(
+          frame(
+            rpc(
+              "task-operation-confirm",
+              "task.operation_manifest.confirm_candidate",
+              confirmManifestParams,
+            ),
+          ),
+        ),
+      )[0],
+    ).toMatchObject({ kind: "response", result: { status: "confirmed", nodeId: manifestNodeId } });
+    expect(confirmProjectTaskOperationManifest).toHaveBeenCalledWith(confirmManifestParams);
+
     const missing = createSession();
     await authenticate(missing);
     expect(
       sentValues(
         await missing.receive(frame(rpc("task-missing", "task.catalog_page", catalogParams))),
+      )[0],
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+    expect(
+      sentValues(
+        await missing.receive(
+          frame(
+            rpc(
+              "task-operation-generate-missing",
+              "task.operation_manifest.generate_candidate",
+              generateManifestParams,
+            ),
+          ),
+        ),
+      )[0],
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+    expect(
+      sentValues(
+        await missing.receive(
+          frame(
+            rpc(
+              "task-operation-confirm-missing",
+              "task.operation_manifest.confirm_candidate",
+              confirmManifestParams,
+            ),
+          ),
+        ),
       )[0],
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
   });

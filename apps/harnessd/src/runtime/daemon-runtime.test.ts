@@ -925,7 +925,7 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
     });
   });
 
-  it("generates a deep-tier candidate Plan and preserves same-connection request order", async () => {
+  it("generates deep-tier candidate Plan and operation-manifest artifacts in request order", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codex-harness-runtime-plan-"));
     temporaryDirectories.push(directory);
     await chmod(directory, 0o700);
@@ -984,7 +984,20 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       runtimeWorkerClose(),
       undefined,
       [Object.freeze({ account: null, requiresOpenaiAuth: true })],
-      async () => await analysisGate.promise,
+      async (input) => {
+        const schema = input.outputSchema as Readonly<{
+          properties?: Readonly<Record<string, unknown>>;
+        }>;
+        return schema.properties?.operations === undefined
+          ? await analysisGate.promise
+          : {
+              threadId: "thread-operation-manifest",
+              turnId: "turn-operation-manifest",
+              output: {
+                operations: [{ kind: "inspect_workspace" }, { kind: "modify_workspace" }],
+              },
+            };
+      },
     );
     const workerManager = await createWorkerManager(worker);
     const { endpoint } = await createRuntime({ stateStore, workerManager });
@@ -1122,6 +1135,109 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
           basedOnPlanRevisionId: confirmationCommandId,
           schedulePreview: { state: "dependency_eligible" },
           nodes: [{ status: "pending", dependsOnNodeIds: [] }],
+        },
+      },
+    });
+
+    const graphDetail = new ProjectTaskService(stateStore).detail({ projectId, taskId });
+    const nodeId = graphDetail.activeGraph?.topologicalOrder[0];
+    if (nodeId === undefined) {
+      throw new Error("The materialized graph did not expose its scheduled node.");
+    }
+    const manifestCommandId = "00000000-0000-4000-8000-00000000099c";
+    const manifestPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("operation-manifest-generate", "task.operation_manifest.generate_candidate", {
+        commandId: manifestCommandId,
+        projectId,
+        taskId,
+        nodeId,
+        expectedProjectVersion: 1,
+        expectedTaskVersion: 4,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: requirementRevisionId,
+        confirmedPlanRevisionId: confirmationCommandId,
+        graphRevisionId: graphCommandId,
+        expectedManifestStateVersion: 0,
+        previousManifestId: null,
+        expectedRoutingBindingVersion: 1,
+        expectedProfileVersion: 1,
+        expectedConfigurationRevisionId: configurationRevisionId,
+      }),
+    );
+    await expect(manifestPromise).resolves.toMatchObject({
+      kind: "response",
+      id: "operation-manifest-generate",
+      result: { status: "generated", taskId, nodeId },
+    });
+    expect(worker.analysisInputs).toHaveLength(2);
+    expect(worker.analysisInputs[1]).toMatchObject({
+      cwd: "/Users/example/candidate-plan",
+      modelProvider: "openai",
+      model: "deep",
+      reasoningEffort: "high",
+    });
+
+    const candidateManifestDetailPromise = readFrame(socket);
+    sendFrame(socket, rpc("operation-manifest-detail", "task.detail", { projectId, taskId }));
+    await expect(candidateManifestDetailPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        taskVersion: 4,
+        stage: "active_graph",
+        activeGraph: {
+          operationManifest: {
+            manifestId: manifestCommandId,
+            nodeId,
+            stateVersion: 1,
+            status: "candidate",
+            operations: [{ kind: "inspect_workspace" }, { kind: "modify_workspace" }],
+          },
+        },
+      },
+    });
+
+    const manifestConfirmationPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("operation-manifest-confirm", "task.operation_manifest.confirm_candidate", {
+        commandId: "00000000-0000-4000-8000-00000000099d",
+        projectId,
+        taskId,
+        nodeId,
+        manifestId: manifestCommandId,
+        expectedTaskVersion: 4,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: requirementRevisionId,
+        confirmedPlanRevisionId: confirmationCommandId,
+        graphRevisionId: graphCommandId,
+        expectedManifestStateVersion: 1,
+      }),
+    );
+    await expect(manifestConfirmationPromise).resolves.toMatchObject({
+      kind: "response",
+      id: "operation-manifest-confirm",
+      result: { status: "confirmed", taskId, nodeId },
+    });
+
+    const confirmedManifestDetailPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("operation-manifest-confirmed-detail", "task.detail", { projectId, taskId }),
+    );
+    await expect(confirmedManifestDetailPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        taskVersion: 4,
+        stage: "active_graph",
+        activeGraph: {
+          operationManifest: {
+            manifestId: manifestCommandId,
+            nodeId,
+            stateVersion: 2,
+            status: "confirmed",
+          },
         },
       },
     });

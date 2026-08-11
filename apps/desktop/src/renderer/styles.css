@@ -1376,6 +1376,248 @@ a:focus-visible {
   line-height: 1.45;
 }
 
+.operation-manifest {
+  overflow: hidden;
+  margin-top: 12px;
+  border: 1px solid rgba(67, 78, 87, 0.2);
+  border-radius: 14px;
+  background: rgba(249, 250, 248, 0.84);
+  box-shadow: 0 8px 26px rgba(54, 59, 58, 0.045);
+}
+
+.operation-manifest > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 12px;
+  border-bottom: 1px solid rgba(67, 78, 87, 0.12);
+  background: linear-gradient(112deg, rgba(75, 90, 96, 0.075), rgba(255, 253, 248, 0.52));
+}
+
+.operation-manifest > header span,
+.operation-manifest > header strong {
+  display: block;
+}
+
+.operation-manifest > header span,
+.operation-manifest > header small {
+  color: #647078;
+  font-size: 7px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+}
+
+.operation-manifest > header strong {
+  margin-top: 2px;
+  color: #46545b;
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 17px;
+}
+
+.operation-manifest[data-task-operation-manifest="candidate"] > header small {
+  color: var(--amber);
+}
+
+.operation-manifest[data-task-operation-manifest="confirmed"] > header small {
+  color: var(--moss);
+}
+
+.operation-manifest-empty {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  padding: 13px 12px;
+}
+
+.operation-manifest-empty > span {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border: 1px solid rgba(67, 78, 87, 0.15);
+  border-radius: 9px;
+  color: #647078;
+  font-family: Georgia, serif;
+  background: rgba(75, 90, 96, 0.06);
+}
+
+.operation-manifest-empty strong {
+  font-size: 10px;
+}
+
+.operation-manifest-empty p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.48;
+}
+
+.operation-manifest-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.operation-manifest-list li {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.operation-manifest-list li:last-child {
+  border-bottom: 0;
+}
+
+.operation-manifest-list li > span {
+  display: grid;
+  width: 24px;
+  height: 22px;
+  place-items: center;
+  border-radius: 7px;
+  color: #5f6b72;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 7px;
+  background: rgba(75, 90, 96, 0.08);
+}
+
+.operation-manifest-list strong {
+  display: block;
+  font-size: 9px;
+}
+
+.operation-manifest-list p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.operation-manifest-confirmation {
+  margin: 10px;
+  padding: 11px;
+  border: 1px solid rgba(167, 107, 50, 0.26);
+  border-radius: 11px;
+  background: linear-gradient(145deg, rgba(250, 239, 224, 0.94), rgba(255, 253, 248, 0.96));
+}
+
+.operation-manifest-confirmation > span {
+  color: var(--amber);
+  font-size: 7px;
+  font-weight: 900;
+  letter-spacing: 0.11em;
+}
+
+.operation-manifest-confirmation > strong {
+  display: block;
+  margin-top: 4px;
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 14px;
+}
+
+.operation-manifest-confirmation > p {
+  margin: 5px 0 0;
+  color: #735b43;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.operation-manifest-confirmation > div {
+  display: grid;
+  grid-template-columns: 0.72fr 1.28fr;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.operation-manifest-confirmation button,
+.operation-manifest-confirm-button,
+.operation-manifest-generate-button {
+  min-height: 32px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font-size: 8px;
+  font-weight: 800;
+  background: rgba(255, 253, 248, 0.82);
+}
+
+.operation-manifest-confirmation button:last-child,
+.operation-manifest-confirm-button {
+  color: #fffaf3;
+  border-color: var(--amber);
+  background: var(--amber);
+}
+
+.operation-manifest-confirm-button,
+.operation-manifest-generate-button {
+  width: calc(100% - 20px);
+  margin: 10px;
+}
+
+.operation-manifest-generate-button {
+  color: #f8fbf7;
+  border-color: var(--moss);
+  background: var(--moss);
+}
+
+.operation-manifest-confirm-button + .operation-manifest-generate-button {
+  margin-top: 0;
+}
+
+.operation-manifest-confirmation button:hover:not(:disabled),
+.operation-manifest-confirm-button:hover:not(:disabled),
+.operation-manifest-generate-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.03);
+}
+
+.operation-manifest-confirmation button:disabled,
+.operation-manifest-confirm-button:disabled,
+.operation-manifest-generate-button:disabled {
+  color: var(--faint);
+  border-color: var(--line);
+  background: #e9e5dc;
+}
+
+.operation-manifest-locked {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  margin: 9px 10px 0;
+  padding: 8px 9px;
+  border: 1px solid rgba(78, 109, 94, 0.16);
+  border-radius: 9px;
+  color: var(--moss-dark);
+  background: var(--moss-wash);
+}
+
+.operation-manifest-locked > span {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 8px;
+  background: var(--moss);
+}
+
+.operation-manifest-locked p {
+  margin: 0;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.operation-manifest-feedback {
+  display: block;
+  margin: 0 12px 11px;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
 .inspector-empty {
   margin-top: 4px;
 }

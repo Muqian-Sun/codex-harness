@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { TASK_OPERATION_KINDS } from "@codex-harness/protocol";
+
 import {
   BootstrapStateStore,
   BootstrapStateTransitionError,
+  DESKTOP_TASK_OPERATION_KINDS,
   advanceDesktopBootstrapState,
   decodeDesktopBootstrapState,
   decodeDesktopProjectSelectionResult,
@@ -17,6 +20,10 @@ import {
   decodeDesktopProjectTaskDetailResult,
   decodeDesktopProjectTaskGraphMaterialization,
   decodeDesktopProjectTaskGraphMaterializationResult,
+  decodeDesktopProjectTaskOperationManifestConfirmation,
+  decodeDesktopProjectTaskOperationManifestConfirmationResult,
+  decodeDesktopProjectTaskOperationManifestGeneration,
+  decodeDesktopProjectTaskOperationManifestGenerationResult,
   decodeDesktopProjectTaskMutationResult,
   decodeDesktopProjectTaskRequirementMutationResult,
   decodeDesktopProjectTaskRequirementRevision,
@@ -34,6 +41,10 @@ import {
   projectDesktopRoutingConfiguration,
   readyBootstrapState,
 } from "./bootstrap-state.js";
+
+it("keeps the desktop operation-kind boundary synchronized with the protocol", () => {
+  expect(DESKTOP_TASK_OPERATION_KINDS).toEqual(TASK_OPERATION_KINDS);
+});
 
 const CATALOG = Object.freeze({
   provider: "openai",
@@ -731,6 +742,7 @@ describe("desktop bootstrap state", () => {
             status: "pending",
           },
         ],
+        operationManifest: null,
         schedulePreview: { state: "dependency_eligible", nodeId },
         topologicalOrder: [nodeId],
       },
@@ -753,6 +765,211 @@ describe("desktop bootstrap state", () => {
     });
     expect(JSON.stringify(graphDetail)).not.toContain(graphId);
     expect(JSON.stringify(graphDetail)).not.toContain(nodeId);
+    const manifestId = "00000000-0000-4000-8000-00000000088a";
+    const operationId = "00000000-0000-4000-8000-00000000088b";
+    const manifestDetail = projectDesktopProjectTaskDetail(
+      {
+        ...graphRaw,
+        activeGraph: {
+          ...graphRaw.activeGraph,
+          operationManifest: {
+            manifestId,
+            nodeId,
+            stateVersion: 1,
+            status: "candidate",
+            operations: [{ operationId, kind: "inspect_workspace" }],
+          },
+        },
+      },
+      PROJECT.projectId,
+      taskId,
+    );
+    expect(manifestDetail.activeGraph?.operationManifest).toEqual({
+      nodeNumber: 1,
+      stateVersion: 1,
+      status: "candidate",
+      operations: [{ operationNumber: 1, kind: "inspect_workspace" }],
+    });
+    expect(JSON.stringify(manifestDetail)).not.toContain(manifestId);
+    expect(JSON.stringify(manifestDetail)).not.toContain(operationId);
+    expect(
+      decodeDesktopProjectTaskOperationManifestGeneration({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 6,
+        nodeNumber: 1,
+        expectedManifestStateVersion: 1,
+      }),
+    ).toMatchObject({ nodeNumber: 1, expectedManifestStateVersion: 1 });
+    expect(
+      decodeDesktopProjectTaskOperationManifestConfirmation({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 6,
+        nodeNumber: 1,
+        manifestStateVersion: 1,
+      }),
+    ).toMatchObject({ nodeNumber: 1, manifestStateVersion: 1 });
+    expect(
+      decodeDesktopProjectTaskOperationManifestGeneration({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 6,
+        nodeNumber: 0,
+        expectedManifestStateVersion: 1,
+      }),
+    ).toBeUndefined();
+    const manifestCatalog = {
+      projectId: PROJECT.projectId,
+      tasks: [],
+      hasMore: false,
+    };
+    expect(
+      decodeDesktopProjectTaskOperationManifestGenerationResult(
+        { status: "generated", taskId, detail: manifestDetail, catalog: manifestCatalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toMatchObject({ status: "generated" });
+    expect(
+      decodeDesktopProjectTaskOperationManifestGenerationResult(
+        { status: "future" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskOperationManifestGenerationResult(
+        { status: "generated", taskId, detail: graphDetail, catalog: manifestCatalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskOperationManifestGenerationResult(
+        {
+          status: "generated",
+          taskId,
+          detail: {
+            ...manifestDetail,
+            activeGraph: {
+              ...manifestDetail.activeGraph!,
+              operationManifest: {
+                ...manifestDetail.activeGraph!.operationManifest!,
+                stateVersion: 0,
+              },
+            },
+          },
+          catalog: manifestCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskOperationManifestGenerationResult(
+        { status: "conflict" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({ status: "conflict" });
+    const confirmedManifestDetail = {
+      ...manifestDetail,
+      activeGraph: {
+        ...manifestDetail.activeGraph!,
+        operationManifest: {
+          ...manifestDetail.activeGraph!.operationManifest!,
+          stateVersion: 2,
+          status: "confirmed" as const,
+        },
+      },
+    };
+    expect(
+      decodeDesktopProjectTaskOperationManifestConfirmationResult(
+        {
+          status: "confirmed",
+          taskId,
+          detail: confirmedManifestDetail,
+          catalog: manifestCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toMatchObject({ status: "confirmed" });
+    expect(
+      decodeDesktopProjectTaskOperationManifestConfirmationResult(
+        { status: "confirmed", taskId, detail: manifestDetail, catalog: manifestCatalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskOperationManifestConfirmationResult(
+        { status: "future" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskOperationManifestConfirmationResult(
+        {
+          status: "confirmed",
+          taskId,
+          detail: confirmedManifestDetail,
+          catalog: { ...manifestCatalog, projectId: "invalid" },
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskOperationManifestConfirmationResult(
+        { status: "unavailable" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({ status: "unavailable" });
+    expect(() =>
+      projectDesktopProjectTaskDetail(
+        {
+          ...graphRaw,
+          activeGraph: {
+            ...graphRaw.activeGraph,
+            operationManifest: {
+              manifestId,
+              nodeId,
+              stateVersion: 0,
+              status: "candidate",
+              operations: [{ operationId, kind: "inspect_workspace" }],
+            },
+          },
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toThrow("bootstrap state transition is invalid");
+    expect(() =>
+      projectDesktopProjectTaskDetail(
+        {
+          ...graphRaw,
+          activeGraph: {
+            ...graphRaw.activeGraph,
+            operationManifest: {
+              manifestId,
+              nodeId,
+              stateVersion: 1,
+              status: "candidate",
+              operations: [
+                { operationId, kind: "inspect_workspace" },
+                { operationId, kind: "modify_workspace" },
+              ],
+            },
+          },
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toThrow("bootstrap state transition is invalid");
     for (const [status, schedulePreview, expectedPreview] of [
       ["ready", { state: "awaiting_claim", nodeId }, { state: "awaiting_claim", nodeNumber: 1 }],
       ["running", { state: "busy", nodeId }, { state: "busy", nodeNumber: 1 }],

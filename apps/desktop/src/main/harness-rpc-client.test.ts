@@ -600,7 +600,21 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
                     ? { schemaVersion: 1, status: "confirmed", taskId }
                     : method === "task.graph.materialize"
                       ? { schemaVersion: 1, status: "materialized", taskId }
-                      : { schemaVersion: 1, status: "revised", taskId },
+                      : method === "task.operation_manifest.generate_candidate"
+                        ? {
+                            schemaVersion: 1,
+                            status: "generated",
+                            taskId,
+                            nodeId: "00000000-0000-4000-8000-000000000919",
+                          }
+                        : method === "task.operation_manifest.confirm_candidate"
+                          ? {
+                              schemaVersion: 1,
+                              status: "confirmed",
+                              taskId,
+                              nodeId: "00000000-0000-4000-8000-000000000919",
+                            }
+                          : { schemaVersion: 1, status: "revised", taskId },
       });
     });
     const client = await createClient(endpoint);
@@ -664,6 +678,50 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       }),
     ).resolves.toEqual({ schemaVersion: 1, status: "materialized", taskId });
     await expect(
+      client.generateProjectTaskOperationManifest({
+        commandId: "00000000-0000-4000-8000-00000000091a",
+        projectId,
+        taskId,
+        nodeId: "00000000-0000-4000-8000-000000000919",
+        expectedProjectVersion: 1,
+        expectedTaskVersion: 4,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        confirmedPlanRevisionId: "00000000-0000-4000-8000-000000000917",
+        graphRevisionId: "00000000-0000-4000-8000-000000000918",
+        expectedManifestStateVersion: 0,
+        previousManifestId: null,
+        expectedRoutingBindingVersion: 1,
+        expectedProfileVersion: 1,
+        expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000916",
+      }),
+    ).resolves.toEqual({
+      schemaVersion: 1,
+      status: "generated",
+      taskId,
+      nodeId: "00000000-0000-4000-8000-000000000919",
+    });
+    await expect(
+      client.confirmProjectTaskOperationManifest({
+        commandId: "00000000-0000-4000-8000-00000000091b",
+        projectId,
+        taskId,
+        nodeId: "00000000-0000-4000-8000-000000000919",
+        manifestId: "00000000-0000-4000-8000-00000000091c",
+        expectedTaskVersion: 4,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        confirmedPlanRevisionId: "00000000-0000-4000-8000-000000000917",
+        graphRevisionId: "00000000-0000-4000-8000-000000000918",
+        expectedManifestStateVersion: 1,
+      }),
+    ).resolves.toEqual({
+      schemaVersion: 1,
+      status: "confirmed",
+      taskId,
+      nodeId: "00000000-0000-4000-8000-000000000919",
+    });
+    await expect(
       client.reviseProjectTaskRequirement({
         commandId: "00000000-0000-4000-8000-000000000914",
         projectId,
@@ -681,6 +739,8 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       "task.plan.generate_candidate",
       "task.plan.confirm_candidate",
       "task.graph.materialize",
+      "task.operation_manifest.generate_candidate",
+      "task.operation_manifest.confirm_candidate",
       "task.requirement.revise",
     ]);
     await expect(

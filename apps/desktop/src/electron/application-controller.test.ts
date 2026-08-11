@@ -936,6 +936,11 @@ describe("desktop application controller", () => {
     let planRevisionId: string | null = null;
     let confirmedPlanRevisionId: string | null = null;
     let graphRevisionId: string | null = null;
+    let operationManifest: Readonly<{
+      manifestId: string;
+      stateVersion: number;
+      status: "candidate" | "confirmed";
+    }> | null = null;
     const rawDetail = () => ({
       schemaVersion: 1 as const,
       projectId: PROJECT.projectId,
@@ -1010,6 +1015,23 @@ describe("desktop application controller", () => {
                   status: "pending" as const,
                 },
               ],
+              operationManifest:
+                operationManifest === null
+                  ? null
+                  : {
+                      ...operationManifest,
+                      nodeId,
+                      operations: [
+                        {
+                          operationId: "00000000-0000-4000-8000-0000000008a2",
+                          kind: "inspect_workspace" as const,
+                        },
+                        {
+                          operationId: "00000000-0000-4000-8000-0000000008a3",
+                          kind: "modify_workspace" as const,
+                        },
+                      ],
+                    },
               schedulePreview: { state: "dependency_eligible" as const, nodeId },
               topologicalOrder: [nodeId],
             },
@@ -1052,6 +1074,45 @@ describe("desktop application controller", () => {
       graphRevisionId = command.commandId;
       return { schemaVersion: 1 as const, status: "materialized" as const, taskId };
     });
+    let manifestGenerationCount = 0;
+    const generateProjectTaskOperationManifest = vi.fn(
+      async (_command: Readonly<Record<string, unknown>>) => {
+        void _command;
+        manifestGenerationCount += 1;
+        operationManifest = {
+          manifestId:
+            manifestGenerationCount === 1
+              ? "00000000-0000-4000-8000-0000000008a4"
+              : "00000000-0000-4000-8000-0000000008a5",
+          stateVersion: manifestGenerationCount,
+          status: "candidate",
+        };
+        return {
+          schemaVersion: 1 as const,
+          status: "generated" as const,
+          taskId,
+          nodeId,
+        };
+      },
+    );
+    const confirmProjectTaskOperationManifest = vi.fn(
+      async (_command: Readonly<Record<string, unknown>>) => {
+        void _command;
+        if (operationManifest !== null) {
+          operationManifest = {
+            ...operationManifest,
+            stateVersion: operationManifest.stateVersion + 1,
+            status: "confirmed",
+          };
+        }
+        return {
+          schemaVersion: 1 as const,
+          status: "confirmed" as const,
+          taskId,
+          nodeId,
+        };
+      },
+    );
     const defaultBinding = {
       projectId: PROJECT.projectId,
       bindingVersion: 3,
@@ -1086,6 +1147,8 @@ describe("desktop application controller", () => {
         generateProjectTaskCandidatePlan,
         confirmProjectTaskCandidatePlan,
         materializeProjectTaskGraph,
+        generateProjectTaskOperationManifest,
+        confirmProjectTaskOperationManifest,
         readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
         setRoutingConfiguration: routingMethods().setRoutingConfiguration,
         stop: vi.fn(async () => closeResult("graceful")),
@@ -1208,6 +1271,174 @@ describe("desktop application controller", () => {
     });
     expect(JSON.stringify(materialization)).not.toContain(nodeId);
     expect(JSON.stringify(materialization)).not.toContain(graphCommand.commandId);
+    await expect(
+      controller.generateProjectTaskOperationManifest({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 0,
+        nodeNumber: 1,
+        expectedManifestStateVersion: 0,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    const generatedManifest = await controller.generateProjectTaskOperationManifest({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 4,
+      nodeNumber: 1,
+      expectedManifestStateVersion: 0,
+    });
+    expect(generatedManifest).toMatchObject({
+      status: "generated",
+      taskId,
+      detail: {
+        taskVersion: 4,
+        stage: "active_graph",
+        activeGraph: {
+          operationManifest: {
+            nodeNumber: 1,
+            stateVersion: 1,
+            status: "candidate",
+            operations: [
+              { operationNumber: 1, kind: "inspect_workspace" },
+              { operationNumber: 2, kind: "modify_workspace" },
+            ],
+          },
+        },
+      },
+    });
+    const manifestCommand = generateProjectTaskOperationManifest.mock.calls[0]![0];
+    expect(manifestCommand).toMatchObject({
+      projectId: PROJECT.projectId,
+      taskId,
+      nodeId,
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 4,
+      expectedOwnershipVersion: 2,
+      previousRequirementRevisionId: requirementId,
+      confirmedPlanRevisionId: confirmationCommand.commandId,
+      graphRevisionId: graphCommand.commandId,
+      expectedManifestStateVersion: 0,
+      previousManifestId: null,
+      expectedRoutingBindingVersion: 3,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: CONFIGURED_ROUTING.configurationRevisionId,
+    });
+    expect(JSON.stringify(generatedManifest)).not.toContain(nodeId);
+    expect(JSON.stringify(generatedManifest)).not.toContain("00000000-0000-4000-8000-0000000008a4");
+    readProjectTaskDetail.mockRejectedValueOnce(
+      new HarnessRpcClientError("rpc_error", "rpc.conflict"),
+    );
+    await expect(
+      controller.generateProjectTaskOperationManifest({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        expectedManifestStateVersion: 1,
+      }),
+    ).resolves.toEqual({ status: "conflict" });
+    generateProjectTaskOperationManifest.mockResolvedValueOnce({
+      schemaVersion: 1,
+      status: "generated",
+      taskId,
+      nodeId: taskId,
+    });
+    await expect(
+      controller.generateProjectTaskOperationManifest({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        expectedManifestStateVersion: 1,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    const regeneratedManifest = await controller.generateProjectTaskOperationManifest({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 4,
+      nodeNumber: 1,
+      expectedManifestStateVersion: 1,
+    });
+    expect(regeneratedManifest).toMatchObject({
+      status: "generated",
+      detail: {
+        activeGraph: { operationManifest: { stateVersion: 2, status: "candidate" } },
+      },
+    });
+    expect(generateProjectTaskOperationManifest.mock.calls[2]![0]).toMatchObject({
+      previousManifestId: "00000000-0000-4000-8000-0000000008a4",
+      expectedManifestStateVersion: 1,
+    });
+    await expect(
+      controller.confirmProjectTaskOperationManifest({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        manifestStateVersion: 0,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    readProjectTaskDetail.mockRejectedValueOnce(new Error("contained"));
+    await expect(
+      controller.confirmProjectTaskOperationManifest({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        manifestStateVersion: 2,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    confirmProjectTaskOperationManifest.mockResolvedValueOnce({
+      schemaVersion: 1,
+      status: "confirmed",
+      taskId,
+      nodeId: taskId,
+    });
+    await expect(
+      controller.confirmProjectTaskOperationManifest({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        manifestStateVersion: 2,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    const confirmedManifest = await controller.confirmProjectTaskOperationManifest({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 4,
+      nodeNumber: 1,
+      manifestStateVersion: 2,
+    });
+    expect(confirmedManifest).toMatchObject({
+      status: "confirmed",
+      detail: {
+        taskVersion: 4,
+        stage: "active_graph",
+        activeGraph: { operationManifest: { stateVersion: 3, status: "confirmed" } },
+      },
+    });
+    expect(confirmProjectTaskOperationManifest.mock.calls[1]![0]).toMatchObject({
+      projectId: PROJECT.projectId,
+      taskId,
+      nodeId,
+      manifestId: "00000000-0000-4000-8000-0000000008a5",
+      expectedTaskVersion: 4,
+      expectedOwnershipVersion: 2,
+      previousRequirementRevisionId: requirementId,
+      confirmedPlanRevisionId: confirmationCommand.commandId,
+      graphRevisionId: graphCommand.commandId,
+      expectedManifestStateVersion: 2,
+    });
+    await expect(
+      controller.confirmProjectTaskOperationManifest({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 4,
+        nodeNumber: 1,
+        manifestStateVersion: 3,
+      }),
+    ).resolves.toEqual({ status: "conflict" });
     await expect(
       controller.materializeProjectTaskGraph({
         projectId: PROJECT.projectId,

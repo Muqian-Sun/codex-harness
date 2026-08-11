@@ -41,6 +41,25 @@ export const TASK_NODE_STATUSES = Object.freeze([
   "cancelled",
 ] as const);
 
+export const TASK_OPERATION_KINDS = Object.freeze([
+  "answer",
+  "inspect_workspace",
+  "modify_workspace",
+  "run_workspace_command",
+  "network_read",
+  "credential_access",
+  "external_write",
+  "database_migration",
+  "production_change",
+  "irreversible_action",
+  "permission_boundary_change",
+  "public_api_change",
+  "concurrent_change",
+  "architecture_decision",
+  "systemic_diagnosis",
+  "user_interaction",
+] as const);
+
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
   .object({
@@ -528,12 +547,54 @@ const TaskSchedulePreviewSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("complete") }).strict(),
 ]);
 
+const TaskNodeOperationManifestSchema = z
+  .object({
+    manifestId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    stateVersion: NonNegativeSafeIntegerSchema.min(1),
+    status: z.enum(["candidate", "confirmed"]),
+    operations: z
+      .array(
+        z
+          .object({
+            operationId: z.string().regex(UUID_PATTERN),
+            kind: z.enum(TASK_OPERATION_KINDS),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(TASK_OPERATION_KINDS.length),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      new Set(value.operations.map((operation) => operation.operationId)).size !==
+      value.operations.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["operations"],
+        message: "Task operation identifiers must be unique",
+      });
+    }
+    if (
+      new Set(value.operations.map((operation) => operation.kind)).size !== value.operations.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["operations"],
+        message: "Task operation kinds must be unique",
+      });
+    }
+  });
+
 const TaskGraphRevisionSchema = z
   .object({
     revisionId: z.string().regex(UUID_PATTERN),
     revisionNumber: NonNegativeSafeIntegerSchema.min(1),
     basedOnPlanRevisionId: z.string().regex(UUID_PATTERN),
     nodes: z.array(TaskGraphNodeSchema).min(1).max(MAX_TASK_PLAN_STEPS),
+    operationManifest: TaskNodeOperationManifestSchema.nullable(),
     schedulePreview: TaskSchedulePreviewSchema,
     topologicalOrder: z.array(z.string().regex(UUID_PATTERN)).min(1).max(MAX_TASK_PLAN_STEPS),
   })
@@ -605,7 +666,29 @@ const TaskGraphRevisionSchema = z
         message: "Task schedule preview must match the authoritative graph state",
       });
     }
+    if (!operationManifestMatchesSchedule(value.operationManifest, value.schedulePreview)) {
+      context.addIssue({
+        code: "custom",
+        path: ["operationManifest"],
+        message: "Task operation manifest must belong to the scheduled node",
+      });
+    }
   });
+
+function operationManifestMatchesSchedule(
+  manifest: z.infer<typeof TaskNodeOperationManifestSchema> | null,
+  preview: z.infer<typeof TaskSchedulePreviewSchema>,
+): boolean {
+  if (manifest === null) {
+    return true;
+  }
+  return (
+    (preview.state === "dependency_eligible" ||
+      preview.state === "awaiting_claim" ||
+      preview.state === "busy") &&
+    manifest.nodeId === preview.nodeId
+  );
+}
 
 function schedulePreviewMatchesGraph(
   preview: z.infer<typeof TaskSchedulePreviewSchema>,
@@ -946,6 +1029,106 @@ export const TaskGraphMaterializeResultSchema = z
   })
   .strict();
 
+export const TaskOperationManifestGenerateParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    expectedProjectVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedOwnershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    previousRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    confirmedPlanRevisionId: z.string().regex(UUID_PATTERN),
+    graphRevisionId: z.string().regex(UUID_PATTERN),
+    expectedManifestStateVersion: NonNegativeSafeIntegerSchema,
+    previousManifestId: z.string().regex(UUID_PATTERN).nullable(),
+    expectedRoutingBindingVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedProfileVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedConfigurationRevisionId: z.string().regex(UUID_PATTERN),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.expectedManifestStateVersion === 0) !== (value.previousManifestId === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["previousManifestId"],
+        message: "The previous manifest must match the expected manifest state version",
+      });
+    }
+    const identifiers = [
+      value.commandId,
+      value.projectId,
+      value.taskId,
+      value.nodeId,
+      value.previousRequirementRevisionId,
+      value.confirmedPlanRevisionId,
+      value.graphRevisionId,
+      value.expectedConfigurationRevisionId,
+      ...(value.previousManifestId === null ? [] : [value.previousManifestId]),
+    ];
+    if (new Set(identifiers).size !== identifiers.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "Task operation manifest generation identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskOperationManifestGenerateResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["generated", "existing"]),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
+export const TaskOperationManifestConfirmParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    manifestId: z.string().regex(UUID_PATTERN),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedOwnershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    previousRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    confirmedPlanRevisionId: z.string().regex(UUID_PATTERN),
+    graphRevisionId: z.string().regex(UUID_PATTERN),
+    expectedManifestStateVersion: NonNegativeSafeIntegerSchema.min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const identifiers = [
+      value.commandId,
+      value.projectId,
+      value.taskId,
+      value.nodeId,
+      value.manifestId,
+      value.previousRequirementRevisionId,
+      value.confirmedPlanRevisionId,
+      value.graphRevisionId,
+    ];
+    if (new Set(identifiers).size !== identifiers.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "Task operation manifest confirmation identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskOperationManifestConfirmResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["confirmed", "existing"]),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
 export const TaskRequirementReviseParamsSchema = z
   .object({
     commandId: z.string().regex(UUID_PATTERN),
@@ -1050,11 +1233,24 @@ export type HarnessTaskSchedulePreview =
   | Readonly<{ state: "busy"; nodeId: string }>
   | Readonly<{ state: "blocked"; blockerNodeIds: readonly string[] }>
   | Readonly<{ state: "complete" }>;
+export type HarnessTaskOperationKind = (typeof TASK_OPERATION_KINDS)[number];
+export type HarnessTaskNodeOperation = Readonly<{
+  operationId: string;
+  kind: HarnessTaskOperationKind;
+}>;
+export type HarnessTaskNodeOperationManifest = Readonly<{
+  manifestId: string;
+  nodeId: string;
+  stateVersion: number;
+  status: "candidate" | "confirmed";
+  operations: readonly HarnessTaskNodeOperation[];
+}>;
 export type HarnessTaskGraphRevision = Readonly<{
   revisionId: string;
   revisionNumber: number;
   basedOnPlanRevisionId: string;
   nodes: readonly HarnessTaskGraphNode[];
+  operationManifest: HarnessTaskNodeOperationManifest | null;
   schedulePreview: HarnessTaskSchedulePreview;
   topologicalOrder: readonly string[];
 }>;
@@ -1122,6 +1318,48 @@ export type HarnessTaskGraphMaterializeResult = Readonly<{
   schemaVersion: 1;
   status: "materialized" | "existing";
   taskId: string;
+}>;
+export type HarnessTaskOperationManifestGenerateParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  taskId: string;
+  nodeId: string;
+  expectedProjectVersion: number;
+  expectedTaskVersion: number;
+  expectedOwnershipVersion: number;
+  previousRequirementRevisionId: string;
+  confirmedPlanRevisionId: string;
+  graphRevisionId: string;
+  expectedManifestStateVersion: number;
+  previousManifestId: string | null;
+  expectedRoutingBindingVersion: number;
+  expectedProfileVersion: number;
+  expectedConfigurationRevisionId: string;
+}>;
+export type HarnessTaskOperationManifestGenerateResult = Readonly<{
+  schemaVersion: 1;
+  status: "generated" | "existing";
+  taskId: string;
+  nodeId: string;
+}>;
+export type HarnessTaskOperationManifestConfirmParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  taskId: string;
+  nodeId: string;
+  manifestId: string;
+  expectedTaskVersion: number;
+  expectedOwnershipVersion: number;
+  previousRequirementRevisionId: string;
+  confirmedPlanRevisionId: string;
+  graphRevisionId: string;
+  expectedManifestStateVersion: number;
+}>;
+export type HarnessTaskOperationManifestConfirmResult = Readonly<{
+  schemaVersion: 1;
+  status: "confirmed" | "existing";
+  taskId: string;
+  nodeId: string;
 }>;
 export type HarnessTaskRequirementReviseParams = Readonly<{
   commandId: string;
@@ -1463,6 +1701,14 @@ export const METHOD_CONTRACTS = Object.freeze({
   "task.graph.materialize": Object.freeze({
     params: TaskGraphMaterializeParamsSchema,
     result: TaskGraphMaterializeResultSchema,
+  }),
+  "task.operation_manifest.generate_candidate": Object.freeze({
+    params: TaskOperationManifestGenerateParamsSchema,
+    result: TaskOperationManifestGenerateResultSchema,
+  }),
+  "task.operation_manifest.confirm_candidate": Object.freeze({
+    params: TaskOperationManifestConfirmParamsSchema,
+    result: TaskOperationManifestConfirmResultSchema,
   }),
   "task.requirement.revise": Object.freeze({
     params: TaskRequirementReviseParamsSchema,
