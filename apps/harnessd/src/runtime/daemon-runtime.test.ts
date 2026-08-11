@@ -504,7 +504,7 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
 
     expect(runtime.state).toBe("listening");
     expect(stateStore.state).toBe("ready");
-    expect(stateStore.inspect()).toMatchObject({ eventCount: 0, projectionCount: 8 });
+    expect(stateStore.inspect()).toMatchObject({ eventCount: 0, projectionCount: 9 });
     runtime.requestQuiesce("requested");
     await expect(runtime.closed).resolves.toEqual({
       reason: "requested",

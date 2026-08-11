@@ -27,6 +27,8 @@ export async function smokeSharedDomainRepositories() {
       await import("../apps/harnessd/dist/domain/project-routing-profile-binding-repository.js");
     const { SHADOW_ROUTE_DECISION_PROJECTION, ShadowRouteDecisionRepository } =
       await import("../apps/harnessd/dist/domain/shadow-route-decision-repository.js");
+    const { NODE_OPERATION_MANIFEST_PROJECTION, NodeOperationManifestRepository } =
+      await import("../apps/harnessd/dist/domain/node-operation-manifest-repository.js");
     const projections = [
       TASK_PLAN_PROJECTION,
       PROJECT_REGISTRY_PROJECTION,
@@ -36,6 +38,7 @@ export async function smokeSharedDomainRepositories() {
       MODEL_ROUTING_PROFILE_PROJECTION,
       PROJECT_ROUTING_PROFILE_BINDING_PROJECTION,
       SHADOW_ROUTE_DECISION_PROJECTION,
+      NODE_OPERATION_MANIFEST_PROJECTION,
     ];
     events = await HarnessEventStore.open({ path, projections });
     let tasks = new TaskPlanRepository(events);
@@ -44,6 +47,7 @@ export async function smokeSharedDomainRepositories() {
     let profiles = new ModelRoutingProfileRepository(events);
     let bindings = new ProjectRoutingProfileBindingRepository(events);
     let decisions = new ShadowRouteDecisionRepository(events);
+    let manifests = new NodeOperationManifestRepository(events);
     projects.registerProject(projectCommand());
     tasks.createTask(taskCommand());
     ownerships.assignTask(ownershipCommand());
@@ -59,6 +63,7 @@ export async function smokeSharedDomainRepositories() {
     profiles = new ModelRoutingProfileRepository(events);
     bindings = new ProjectRoutingProfileBindingRepository(events);
     decisions = new ShadowRouteDecisionRepository(events);
+    manifests = new NodeOperationManifestRepository(events);
     if (
       tasks.readTask(TASK_ID).taskVersion !== 1 ||
       projects.readProject(PROJECT_ID).workspace.identityStatus !== "unverified" ||
@@ -66,8 +71,9 @@ export async function smokeSharedDomainRepositories() {
       profiles.readProfile(PROFILE_ID).profileVersion !== 1 ||
       bindings.readBinding(PROJECT_ID).profileId !== PROFILE_ID ||
       decisions.readDecision(TASK_ID, DECISION_ID).decision.selectedTier !== "standard" ||
+      manifests.listTaskManifests(TASK_ID).length !== 0 ||
       events.inspect().eventCount !== 6 ||
-      events.inspect().projectionCount !== 8
+      events.inspect().projectionCount !== 9
     ) {
       throw new Error("The compiled shared domain repository smoke result was invalid.");
     }
