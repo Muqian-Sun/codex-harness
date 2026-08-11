@@ -191,7 +191,7 @@ describe("route activation repository", () => {
     store.events.close();
   });
 
-  it("allows a new command after a denial but makes activation final for the node", async () => {
+  it("retains immutable history while later commands advance the node latest projection", async () => {
     const store = await repository();
     expect(store.repository.record(deniedRecord())).toMatchObject({ duplicate: false });
 
@@ -201,9 +201,21 @@ describe("route activation repository", () => {
       activationId: id(40),
       status: "activated",
     });
-    expect(() => store.repository.record(activatedRecord(id(42), id(43)))).toThrowError(
-      expect.objectContaining({ code: "conflict" }),
-    );
+    expect(store.repository.record(activatedRecord(id(42), id(43)))).toMatchObject({
+      duplicate: false,
+    });
+    expect(store.repository.readLatestForNode(id(4), id(5))).toMatchObject({
+      activationId: id(42),
+      status: "activated",
+    });
+    expect(store.repository.readAdmission(id(4), id(40))).toMatchObject({
+      activationId: id(40),
+      status: "activated",
+    });
+
+    expect(() =>
+      store.repository.record({ ...deniedRecord(id(44), id(45)), occurredAtMs: 5 }),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
 
     store.events.close();
   });

@@ -125,10 +125,7 @@ export const ROUTE_ACTIVATION_PROJECTION: ProjectionDefinition = Object.freeze({
     }
     if (current !== undefined) {
       const previous = decodeRecord(current);
-      if (
-        previous.occurredAtMs > next.occurredAtMs ||
-        (previous.status === "activated" && previous.activationId !== next.activationId)
-      ) {
+      if (previous.occurredAtMs > next.occurredAtMs) {
         throw new RouteActivationStateError();
       }
     }
@@ -167,8 +164,6 @@ export class RouteActivationRepository {
         if (!appended.duplicate) throw new RouteActivationRepositoryError("conflict");
         return Object.freeze({ duplicate: true, event: appended.event, record: persisted });
       }
-      const latest = this.#readOptionalLatest(record.taskId, record.nodeId);
-      if (latest?.status === "activated") throw new RouteActivationRepositoryError("conflict");
       const appended = this.#events.append(eventFromRecord(record, metadata));
       return Object.freeze({ duplicate: appended.duplicate, event: appended.event, record });
     } catch (error: unknown) {
