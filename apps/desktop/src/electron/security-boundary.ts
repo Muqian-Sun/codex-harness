@@ -16,7 +16,7 @@ export function createSecureWindowOptions(preloadPath: string): BrowserWindowCon
     show: false,
     title: "Codex Harness",
     titleBarStyle: "hiddenInset",
-    backgroundColor: "#101a20",
+    backgroundColor: "#f7f5ef",
     autoHideMenuBar: true,
     webPreferences: {
       preload: preloadPath,

@@ -37,10 +37,12 @@ vi.mock("react", () => ({
 }));
 
 import {
+  BootstrapScreen,
   CandidatePlan,
   ProjectRegistryPanel,
   ProjectTaskPanel,
   RequirementItems,
+  SettingsWorkspace,
   taskCandidatePlanFeedback,
 } from "./bootstrap-screen.js";
 
@@ -79,6 +81,28 @@ function findBindingButton(root: unknown): Readonly<{ props: Record<string, unkn
   throw new Error("binding button was not rendered");
 }
 
+function findElementByType(
+  root: unknown,
+  type: unknown,
+): Readonly<{ props: Record<string, unknown> }> | undefined {
+  const queue = [root];
+  while (queue.length > 0) {
+    const candidate = queue.shift();
+    if (typeof candidate !== "object" || candidate === null) {
+      continue;
+    }
+    const element = candidate as { type?: unknown; props?: Record<string, unknown> };
+    if (element.type === type && element.props !== undefined) {
+      return { props: element.props };
+    }
+    if (element.props !== undefined) {
+      const children = element.props.children;
+      queue.push(...(Array.isArray(children) ? children : [children]));
+    }
+  }
+  return undefined;
+}
+
 function renderPanel(bindingState: unknown = { status: "idle" }) {
   hooks.cursor = 0;
   hooks.values = ["idle", undefined, bindingState];
@@ -114,6 +138,7 @@ function findTaskControl(
   root: unknown,
   attribute:
     | "data-task-open"
+    | "data-task-new"
     | "data-task-plan-generate"
     | "data-task-project-select"
     | "data-task-revise"
@@ -175,6 +200,71 @@ afterEach(() => {
   Reflect.deleteProperty(globalThis, "codexHarness");
 });
 
+describe("desktop workspace shell interaction", () => {
+  it("opens and closes the settings workspace without changing bootstrap state", () => {
+    const readyState = {
+      phase: "ready" as const,
+      account: { status: "not_required" as const, credentialKind: null, planType: null },
+      catalog: { provider: "openai", totalVisibleModels: 0, models: [], hasMore: false },
+      routing: {
+        configured: false as const,
+        profileVersion: 0,
+        configurationRevisionId: null,
+        tiers: null,
+        availability: null,
+      },
+      projects: { projects: [], hasMore: false },
+      projectRoutingBindings: { bindings: [] },
+    };
+    hooks.cursor = 0;
+    hooks.values = [false];
+    const closed = BootstrapScreen({ state: readyState });
+    const taskWorkspace = findElementByType(closed, ProjectTaskPanel);
+
+    expect(taskWorkspace).toBeDefined();
+    expect(findElementByType(closed, SettingsWorkspace)).toBeUndefined();
+    (taskWorkspace!.props.onOpenSettings as () => void)();
+    expect(hooks.setters[0]).toHaveBeenCalledWith(true);
+
+    hooks.cursor = 0;
+    hooks.values = [true];
+    const open = BootstrapScreen({ state: readyState });
+    const settings = findElementByType(open, SettingsWorkspace);
+    expect(settings).toBeDefined();
+    (settings!.props.onClose as () => void)();
+    expect(hooks.setters[0]).toHaveBeenCalledWith(false);
+  });
+
+  it("closes settings with Escape and focuses the explicit close control", () => {
+    const onClose = vi.fn();
+    const settings = SettingsWorkspace({
+      state: {
+        phase: "ready",
+        account: { status: "not_required", credentialKind: null, planType: null },
+        catalog: { provider: "openai", totalVisibleModels: 0, models: [], hasMore: false },
+        routing: {
+          configured: false,
+          profileVersion: 0,
+          configurationRevisionId: null,
+          tiers: null,
+          availability: null,
+        },
+        projects: { projects: [], hasMore: false },
+        projectRoutingBindings: { bindings: [] },
+      },
+      onClose,
+    });
+
+    (settings.props.onKeyDown as (event: Readonly<{ key: string }>) => void)({ key: "Enter" });
+    expect(onClose).not.toHaveBeenCalled();
+    (settings.props.onKeyDown as (event: Readonly<{ key: string }>) => void)({ key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
+
+    const closeButton = findElementByType(settings, "button");
+    expect(closeButton?.props.autoFocus).toBe(true);
+  });
+});
+
 describe("Project routing binding interaction", () => {
   it("serializes local submissions and publishes stable success or unavailable state", async () => {
     const bindProjectToDefaultRouting = vi.fn(async () => ({ status: "bound" as const }));
@@ -213,6 +303,21 @@ describe("Project routing binding interaction", () => {
 });
 
 describe("Project Task interaction", () => {
+  it("returns to the new Task composer without discarding its draft", () => {
+    const panel = renderTaskPanel();
+    const newTask = findTaskControl(panel, "data-task-new");
+
+    (newTask.props.onClick as () => void)();
+
+    expect(hooks.setters[2]).toHaveBeenCalledWith(undefined);
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "idle" });
+    expect(hooks.setters[6]).toHaveBeenCalledWith("");
+    expect(hooks.setters[8]).toHaveBeenCalledWith("idle");
+    expect(hooks.setters[9]).toHaveBeenCalledWith("idle");
+    expect(hooks.setters[4]).not.toHaveBeenCalled();
+    expect(hooks.setters[5]).not.toHaveBeenCalled();
+  });
+
   it("renders candidate steps and reports every user-visible generation state", () => {
     const plan = CandidatePlan({
       plan: {

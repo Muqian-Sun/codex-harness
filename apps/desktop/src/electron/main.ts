@@ -50,6 +50,7 @@ import {
   createSecureWindowOptions,
   isTrustedRendererSender,
 } from "./security-boundary.js";
+import { ensureSmokeSettingsWorkspace } from "./smoke-settings-workspace.js";
 
 const GET_BOOTSTRAP_STATE_CHANNEL = "desktop.bootstrap.get";
 const BOOTSTRAP_STATE_CHANGED_CHANNEL = "desktop.bootstrap.changed";
@@ -815,6 +816,7 @@ function installSmokeObservation(
     try {
       while (Date.now() < inspectionDeadline && !finished) {
         try {
+          await ensureSmokeSettingsWorkspace(window);
           if (routingMode === "configure" && !routingFormDriven) {
             routingFormDriven = await driveRoutingSmokeForm(window, (progress) => {
               lastRendererProgress = progress;
