@@ -197,6 +197,7 @@ function projectMethods(): Pick<
       latestPlanRevisionId: null,
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     })),
     reviseProjectTaskRequirement: vi.fn(async (params) => ({
       schemaVersion: 1 as const,
@@ -823,6 +824,7 @@ describe("desktop application controller", () => {
       latestPlanRevisionId: null,
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     }));
     const readProjectTaskCatalogPage = vi.fn(async () => ({
       schemaVersion: 1 as const,
@@ -885,6 +887,7 @@ describe("desktop application controller", () => {
         },
         candidatePlan: null,
         confirmedPlan: null,
+        activeGraph: null,
       },
     });
     const revised = await controller.reviseProjectTaskRequirement({
@@ -928,9 +931,11 @@ describe("desktop application controller", () => {
     const taskId = "00000000-0000-4000-8000-000000000894";
     const requirementId = "00000000-0000-4000-8000-000000000895";
     const stepId = "00000000-0000-4000-8000-000000000896";
+    const nodeId = "00000000-0000-4000-8000-000000000897";
     let taskVersion = 1;
     let planRevisionId: string | null = null;
     let confirmedPlanRevisionId: string | null = null;
+    let graphRevisionId: string | null = null;
     const rawDetail = () => ({
       schemaVersion: 1 as const,
       projectId: PROJECT.projectId,
@@ -942,7 +947,9 @@ describe("desktop application controller", () => {
         planRevisionId !== null
           ? ("candidate_plan" as const)
           : confirmedPlanRevisionId !== null
-            ? ("confirmed_plan" as const)
+            ? graphRevisionId === null
+              ? ("confirmed_plan" as const)
+              : ("active_graph" as const)
             : ("requirements_only" as const),
       activeRequirement: {
         revisionId: requirementId,
@@ -985,6 +992,26 @@ describe("desktop application controller", () => {
                 },
               ],
             },
+      activeGraph:
+        graphRevisionId === null || confirmedPlanRevisionId === null
+          ? null
+          : {
+              revisionId: graphRevisionId,
+              revisionNumber: 1,
+              basedOnPlanRevisionId: confirmedPlanRevisionId,
+              nodes: [
+                {
+                  nodeId,
+                  sourcePlanStepId: stepId,
+                  title: "生成计划",
+                  description: "写入待确认步骤。",
+                  acceptanceCriteria: ["renderer 不接收 ID。"],
+                  dependsOnNodeIds: [],
+                  status: "pending" as const,
+                },
+              ],
+              topologicalOrder: [nodeId],
+            },
     });
     const readProjectTaskDetail = vi.fn(async () => rawDetail());
     const readProjectTaskCatalogPage = vi.fn(async () => ({
@@ -1000,7 +1027,9 @@ describe("desktop application controller", () => {
             planRevisionId !== null
               ? ("candidate_plan" as const)
               : confirmedPlanRevisionId !== null
-                ? ("confirmed_plan" as const)
+                ? graphRevisionId === null
+                  ? ("confirmed_plan" as const)
+                  : ("active_graph" as const)
                 : ("requirements_only" as const),
         },
       ],
@@ -1016,6 +1045,11 @@ describe("desktop application controller", () => {
       confirmedPlanRevisionId = command.commandId;
       planRevisionId = null;
       return { schemaVersion: 1 as const, status: "confirmed" as const, taskId };
+    });
+    const materializeProjectTaskGraph = vi.fn(async (command) => {
+      taskVersion += 1;
+      graphRevisionId = command.commandId;
+      return { schemaVersion: 1 as const, status: "materialized" as const, taskId };
     });
     const defaultBinding = {
       projectId: PROJECT.projectId,
@@ -1050,6 +1084,7 @@ describe("desktop application controller", () => {
         readProjectTaskDetail,
         generateProjectTaskCandidatePlan,
         confirmProjectTaskCandidatePlan,
+        materializeProjectTaskGraph,
         readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
         setRoutingConfiguration: routingMethods().setRoutingConfiguration,
         stop: vi.fn(async () => closeResult("graceful")),
@@ -1114,6 +1149,71 @@ describe("desktop application controller", () => {
     });
     expect(JSON.stringify(confirmation)).not.toContain(stepId);
     expect(JSON.stringify(confirmation)).not.toContain(confirmationCommand.commandId);
+    await expect(
+      controller.materializeProjectTaskGraph({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 0,
+        confirmedPlanRevisionNumber: 2,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    readProjectTaskDetail.mockRejectedValueOnce(
+      new HarnessRpcClientError("rpc_error", "rpc.conflict"),
+    );
+    await expect(
+      controller.materializeProjectTaskGraph({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 3,
+        confirmedPlanRevisionNumber: 2,
+      }),
+    ).resolves.toEqual({ status: "conflict" });
+    const materialization = await controller.materializeProjectTaskGraph({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 3,
+      confirmedPlanRevisionNumber: 2,
+    });
+    expect(materialization).toMatchObject({
+      status: "materialized",
+      taskId,
+      detail: {
+        taskVersion: 4,
+        stage: "active_graph",
+        activeGraph: {
+          revisionNumber: 1,
+          nodes: [
+            {
+              nodeNumber: 1,
+              sourcePlanStepNumber: 1,
+              dependsOnNodeNumbers: [],
+              status: "pending",
+            },
+          ],
+        },
+      },
+      catalog: { tasks: [{ taskVersion: 4, stage: "active_graph" }] },
+    });
+    const graphCommand = materializeProjectTaskGraph.mock.calls[0]![0];
+    expect(graphCommand).toMatchObject({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 3,
+      expectedOwnershipVersion: 2,
+      previousRequirementRevisionId: requirementId,
+      confirmedPlanRevisionId: confirmationCommand.commandId,
+      previousGraphRevisionId: null,
+    });
+    expect(JSON.stringify(materialization)).not.toContain(nodeId);
+    expect(JSON.stringify(materialization)).not.toContain(graphCommand.commandId);
+    await expect(
+      controller.materializeProjectTaskGraph({
+        projectId: PROJECT.projectId,
+        taskId,
+        expectedTaskVersion: 3,
+        confirmedPlanRevisionNumber: 2,
+      }),
+    ).resolves.toEqual({ status: "conflict" });
     await expect(
       controller.generateProjectTaskCandidatePlan({
         projectId: PROJECT.projectId,

@@ -40,6 +40,8 @@ import {
   type HarnessTaskCreateResult as ProtocolTaskCreateResult,
   type HarnessTaskDetailParams as ProtocolTaskDetailParams,
   type HarnessTaskDetailResult as ProtocolTaskDetailResult,
+  type HarnessTaskGraphMaterializeParams as ProtocolTaskGraphMaterializeParams,
+  type HarnessTaskGraphMaterializeResult as ProtocolTaskGraphMaterializeResult,
   type HarnessTaskRequirementReviseParams as ProtocolTaskRequirementReviseParams,
   type HarnessTaskRequirementReviseResult as ProtocolTaskRequirementReviseResult,
   type RpcEvent,
@@ -147,6 +149,8 @@ export type HarnessTaskCreateParams = Readonly<ProtocolTaskCreateParams>;
 export type HarnessTaskCreateResult = Readonly<ProtocolTaskCreateResult>;
 export type HarnessTaskDetailParams = Readonly<ProtocolTaskDetailParams>;
 export type HarnessTaskDetailResult = Readonly<ProtocolTaskDetailResult>;
+export type HarnessTaskGraphMaterializeParams = Readonly<ProtocolTaskGraphMaterializeParams>;
+export type HarnessTaskGraphMaterializeResult = Readonly<ProtocolTaskGraphMaterializeResult>;
 export type HarnessTaskRequirementReviseParams = Readonly<ProtocolTaskRequirementReviseParams>;
 export type HarnessTaskRequirementReviseResult = Readonly<ProtocolTaskRequirementReviseResult>;
 export type HarnessAccountStatusObservation = Readonly<{
@@ -425,6 +429,15 @@ export class HarnessRpcClient {
       "task.plan.confirm_candidate",
       params as unknown as JsonValue,
     )) as unknown as HarnessTaskCandidatePlanConfirmResult;
+  }
+
+  async materializeProjectTaskGraph(
+    params: HarnessTaskGraphMaterializeParams,
+  ): Promise<HarnessTaskGraphMaterializeResult> {
+    return (await this.request(
+      "task.graph.materialize",
+      params as unknown as JsonValue,
+    )) as unknown as HarnessTaskGraphMaterializeResult;
   }
 
   async reviseProjectTaskRequirement(

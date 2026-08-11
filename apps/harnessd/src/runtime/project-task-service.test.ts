@@ -32,6 +32,9 @@ const REQUIREMENT_REVISION_ID = "00000000-0000-4000-8000-00000000093e";
 const LATER_REQUIREMENT_REVISION_ID = "00000000-0000-4000-8000-00000000093f";
 const STALE_CONFIRMATION_ID = "00000000-0000-4000-8000-000000000950";
 const CONFIRM_AFTER_GRAPH_ID = "00000000-0000-4000-8000-000000000951";
+const STEP_TWO_ID = "00000000-0000-4000-8000-000000000952";
+const NODE_TWO_ID = "00000000-0000-4000-8000-000000000953";
+const STALE_GRAPH_ID = "00000000-0000-4000-8000-000000000954";
 const temporaryDirectories: string[] = [];
 const stores: DaemonStateStore[] = [];
 
@@ -320,6 +323,7 @@ describe("ProjectTaskService", () => {
       latestPlanRevisionId: null,
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     });
     expect(Object.isFrozen(initial.activeRequirement.constraints)).toBe(true);
     expect(service.reviseRequirement(reviseParams())).toEqual({
@@ -445,6 +449,131 @@ describe("ProjectTaskService", () => {
       service.confirmCandidatePlan(confirmParams({ commandId: STALE_CONFIRMATION_ID })),
     ).toThrowError(expect.objectContaining({ code: "conflict" }));
     expect(store.events.readByEventId(STALE_CONFIRMATION_ID)).toBeUndefined();
+  });
+
+  it("materializes a confirmed Plan as a durable conservative pending DAG", async () => {
+    const path = await databasePath();
+    const store = await openStore(path);
+    registerProject(store);
+    bindDefaultProfile(store);
+    new ProjectTaskService(store, { now: () => 103 }).create(createParams());
+    const tasks = new TaskPlanRepository(store.events);
+    const steps = [
+      {
+        stepId: STEP_ID,
+        title: "先完成设计",
+        description: "固定职责边界。",
+        acceptanceCriteria: ["设计可审阅"],
+      },
+      {
+        stepId: STEP_TWO_ID,
+        title: "再完成实现",
+        description: "按设计实现并验证。",
+        acceptanceCriteria: ["实现可验证"],
+      },
+    ];
+    tasks.revisePlan({
+      eventId: CANDIDATE_PLAN_ID,
+      taskId: TASK_ID,
+      occurredAtMs: 104,
+      expectedTaskVersion: 1,
+      previousPlanRevisionId: null,
+      plan: {
+        revisionId: CANDIDATE_PLAN_ID,
+        status: "candidate",
+        basedOnRequirementRevisionId: TASK_COMMAND_ID,
+        steps,
+      },
+    });
+    new ProjectTaskService(store, { now: () => 105 }).confirmCandidatePlan(confirmParams());
+    const newId = vi.fn().mockReturnValueOnce(NODE_ID).mockReturnValueOnce(NODE_TWO_ID);
+    const service = new ProjectTaskService(store, { now: () => 106, newId });
+    const params = {
+      commandId: GRAPH_ID,
+      projectId: PROJECT_ID,
+      taskId: TASK_ID,
+      expectedTaskVersion: 3,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: TASK_COMMAND_ID,
+      confirmedPlanRevisionId: CONFIRMED_PLAN_ID,
+      previousGraphRevisionId: null,
+    } as const;
+
+    expect(service.materializeGraph(params)).toEqual({
+      schemaVersion: 1,
+      status: "materialized",
+      taskId: TASK_ID,
+    });
+    const detail = service.detail({ projectId: PROJECT_ID, taskId: TASK_ID });
+    expect(detail).toMatchObject({
+      taskVersion: 4,
+      stage: "active_graph",
+      candidatePlan: null,
+      activeGraph: {
+        revisionId: GRAPH_ID,
+        revisionNumber: 1,
+        basedOnPlanRevisionId: CONFIRMED_PLAN_ID,
+        topologicalOrder: [NODE_ID, NODE_TWO_ID],
+        nodes: [
+          {
+            nodeId: NODE_ID,
+            sourcePlanStepId: STEP_ID,
+            dependsOnNodeIds: [],
+            status: "pending",
+          },
+          {
+            nodeId: NODE_TWO_ID,
+            sourcePlanStepId: STEP_TWO_ID,
+            dependsOnNodeIds: [NODE_ID],
+            status: "pending",
+          },
+        ],
+      },
+    });
+    expect(Object.isFrozen(detail.activeGraph?.nodes)).toBe(true);
+    expect(Object.isFrozen(detail.activeGraph?.nodes[1]?.dependsOnNodeIds)).toBe(true);
+    expect(store.events.readByEventId(GRAPH_ID)).toMatchObject({
+      eventType: "task.graph_committed",
+      metadata: { actor: "desktop.project_task.graph_materialization" },
+      payload: {
+        expectedTaskVersion: 3,
+        previousGraphRevisionId: null,
+        graph: { revisionId: GRAPH_ID, basedOnPlanRevisionId: CONFIRMED_PLAN_ID },
+      },
+    });
+
+    tasks.revisePlan({
+      eventId: CANDIDATE_AFTER_GRAPH_ID,
+      taskId: TASK_ID,
+      occurredAtMs: 107,
+      expectedTaskVersion: 4,
+      previousPlanRevisionId: CONFIRMED_PLAN_ID,
+      plan: {
+        revisionId: CANDIDATE_AFTER_GRAPH_ID,
+        status: "candidate",
+        basedOnRequirementRevisionId: TASK_COMMAND_ID,
+        steps,
+      },
+    });
+    expect(service.materializeGraph(params)).toEqual({
+      schemaVersion: 1,
+      status: "existing",
+      taskId: TASK_ID,
+    });
+    expect(() =>
+      service.materializeGraph({ ...params, expectedTaskVersion: params.expectedTaskVersion + 1 }),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(newId).toHaveBeenCalledTimes(2);
+    expect(() =>
+      service.materializeGraph({ ...params, commandId: STALE_GRAPH_ID, expectedTaskVersion: 5 }),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    const recoveredExpected = service.detail({ projectId: PROJECT_ID, taskId: TASK_ID });
+    store.close();
+
+    const reopened = await openStore(path);
+    expect(
+      new ProjectTaskService(reopened).detail({ projectId: PROJECT_ID, taskId: TASK_ID }),
+    ).toEqual(recoveredExpected);
   });
 
   it("retries exact Requirement history and rejects stale or cross-Project commands", async () => {

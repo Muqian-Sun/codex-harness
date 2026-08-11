@@ -1165,6 +1165,186 @@ a:focus-visible {
   line-height: 1.45;
 }
 
+.task-graph-materialization {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(78, 109, 94, 0.2);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(233, 240, 234, 0.78), rgba(255, 253, 248, 0.9));
+}
+
+.task-graph-materialization span,
+.task-graph-materialization strong {
+  display: block;
+}
+
+.task-graph-materialization span {
+  color: var(--moss);
+  font-size: 7px;
+  font-weight: 900;
+  letter-spacing: 0.11em;
+}
+
+.task-graph-materialization strong {
+  margin-top: 4px;
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.task-graph-materialization p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.task-graph-materialization button {
+  min-height: 34px;
+  border: 1px solid var(--moss);
+  border-radius: 9px;
+  color: #f8fbf7;
+  font-size: 9px;
+  font-weight: 800;
+  background: var(--moss);
+}
+
+.task-graph-materialization button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
+}
+
+.task-graph-materialization button:disabled {
+  opacity: 0.52;
+}
+
+.task-graph-feedback {
+  display: block;
+  margin: 8px 2px 0;
+  color: var(--moss);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
+.task-active-graph {
+  overflow: hidden;
+  margin-top: 12px;
+  border: 1px solid rgba(78, 109, 94, 0.24);
+  border-radius: 14px;
+  background: rgba(248, 251, 247, 0.82);
+}
+
+.task-active-graph > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 12px;
+  border-bottom: 1px solid rgba(78, 109, 94, 0.14);
+  background: rgba(78, 109, 94, 0.075);
+}
+
+.task-active-graph > header span,
+.task-active-graph > header strong {
+  display: block;
+}
+
+.task-active-graph > header span,
+.task-active-graph > header small {
+  color: var(--moss);
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.task-active-graph > header strong {
+  margin-top: 2px;
+  color: var(--moss);
+  font-family: "Iowan Old Style", Baskerville, Georgia, serif;
+  font-size: 18px;
+}
+
+.task-active-graph > ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-active-graph > ol > li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 9px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-active-graph > ol > li:last-child {
+  border-bottom: 0;
+}
+
+.task-active-graph > ol > li:not(:last-child)::after {
+  position: absolute;
+  bottom: -6px;
+  left: 27px;
+  z-index: 1;
+  width: 1px;
+  height: 12px;
+  content: "";
+  background: rgba(78, 109, 94, 0.32);
+}
+
+.task-active-graph > ol > li > span {
+  display: grid;
+  width: 30px;
+  height: 23px;
+  place-items: center;
+  border: 1px solid rgba(78, 109, 94, 0.2);
+  border-radius: 8px;
+  color: var(--moss);
+  font-size: 8px;
+  font-weight: 900;
+  background: #eef4ef;
+}
+
+.task-active-graph li header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-active-graph li header strong {
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.task-active-graph li header small,
+.task-active-graph li > div > small {
+  color: var(--moss);
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.task-active-graph li p {
+  margin: 4px 0 6px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.48;
+}
+
+.task-active-graph li ul {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 7px;
+  padding-left: 14px;
+  color: var(--ink-soft);
+  font-size: 8px;
+  line-height: 1.45;
+}
+
 .inspector-empty {
   margin-top: 4px;
 }

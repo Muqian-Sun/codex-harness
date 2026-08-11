@@ -24,6 +24,7 @@ export type RpcDispatchContext = Readonly<{
   readProjectTaskDetail: (params: JsonValue) => unknown;
   reviseProjectTaskRequirement: (params: JsonValue) => unknown;
   confirmProjectTaskCandidatePlan: (params: JsonValue) => unknown;
+  materializeProjectTaskGraph: (params: JsonValue) => unknown;
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
@@ -388,6 +389,30 @@ export function dispatchRpcRequest(
             shutdownReason: undefined,
           }
         : unavailable(request.id, "The candidate Plan confirmation service is unavailable.");
+    }
+
+    if (request.method === "task.graph.materialize") {
+      let candidate: unknown;
+      try {
+        candidate = context.materializeProjectTaskGraph(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(request.id, RPC_ERROR_CODES.conflict, "The Project Task changed."),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The Task graph materialization service is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("task.graph.materialize", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The Task graph materialization service is unavailable.");
     }
 
     if (request.method === "task.plan.generate_candidate") {

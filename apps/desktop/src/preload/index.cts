@@ -11,6 +11,7 @@ const READ_PROJECT_TASK_DETAIL_CHANNEL = "desktop.task.detail";
 const CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.confirm_candidate";
 const GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.generate_candidate";
 const REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL = "desktop.task.requirement.revise";
+const MATERIALIZE_PROJECT_TASK_GRAPH_CHANNEL = "desktop.task.graph.materialize";
 const FAILURE_CODES = new Set([
   "unsupported_platform",
   "resource_configuration_missing",
@@ -48,6 +49,16 @@ const TASK_STAGES = new Set([
   "confirmed_plan",
   "active_graph",
   "active_graph_with_candidate",
+]);
+const TASK_NODE_STATUSES = new Set([
+  "pending",
+  "ready",
+  "running",
+  "blocked",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "cancelled",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_PROVIDER_CHARACTERS = 256;
@@ -198,6 +209,19 @@ type PreloadProjectTaskCandidatePlan = Readonly<{
   revisionNumber: number;
   steps: readonly PreloadProjectTaskCandidatePlanStep[];
 }>;
+type PreloadProjectTaskGraphNode = Readonly<{
+  nodeNumber: number;
+  sourcePlanStepNumber: number;
+  title: string;
+  description: string;
+  acceptanceCriteria: readonly string[];
+  dependsOnNodeNumbers: readonly number[];
+  status: string;
+}>;
+type PreloadProjectTaskGraph = Readonly<{
+  revisionNumber: number;
+  nodes: readonly PreloadProjectTaskGraphNode[];
+}>;
 type PreloadProjectTaskDetail = Readonly<{
   projectId: string;
   taskId: string;
@@ -207,6 +231,7 @@ type PreloadProjectTaskDetail = Readonly<{
   activeRequirement: PreloadProjectTaskRequirement;
   candidatePlan: PreloadProjectTaskCandidatePlan | null;
   confirmedPlan: PreloadProjectTaskCandidatePlan | null;
+  activeGraph: PreloadProjectTaskGraph | null;
 }>;
 type PreloadProjectTaskSelection = Readonly<{ projectId: string; taskId: string }>;
 type PreloadProjectTaskDetailResult =
@@ -248,6 +273,20 @@ type PreloadProjectTaskCandidatePlanConfirmation = Readonly<{
 type PreloadProjectTaskCandidatePlanConfirmationResult =
   | Readonly<{
       status: "confirmed" | "existing";
+      taskId: string;
+      detail: PreloadProjectTaskDetail;
+      catalog: PreloadProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+type PreloadProjectTaskGraphMaterialization = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  confirmedPlanRevisionNumber: number;
+}>;
+type PreloadProjectTaskGraphMaterializationResult =
+  | Readonly<{
+      status: "materialized" | "existing";
       taskId: string;
       detail: PreloadProjectTaskDetail;
       catalog: PreloadProjectTaskCatalog;
@@ -632,6 +671,31 @@ function decodeProjectTaskCandidatePlanConfirmation(
   });
 }
 
+function decodeProjectTaskGraphMaterialization(
+  input: unknown,
+): PreloadProjectTaskGraphMaterialization | undefined {
+  const record = exactRecord(input, [
+    "confirmedPlanRevisionNumber",
+    "expectedTaskVersion",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.confirmedPlanRevisionNumber)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    confirmedPlanRevisionNumber: record.confirmedPlanRevisionNumber,
+  });
+}
+
 function decodeProjectTaskCandidatePlanMutationResult(
   input: unknown,
   expected: PreloadProjectTaskCandidatePlanGeneration,
@@ -693,9 +757,43 @@ function decodeProjectTaskCandidatePlanConfirmationResult(
   });
 }
 
+function decodeProjectTaskGraphMaterializationResult(
+  input: unknown,
+  expected: PreloadProjectTaskGraphMaterialization,
+): PreloadProjectTaskGraphMaterializationResult {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  const detail = decodeProjectTaskDetail(record?.detail);
+  const catalog = decodeProjectTaskCatalog(record?.catalog);
+  if (
+    record === undefined ||
+    (record.status !== "materialized" && record.status !== "existing") ||
+    record.taskId !== expected.taskId ||
+    detail?.projectId !== expected.projectId ||
+    detail.taskId !== expected.taskId ||
+    detail.stage !== "active_graph" ||
+    detail.candidatePlan !== null ||
+    detail.confirmedPlan === null ||
+    detail.activeGraph === null ||
+    catalog?.projectId !== expected.projectId
+  ) {
+    throw new Error("The desktop Project Task graph materialization result is invalid.");
+  }
+  return Object.freeze({
+    status: record.status,
+    taskId: expected.taskId,
+    detail,
+    catalog,
+  });
+}
+
 function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | undefined {
   const record = exactRecord(input, [
     "activeRequirement",
+    "activeGraph",
     "candidatePlan",
     "confirmedPlan",
     "projectId",
@@ -707,6 +805,7 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
   const requirement = decodeProjectTaskRequirement(record?.activeRequirement);
   const candidatePlan = decodeProjectTaskCandidatePlan(record?.candidatePlan);
   const confirmedPlan = decodeProjectTaskCandidatePlan(record?.confirmedPlan);
+  const activeGraph = decodeProjectTaskGraph(record?.activeGraph, confirmedPlan);
   if (
     !isUuid(record?.projectId) ||
     !isUuid(record.taskId) ||
@@ -717,7 +816,9 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
     requirement === undefined ||
     candidatePlan === undefined ||
     confirmedPlan === undefined ||
-    !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage)
+    activeGraph === undefined ||
+    !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage) ||
+    !graphMatchesStage(record.activeGraph, record.stage)
   ) {
     return undefined;
   }
@@ -730,6 +831,7 @@ function decodeProjectTaskDetail(input: unknown): PreloadProjectTaskDetail | und
     activeRequirement: requirement,
     candidatePlan,
     confirmedPlan,
+    activeGraph,
   });
 }
 
@@ -788,6 +890,86 @@ function plansMatchStage(candidate: unknown, confirmed: unknown, stage: unknown)
     (!stageRequiresConfirmed || confirmed !== null) &&
     (stage !== "requirements_only" || confirmed === null)
   );
+}
+
+function graphMatchesStage(graph: unknown, stage: unknown): boolean {
+  const stageHasGraph = stage === "active_graph" || stage === "active_graph_with_candidate";
+  return (graph !== null) === stageHasGraph;
+}
+
+function decodeProjectTaskGraph(
+  input: unknown,
+  confirmedPlan: PreloadProjectTaskCandidatePlan | null | undefined,
+): PreloadProjectTaskGraph | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const graph = exactRecord(input, ["nodes", "revisionNumber"]);
+  if (
+    graph === undefined ||
+    confirmedPlan === null ||
+    confirmedPlan === undefined ||
+    !isPositiveSafeInteger(graph.revisionNumber) ||
+    !Array.isArray(graph.nodes) ||
+    graph.nodes.length < 1 ||
+    graph.nodes.length > MAX_TASK_PLAN_STEPS
+  ) {
+    return undefined;
+  }
+  let totalBytes = 0;
+  const nodes = graph.nodes.map((inputNode, index) => {
+    const node = exactRecord(inputNode, [
+      "acceptanceCriteria",
+      "dependsOnNodeNumbers",
+      "description",
+      "nodeNumber",
+      "sourcePlanStepNumber",
+      "status",
+      "title",
+    ]);
+    if (
+      node === undefined ||
+      node.nodeNumber !== index + 1 ||
+      !isPositiveSafeInteger(node.sourcePlanStepNumber) ||
+      node.sourcePlanStepNumber > confirmedPlan.steps.length ||
+      !validTaskPlanStepText(node.title, MAX_TASK_PLAN_STEP_TITLE_BYTES) ||
+      !validTaskPlanStepText(node.description, MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES) ||
+      !validTaskRequirementItems(node.acceptanceCriteria) ||
+      !Array.isArray(node.dependsOnNodeNumbers) ||
+      node.dependsOnNodeNumbers.length > MAX_TASK_PLAN_STEPS ||
+      node.dependsOnNodeNumbers.some(
+        (dependency) => !isPositiveSafeInteger(dependency) || dependency >= index + 1,
+      ) ||
+      new Set(node.dependsOnNodeNumbers).size !== node.dependsOnNodeNumbers.length ||
+      typeof node.status !== "string" ||
+      !TASK_NODE_STATUSES.has(node.status)
+    ) {
+      return undefined;
+    }
+    totalBytes += utf8ByteLength(
+      [node.title, node.description, ...node.acceptanceCriteria].join(""),
+    );
+    return Object.freeze({
+      nodeNumber: node.nodeNumber,
+      sourcePlanStepNumber: node.sourcePlanStepNumber,
+      title: node.title,
+      description: node.description,
+      acceptanceCriteria: Object.freeze([...node.acceptanceCriteria]),
+      dependsOnNodeNumbers: Object.freeze([...node.dependsOnNodeNumbers]),
+      status: node.status,
+    });
+  });
+  const coveredSteps = new Set(
+    nodes.map((node) => node?.sourcePlanStepNumber).filter((value) => value !== undefined),
+  );
+  return nodes.some((node) => node === undefined) ||
+    totalBytes > MAX_TASK_PLAN_TOTAL_BYTES ||
+    coveredSteps.size !== confirmedPlan.steps.length
+    ? undefined
+    : Object.freeze({
+        revisionNumber: graph.revisionNumber,
+        nodes: Object.freeze(nodes as PreloadProjectTaskGraphNode[]),
+      });
 }
 
 function decodeProjectTaskRequirement(input: unknown): PreloadProjectTaskRequirement | undefined {
@@ -1388,6 +1570,18 @@ const desktopApi = Object.freeze({
     return decodeProjectTaskCandidatePlanConfirmationResult(
       await ipcRenderer.invoke(CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL, confirmation),
       confirmation,
+    );
+  },
+  async materializeProjectTaskGraph(
+    input: PreloadProjectTaskGraphMaterialization,
+  ): Promise<PreloadProjectTaskGraphMaterializationResult> {
+    const materialization = decodeProjectTaskGraphMaterialization(input);
+    if (materialization === undefined) {
+      throw new TypeError("A valid desktop Project Task graph materialization is required.");
+    }
+    return decodeProjectTaskGraphMaterializationResult(
+      await ipcRenderer.invoke(MATERIALIZE_PROJECT_TASK_GRAPH_CHANNEL, materialization),
+      materialization,
     );
   },
   onBootstrapState(listener: (state: PreloadBootstrapState) => void): () => void {

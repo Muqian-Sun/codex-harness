@@ -12,6 +12,8 @@ const OWNERSHIP_EVENT_ID = "00000000-0000-4000-8000-000000000a07";
 const CANDIDATE_PLAN_ID = "00000000-0000-4000-8000-000000000a08";
 const STEP_ID = "00000000-0000-4000-8000-000000000a09";
 const CONFIRMED_PLAN_ID = "00000000-0000-4000-8000-000000000a0a";
+const GRAPH_ID = "00000000-0000-4000-8000-000000000a0b";
+const NODE_ID = "00000000-0000-4000-8000-000000000a0c";
 
 async function loadCompiledDependencies() {
   const [
@@ -150,6 +152,38 @@ export async function smokeProjectTaskPlanConfirmation(dependencies) {
       detail.confirmedPlan.steps[0]?.title !== "Preserve the candidate step"
     ) {
       throw new Error("The compiled confirmed Plan did not recover exactly.");
+    }
+    const graphResult = new ProjectTaskService(store, {
+      now: () => 1_750_000_000_007,
+      newId: () => NODE_ID,
+    }).materializeGraph({
+      commandId: GRAPH_ID,
+      projectId: PROJECT_ID,
+      taskId: TASK_ID,
+      expectedTaskVersion: 3,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: REQUIREMENT_ID,
+      confirmedPlanRevisionId: CONFIRMED_PLAN_ID,
+      previousGraphRevisionId: null,
+    });
+    if (graphResult.status !== "materialized") {
+      throw new Error("The compiled Task graph materialization did not commit.");
+    }
+    store.close();
+    store = await DaemonStateStore.open({ databasePath });
+    const graphDetail = new ProjectTaskService(store).detail({
+      projectId: PROJECT_ID,
+      taskId: TASK_ID,
+    });
+    if (
+      graphDetail.stage !== "active_graph" ||
+      graphDetail.taskVersion !== 4 ||
+      graphDetail.activeGraph?.revisionId !== GRAPH_ID ||
+      graphDetail.activeGraph.nodes[0]?.nodeId !== NODE_ID ||
+      graphDetail.activeGraph.nodes[0]?.status !== "pending" ||
+      graphDetail.activeGraph.topologicalOrder[0] !== NODE_ID
+    ) {
+      throw new Error("The compiled Task graph did not recover exactly.");
     }
   } finally {
     store?.close();

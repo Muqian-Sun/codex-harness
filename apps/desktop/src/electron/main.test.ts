@@ -39,6 +39,7 @@ const harness = vi.hoisted(() => {
         },
         candidatePlan: null,
         confirmedPlan: null,
+        activeGraph: null,
       },
     };
   });
@@ -51,6 +52,10 @@ const harness = vi.hoisted(() => {
     return { status: "unavailable" as const };
   });
   const confirmProjectTaskCandidatePlan = vi.fn(async (input: unknown): Promise<unknown> => {
+    void input;
+    return { status: "unavailable" as const };
+  });
+  const materializeProjectTaskGraph = vi.fn(async (input: unknown): Promise<unknown> => {
     void input;
     return { status: "unavailable" as const };
   });
@@ -84,6 +89,7 @@ const harness = vi.hoisted(() => {
     reviseProjectTaskRequirement,
     generateProjectTaskCandidatePlan,
     confirmProjectTaskCandidatePlan,
+    materializeProjectTaskGraph,
     ipcHandlers,
     webContents,
     window,
@@ -231,6 +237,10 @@ vi.mock("./application-controller.js", () => {
         return await harness.confirmProjectTaskCandidatePlan(input);
       }
 
+      async materializeProjectTaskGraph(input: unknown): Promise<unknown> {
+        return await harness.materializeProjectTaskGraph(input);
+      }
+
       async setRoutingConfiguration(): Promise<Readonly<{ status: "unavailable" }>> {
         return { status: "unavailable" };
       }
@@ -310,6 +320,7 @@ describe("desktop Electron main Project Task IPC", () => {
     const revise = harness.ipcHandlers.get("desktop.task.requirement.revise")!;
     const generate = harness.ipcHandlers.get("desktop.task.plan.generate_candidate")!;
     const confirm = harness.ipcHandlers.get("desktop.task.plan.confirm_candidate")!;
+    const materialize = harness.ipcHandlers.get("desktop.task.graph.materialize")!;
     const event = { sender: harness.webContents, senderFrame: {} };
     const taskId = "00000000-0000-4000-8000-000000000894";
     const selection = { projectId: PROJECT_ID, taskId };
@@ -341,6 +352,7 @@ describe("desktop Electron main Project Task IPC", () => {
         },
         candidatePlan: null,
         confirmedPlan: null,
+        activeGraph: null,
       },
     });
     await expect(read(event, selection)).resolves.toEqual({ status: "unavailable" });
@@ -391,7 +403,11 @@ describe("desktop Electron main Project Task IPC", () => {
     await expect(generate(event, generation)).resolves.toEqual({ status: "unavailable" });
     await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
     const confirmation = { ...generation, candidatePlanRevisionNumber: 1 };
+    const graphMaterialization = { ...generation, confirmedPlanRevisionNumber: 2 };
     await expect(confirm(event, confirmation)).resolves.toEqual({ status: "unavailable" });
+    await expect(materialize(event, graphMaterialization)).resolves.toEqual({
+      status: "unavailable",
+    });
     resolveGeneration({ status: "unavailable" });
     await expect(pendingGeneration).resolves.toEqual({ status: "unavailable" });
 
@@ -424,6 +440,9 @@ describe("desktop Electron main Project Task IPC", () => {
     await expect(confirm(event, confirmation)).resolves.toEqual({ status: "unavailable" });
     await expect(generate(event, generation)).resolves.toEqual({ status: "unavailable" });
     await expect(revise(event, revision)).resolves.toEqual({ status: "unavailable" });
+    await expect(materialize(event, graphMaterialization)).resolves.toEqual({
+      status: "unavailable",
+    });
     resolveConfirmation({ status: "unavailable" });
     await expect(pendingConfirmation).resolves.toEqual({ status: "unavailable" });
 
@@ -454,6 +473,7 @@ describe("desktop Electron main Project Task IPC", () => {
             },
           ],
         },
+        activeGraph: null,
       },
       catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
     });
@@ -461,6 +481,66 @@ describe("desktop Electron main Project Task IPC", () => {
       status: "confirmed",
       taskId,
       detail: { stage: "confirmed_plan" },
+    });
+
+    await expect(
+      materialize(event, { ...graphMaterialization, confirmedPlanRevisionNumber: 0 }),
+    ).rejects.toThrow("graph materialization is invalid");
+    await expect(
+      materialize({ sender: {}, senderFrame: {} }, graphMaterialization),
+    ).rejects.toThrow("not authorized");
+    harness.materializeProjectTaskGraph.mockResolvedValueOnce({
+      status: "materialized",
+      taskId,
+      detail: {
+        projectId: PROJECT_ID,
+        taskId,
+        taskVersion: 3,
+        title: "Task",
+        stage: "active_graph",
+        activeRequirement: {
+          revisionNumber: 1,
+          sourceText: "Requirement",
+          objective: "Requirement",
+          constraints: [],
+          acceptanceCriteria: [],
+        },
+        candidatePlan: null,
+        confirmedPlan: {
+          revisionNumber: 2,
+          steps: [
+            {
+              title: "Confirmed step",
+              description: "Still not executable.",
+              acceptanceCriteria: [],
+            },
+          ],
+        },
+        activeGraph: {
+          revisionNumber: 1,
+          nodes: [
+            {
+              nodeNumber: 1,
+              sourcePlanStepNumber: 1,
+              title: "Confirmed step",
+              description: "Still not executable.",
+              acceptanceCriteria: [],
+              dependsOnNodeNumbers: [],
+              status: "pending",
+            },
+          ],
+        },
+      },
+      catalog: { projectId: PROJECT_ID, tasks: [], hasMore: false },
+    });
+    await expect(materialize(event, graphMaterialization)).resolves.toMatchObject({
+      status: "materialized",
+      taskId,
+      detail: { stage: "active_graph" },
+    });
+    harness.materializeProjectTaskGraph.mockRejectedValueOnce(new Error("contained"));
+    await expect(materialize(event, graphMaterialization)).resolves.toEqual({
+      status: "unavailable",
     });
   });
 });

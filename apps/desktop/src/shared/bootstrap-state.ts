@@ -188,6 +188,28 @@ export type DesktopProjectTaskPlan = Readonly<{
 export type DesktopProjectTaskCandidatePlanStep = DesktopProjectTaskPlanStep;
 export type DesktopProjectTaskCandidatePlan = DesktopProjectTaskPlan;
 export type DesktopProjectTaskConfirmedPlan = DesktopProjectTaskPlan;
+export type DesktopProjectTaskGraphNodeStatus =
+  | "pending"
+  | "ready"
+  | "running"
+  | "blocked"
+  | "succeeded"
+  | "failed"
+  | "interrupted"
+  | "cancelled";
+export type DesktopProjectTaskGraphNode = Readonly<{
+  nodeNumber: number;
+  sourcePlanStepNumber: number;
+  title: string;
+  description: string;
+  acceptanceCriteria: readonly string[];
+  dependsOnNodeNumbers: readonly number[];
+  status: DesktopProjectTaskGraphNodeStatus;
+}>;
+export type DesktopProjectTaskGraph = Readonly<{
+  revisionNumber: number;
+  nodes: readonly DesktopProjectTaskGraphNode[];
+}>;
 export type DesktopProjectTaskDetail = Readonly<{
   projectId: string;
   taskId: string;
@@ -197,6 +219,7 @@ export type DesktopProjectTaskDetail = Readonly<{
   activeRequirement: DesktopProjectTaskRequirement;
   candidatePlan: DesktopProjectTaskCandidatePlan | null;
   confirmedPlan: DesktopProjectTaskConfirmedPlan | null;
+  activeGraph: DesktopProjectTaskGraph | null;
 }>;
 export type DesktopProjectTaskDetailResult =
   | Readonly<{ status: "loaded"; detail: DesktopProjectTaskDetail }>
@@ -246,6 +269,20 @@ export type DesktopProjectTaskCandidatePlanConfirmationResult =
       catalog: DesktopProjectTaskCatalog;
     }>
   | Readonly<{ status: "conflict" | "unavailable" }>;
+export type DesktopProjectTaskGraphMaterialization = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  confirmedPlanRevisionNumber: number;
+}>;
+export type DesktopProjectTaskGraphMaterializationResult =
+  | Readonly<{
+      status: "materialized" | "existing";
+      taskId: string;
+      detail: DesktopProjectTaskDetail;
+      catalog: DesktopProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
 
 export type DesktopBootstrapState =
   | Readonly<{ phase: "starting" }>
@@ -284,6 +321,16 @@ const MAX_TASK_PLAN_STEP_TITLE_BYTES = 512;
 const MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES = 8 * 1_024;
 const MAX_TASK_PLAN_TOTAL_BYTES = 256 * 1_024;
 const taskStages = new Set<string>(DESKTOP_TASK_STAGES);
+const taskNodeStatuses = new Set<string>([
+  "pending",
+  "ready",
+  "running",
+  "blocked",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "cancelled",
+]);
 
 export function decodeDesktopBootstrapState(input: unknown): DesktopBootstrapState | undefined {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -592,6 +639,7 @@ export function projectDesktopProjectTaskDetail(
 ): DesktopProjectTaskDetail {
   const record = exactRecord(input, [
     "activeRequirement",
+    "activeGraph",
     "candidatePlan",
     "confirmedPlan",
     "latestPlanRevisionId",
@@ -606,6 +654,7 @@ export function projectDesktopProjectTaskDetail(
   const requirement = decodeDesktopProjectTaskRequirement(record?.activeRequirement);
   const candidatePlan = decodeDesktopProjectTaskCandidatePlan(record?.candidatePlan, true);
   const confirmedPlan = decodeDesktopProjectTaskCandidatePlan(record?.confirmedPlan, true);
+  const activeGraph = projectDesktopProjectTaskGraph(record?.activeGraph, record?.confirmedPlan);
   if (
     !isUuid(expectedProjectId) ||
     !isUuid(expectedTaskId) ||
@@ -620,7 +669,9 @@ export function projectDesktopProjectTaskDetail(
     requirement === undefined ||
     candidatePlan === undefined ||
     confirmedPlan === undefined ||
+    activeGraph === undefined ||
     !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage) ||
+    !graphMatchesStage(record.activeGraph, record.stage) ||
     (record.latestPlanRevisionId !== null && !isUuid(record.latestPlanRevisionId)) ||
     !plansMatchLatest(record.candidatePlan, record.confirmedPlan, record.latestPlanRevisionId) ||
     !planMatchesRequirement(record.candidatePlan, record.activeRequirement) ||
@@ -637,6 +688,7 @@ export function projectDesktopProjectTaskDetail(
     activeRequirement: requirement,
     candidatePlan,
     confirmedPlan,
+    activeGraph,
   });
 }
 
@@ -736,6 +788,31 @@ export function decodeDesktopProjectTaskCandidatePlanConfirmation(
   });
 }
 
+export function decodeDesktopProjectTaskGraphMaterialization(
+  input: unknown,
+): DesktopProjectTaskGraphMaterialization | undefined {
+  const record = exactRecord(input, [
+    "confirmedPlanRevisionNumber",
+    "expectedTaskVersion",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.confirmedPlanRevisionNumber)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    confirmedPlanRevisionNumber: record.confirmedPlanRevisionNumber,
+  });
+}
+
 export function decodeDesktopProjectTaskCandidatePlanMutationResult(
   input: unknown,
   expectedProjectId: string,
@@ -792,6 +869,48 @@ export function decodeDesktopProjectTaskCandidatePlanConfirmationResult(
       detail.stage !== "confirmed_plan" ||
       detail.candidatePlan !== null ||
       detail.confirmedPlan === null
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      status: record.status,
+      taskId: expectedTaskId,
+      detail,
+      catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+export function decodeDesktopProjectTaskGraphMaterializationResult(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskGraphMaterializationResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  if (
+    record === undefined ||
+    (record.status !== "materialized" && record.status !== "existing") ||
+    record.taskId !== expectedTaskId
+  ) {
+    return undefined;
+  }
+  try {
+    const detail = decodeProjectedDesktopTaskDetail(
+      record.detail,
+      expectedProjectId,
+      expectedTaskId,
+    );
+    if (
+      detail.stage !== "active_graph" ||
+      detail.candidatePlan !== null ||
+      detail.confirmedPlan === null ||
+      detail.activeGraph === null
     ) {
       return undefined;
     }
@@ -1426,6 +1545,7 @@ function decodeProjectedDesktopTaskDetail(
 ): DesktopProjectTaskDetail {
   const record = exactRecord(input, [
     "activeRequirement",
+    "activeGraph",
     "candidatePlan",
     "confirmedPlan",
     "projectId",
@@ -1437,6 +1557,7 @@ function decodeProjectedDesktopTaskDetail(
   const requirement = decodeProjectedDesktopTaskRequirement(record?.activeRequirement);
   const candidatePlan = decodeDesktopProjectTaskCandidatePlan(record?.candidatePlan, false);
   const confirmedPlan = decodeDesktopProjectTaskCandidatePlan(record?.confirmedPlan, false);
+  const activeGraph = decodeProjectedDesktopTaskGraph(record?.activeGraph, confirmedPlan);
   if (
     record?.projectId !== expectedProjectId ||
     record.taskId !== expectedTaskId ||
@@ -1447,7 +1568,9 @@ function decodeProjectedDesktopTaskDetail(
     requirement === undefined ||
     candidatePlan === undefined ||
     confirmedPlan === undefined ||
-    !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage)
+    activeGraph === undefined ||
+    !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage) ||
+    !graphMatchesStage(record.activeGraph, record.stage)
   ) {
     throw new BootstrapStateTransitionError();
   }
@@ -1460,6 +1583,7 @@ function decodeProjectedDesktopTaskDetail(
     activeRequirement: requirement,
     candidatePlan,
     confirmedPlan,
+    activeGraph,
   });
 }
 
@@ -1533,6 +1657,211 @@ function decodeDesktopProjectTaskCandidatePlan(
   });
 }
 
+function projectDesktopProjectTaskGraph(
+  input: unknown,
+  confirmedPlanInput: unknown,
+): DesktopProjectTaskGraph | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const graph = exactRecord(input, [
+    "basedOnPlanRevisionId",
+    "nodes",
+    "revisionId",
+    "revisionNumber",
+    "topologicalOrder",
+  ]);
+  const confirmedPlan = exactRecord(confirmedPlanInput, [
+    "basedOnRequirementRevisionId",
+    "revisionId",
+    "revisionNumber",
+    "steps",
+  ]);
+  if (
+    graph === undefined ||
+    confirmedPlan === undefined ||
+    !isUuid(graph.revisionId) ||
+    !isPositiveSafeInteger(graph.revisionNumber) ||
+    graph.basedOnPlanRevisionId !== confirmedPlan.revisionId ||
+    !Array.isArray(graph.nodes) ||
+    graph.nodes.length < 1 ||
+    graph.nodes.length > MAX_TASK_PLAN_STEPS ||
+    !Array.isArray(graph.topologicalOrder) ||
+    graph.topologicalOrder.length !== graph.nodes.length ||
+    !Array.isArray(confirmedPlan.steps)
+  ) {
+    return undefined;
+  }
+  const stepIds = confirmedPlan.steps.map(
+    (inputStep) =>
+      exactRecord(inputStep, ["acceptanceCriteria", "description", "stepId", "title"])?.stepId,
+  );
+  if (stepIds.some((stepId) => !isUuid(stepId)) || new Set(stepIds).size !== stepIds.length) {
+    return undefined;
+  }
+  const nodeRecords = graph.nodes.map((inputNode) =>
+    exactRecord(inputNode, [
+      "acceptanceCriteria",
+      "dependsOnNodeIds",
+      "description",
+      "nodeId",
+      "sourcePlanStepId",
+      "status",
+      "title",
+    ]),
+  );
+  if (nodeRecords.some((node) => node === undefined)) {
+    return undefined;
+  }
+  const nodes = nodeRecords as Readonly<Record<string, unknown>>[];
+  const nodeIds = nodes.map((node) => node.nodeId);
+  const orderIds = graph.topologicalOrder;
+  const nodeById = new Map(nodes.map((node) => [node.nodeId, node]));
+  const orderIndex = new Map(orderIds.map((nodeId, index) => [nodeId, index]));
+  if (
+    nodeIds.some((nodeId) => !isUuid(nodeId)) ||
+    new Set(nodeIds).size !== nodes.length ||
+    orderIds.some((nodeId) => !isUuid(nodeId) || !nodeById.has(nodeId)) ||
+    orderIndex.size !== nodes.length
+  ) {
+    return undefined;
+  }
+  let totalBytes = 0;
+  const projected = orderIds.map((nodeId, index) => {
+    const node = nodeById.get(nodeId);
+    if (
+      node === undefined ||
+      !isUuid(node.sourcePlanStepId) ||
+      !validTaskPlanStepText(node.title, MAX_TASK_PLAN_STEP_TITLE_BYTES) ||
+      !validTaskPlanStepText(node.description, MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES) ||
+      !validTaskRequirementItems(node.acceptanceCriteria) ||
+      !Array.isArray(node.dependsOnNodeIds) ||
+      node.dependsOnNodeIds.length > MAX_TASK_PLAN_STEPS ||
+      typeof node.status !== "string" ||
+      !taskNodeStatuses.has(node.status)
+    ) {
+      return undefined;
+    }
+    const sourcePlanStepIndex = stepIds.indexOf(node.sourcePlanStepId);
+    const dependencyIndexes = node.dependsOnNodeIds.map((dependencyId) =>
+      orderIndex.get(dependencyId),
+    );
+    if (
+      sourcePlanStepIndex < 0 ||
+      dependencyIndexes.some(
+        (dependencyIndex) => dependencyIndex === undefined || dependencyIndex >= index,
+      ) ||
+      new Set(node.dependsOnNodeIds).size !== node.dependsOnNodeIds.length
+    ) {
+      return undefined;
+    }
+    totalBytes += utf8ByteLength(
+      [node.title, node.description, ...node.acceptanceCriteria].join(""),
+    );
+    return Object.freeze({
+      nodeNumber: index + 1,
+      sourcePlanStepNumber: sourcePlanStepIndex + 1,
+      title: node.title,
+      description: node.description,
+      acceptanceCriteria: Object.freeze([...node.acceptanceCriteria]),
+      dependsOnNodeNumbers: Object.freeze(
+        dependencyIndexes.map((dependencyIndex) => dependencyIndex! + 1),
+      ),
+      status: node.status as DesktopProjectTaskGraphNodeStatus,
+    });
+  });
+  if (
+    projected.some((node) => node === undefined) ||
+    totalBytes > MAX_TASK_PLAN_TOTAL_BYTES ||
+    new Set(nodes.map((node) => node.sourcePlanStepId)).size !== stepIds.length ||
+    stepIds.some((stepId) => !nodes.some((node) => node.sourcePlanStepId === stepId))
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    revisionNumber: graph.revisionNumber,
+    nodes: Object.freeze(projected as DesktopProjectTaskGraphNode[]),
+  });
+}
+
+function decodeProjectedDesktopTaskGraph(
+  input: unknown,
+  confirmedPlan: DesktopProjectTaskConfirmedPlan | null | undefined,
+): DesktopProjectTaskGraph | null | undefined {
+  if (input === null) {
+    return null;
+  }
+  const graph = exactRecord(input, ["nodes", "revisionNumber"]);
+  if (
+    graph === undefined ||
+    confirmedPlan === null ||
+    confirmedPlan === undefined ||
+    !isPositiveSafeInteger(graph.revisionNumber) ||
+    !Array.isArray(graph.nodes) ||
+    graph.nodes.length < 1 ||
+    graph.nodes.length > MAX_TASK_PLAN_STEPS
+  ) {
+    return undefined;
+  }
+  let totalBytes = 0;
+  const nodes = graph.nodes.map((inputNode, index) => {
+    const node = exactRecord(inputNode, [
+      "acceptanceCriteria",
+      "dependsOnNodeNumbers",
+      "description",
+      "nodeNumber",
+      "sourcePlanStepNumber",
+      "status",
+      "title",
+    ]);
+    if (
+      node === undefined ||
+      node.nodeNumber !== index + 1 ||
+      !isPositiveSafeInteger(node.sourcePlanStepNumber) ||
+      node.sourcePlanStepNumber > confirmedPlan.steps.length ||
+      !validTaskPlanStepText(node.title, MAX_TASK_PLAN_STEP_TITLE_BYTES) ||
+      !validTaskPlanStepText(node.description, MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES) ||
+      !validTaskRequirementItems(node.acceptanceCriteria) ||
+      !Array.isArray(node.dependsOnNodeNumbers) ||
+      node.dependsOnNodeNumbers.length > MAX_TASK_PLAN_STEPS ||
+      node.dependsOnNodeNumbers.some(
+        (dependency) => !isPositiveSafeInteger(dependency) || dependency >= index + 1,
+      ) ||
+      new Set(node.dependsOnNodeNumbers).size !== node.dependsOnNodeNumbers.length ||
+      typeof node.status !== "string" ||
+      !taskNodeStatuses.has(node.status)
+    ) {
+      return undefined;
+    }
+    totalBytes += utf8ByteLength(
+      [node.title, node.description, ...node.acceptanceCriteria].join(""),
+    );
+    return Object.freeze({
+      nodeNumber: node.nodeNumber,
+      sourcePlanStepNumber: node.sourcePlanStepNumber,
+      title: node.title,
+      description: node.description,
+      acceptanceCriteria: Object.freeze([...node.acceptanceCriteria]),
+      dependsOnNodeNumbers: Object.freeze([...node.dependsOnNodeNumbers]),
+      status: node.status as DesktopProjectTaskGraphNodeStatus,
+    });
+  });
+  const coveredSteps = new Set(
+    nodes.map((node) => node?.sourcePlanStepNumber).filter((value) => value !== undefined),
+  );
+  if (
+    nodes.some((node) => node === undefined) ||
+    totalBytes > MAX_TASK_PLAN_TOTAL_BYTES ||
+    coveredSteps.size !== confirmedPlan.steps.length
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    revisionNumber: graph.revisionNumber,
+    nodes: Object.freeze(nodes as DesktopProjectTaskGraphNode[]),
+  });
+}
+
 function planMatchesRequirement(plan: unknown, requirement: unknown): boolean {
   if (plan === null) {
     return true;
@@ -1565,6 +1894,11 @@ function plansMatchStage(candidate: unknown, confirmed: unknown, stage: unknown)
     (!stageRequiresConfirmed || confirmed !== null) &&
     (stage !== "requirements_only" || confirmed === null)
   );
+}
+
+function graphMatchesStage(graph: unknown, stage: unknown): boolean {
+  const stageHasGraph = stage === "active_graph" || stage === "active_graph_with_candidate";
+  return (graph !== null) === stageHasGraph;
 }
 
 function plansMatchLatest(

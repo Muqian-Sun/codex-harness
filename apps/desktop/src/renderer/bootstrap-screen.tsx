@@ -4,6 +4,7 @@ import {
   decodeDesktopProjectTaskCreation,
   decodeDesktopProjectTaskCandidatePlanConfirmation,
   decodeDesktopProjectTaskCandidatePlanGeneration,
+  decodeDesktopProjectTaskGraphMaterialization,
   decodeDesktopProjectTaskRequirementRevision,
 } from "../shared/bootstrap-state.js";
 import type {
@@ -26,6 +27,8 @@ import type {
   DesktopProjectTaskDetail,
   DesktopProjectTaskDetailResult,
   DesktopProjectTaskMutationResult,
+  DesktopProjectTaskGraphMaterialization,
+  DesktopProjectTaskGraphMaterializationResult,
   DesktopProjectTaskRequirementMutationResult,
   DesktopProjectTaskRequirementRevision,
   DesktopProjectTaskSelection,
@@ -479,6 +482,9 @@ export function ProjectTaskPanel({
     | "confirming"
     | DesktopProjectTaskCandidatePlanConfirmationResult["status"]
   >("idle");
+  const [graphStatus, setGraphStatus] = useState<
+    "idle" | "materializing" | DesktopProjectTaskGraphMaterializationResult["status"]
+  >("idle");
 
   useEffect(() => {
     if (
@@ -504,6 +510,7 @@ export function ProjectTaskPanel({
     setRevisionStatus("idle");
     setPlanStatus("idle");
     setPlanConfirmationStatus("idle");
+    setGraphStatus("idle");
     void desktopTaskApi()
       .readProjectTaskCatalog(selectedProjectId)
       .then((result) => {
@@ -538,6 +545,7 @@ export function ProjectTaskPanel({
     setRevisionStatus("idle");
     setPlanStatus("idle");
     setPlanConfirmationStatus("idle");
+    setGraphStatus("idle");
     void desktopTaskApi()
       .readProjectTaskDetail({ projectId: selectedProjectId, taskId: selectedTaskId })
       .then((result) => {
@@ -582,7 +590,8 @@ export function ProjectTaskPanel({
     revisionStatus !== "revising" &&
     planStatus !== "generating" &&
     planConfirmationStatus !== "reviewing" &&
-    planConfirmationStatus !== "confirming";
+    planConfirmationStatus !== "confirming" &&
+    graphStatus !== "materializing";
   const requirementRevision =
     detailState.status !== "loaded"
       ? undefined
@@ -600,7 +609,8 @@ export function ProjectTaskPanel({
     mutationStatus !== "creating" &&
     planStatus !== "generating" &&
     planConfirmationStatus !== "reviewing" &&
-    planConfirmationStatus !== "confirming";
+    planConfirmationStatus !== "confirming" &&
+    graphStatus !== "materializing";
   const planGeneration =
     detailState.status !== "loaded"
       ? undefined
@@ -620,7 +630,8 @@ export function ProjectTaskPanel({
     revisionStatus !== "revising" &&
     planStatus !== "generating" &&
     planConfirmationStatus !== "reviewing" &&
-    planConfirmationStatus !== "confirming";
+    planConfirmationStatus !== "confirming" &&
+    graphStatus !== "materializing";
   const planConfirmation =
     detailState.status !== "loaded" || detailState.detail.candidatePlan === null
       ? undefined
@@ -637,13 +648,38 @@ export function ProjectTaskPanel({
     mutationStatus !== "creating" &&
     revisionStatus !== "revising" &&
     planStatus !== "generating" &&
-    planConfirmationStatus !== "confirming";
+    planConfirmationStatus !== "confirming" &&
+    graphStatus !== "materializing";
+  const graphMaterialization =
+    detailState.status !== "loaded" ||
+    detailState.detail.stage !== "confirmed_plan" ||
+    detailState.detail.candidatePlan !== null ||
+    detailState.detail.confirmedPlan === null ||
+    detailState.detail.activeGraph !== null
+      ? undefined
+      : decodeDesktopProjectTaskGraphMaterialization({
+          projectId: detailState.detail.projectId,
+          taskId: detailState.detail.taskId,
+          expectedTaskVersion: detailState.detail.taskVersion,
+          confirmedPlanRevisionNumber: detailState.detail.confirmedPlan.revisionNumber,
+        });
+  const canMaterializeGraph =
+    graphMaterialization !== undefined &&
+    detailState.status === "loaded" &&
+    requirementSource === detailState.detail.activeRequirement.sourceText &&
+    mutationStatus !== "creating" &&
+    revisionStatus !== "revising" &&
+    planStatus !== "generating" &&
+    planConfirmationStatus !== "reviewing" &&
+    planConfirmationStatus !== "confirming" &&
+    graphStatus !== "materializing";
   const taskMutationPending =
     mutationStatus === "creating" ||
     revisionStatus === "revising" ||
     planStatus === "generating" ||
     planConfirmationStatus === "reviewing" ||
-    planConfirmationStatus === "confirming";
+    planConfirmationStatus === "confirming" ||
+    graphStatus === "materializing";
 
   const createTask = async (): Promise<void> => {
     if (!canCreate || creation === undefined) {
@@ -702,6 +738,7 @@ export function ProjectTaskPanel({
     }
     setPlanStatus("generating");
     setPlanConfirmationStatus("idle");
+    setGraphStatus("idle");
     try {
       const result = await desktopTaskApi().generateProjectTaskCandidatePlan(planGeneration);
       if (result.status === "generated" || result.status === "existing") {
@@ -742,6 +779,7 @@ export function ProjectTaskPanel({
         setDetailState({ status: "loaded", detail: result.detail });
         setRequirementSource(result.detail.activeRequirement.sourceText);
         setPlanStatus("idle");
+        setGraphStatus("idle");
       } else if (result.status === "conflict") {
         const [currentDetail, currentCatalog] = await Promise.allSettled([
           desktopTaskApi().readProjectTaskDetail({
@@ -762,6 +800,39 @@ export function ProjectTaskPanel({
       setPlanConfirmationStatus(result.status);
     } catch {
       setPlanConfirmationStatus("unavailable");
+    }
+  };
+
+  const materializeGraph = async (): Promise<void> => {
+    if (!canMaterializeGraph || graphMaterialization === undefined) {
+      return;
+    }
+    setGraphStatus("materializing");
+    try {
+      const result = await desktopTaskApi().materializeProjectTaskGraph(graphMaterialization);
+      if (result.status === "materialized" || result.status === "existing") {
+        setCatalogState({ status: "loaded", catalog: result.catalog });
+        setDetailState({ status: "loaded", detail: result.detail });
+        setRequirementSource(result.detail.activeRequirement.sourceText);
+      } else if (result.status === "conflict") {
+        const [currentDetail, currentCatalog] = await Promise.allSettled([
+          desktopTaskApi().readProjectTaskDetail({
+            projectId: graphMaterialization.projectId,
+            taskId: graphMaterialization.taskId,
+          }),
+          desktopTaskApi().readProjectTaskCatalog(graphMaterialization.projectId),
+        ]);
+        if (currentDetail.status === "fulfilled" && currentDetail.value.status === "loaded") {
+          setDetailState({ status: "loaded", detail: currentDetail.value.detail });
+          setRequirementSource(currentDetail.value.detail.activeRequirement.sourceText);
+        }
+        if (currentCatalog.status === "fulfilled" && currentCatalog.value.status === "loaded") {
+          setCatalogState({ status: "loaded", catalog: currentCatalog.value.catalog });
+        }
+      }
+      setGraphStatus(result.status);
+    } catch {
+      setGraphStatus("unavailable");
     }
   };
 
@@ -1072,8 +1143,8 @@ export function ProjectTaskPanel({
       <aside className="task-inspector" aria-label="计划检查器">
         <header className="inspector-header">
           <div>
-            <span>PLAN</span>
-            <strong>任务计划</strong>
+            <span>WORKFLOW</span>
+            <strong>计划与 DAG</strong>
           </div>
           <small>LOCAL · PERSISTED</small>
         </header>
@@ -1081,7 +1152,7 @@ export function ProjectTaskPanel({
           <span aria-hidden="true">!</span>
           <div>
             <strong>执行保持锁定</strong>
-            <p>确认只设置权威计划，不会创建 DAG、Run 或工具调用。</p>
+            <p>计划与 DAG 都只建立本地权威状态，不会创建 Run 或调用工具。</p>
           </div>
         </div>
         {detailState.status === "loaded" ? (
@@ -1099,7 +1170,9 @@ export function ProjectTaskPanel({
                 {detailState.detail.candidatePlan !== null
                   ? "UNCONFIRMED"
                   : detailState.detail.confirmedPlan !== null
-                    ? "WAITING FOR DAG"
+                    ? detailState.detail.activeGraph === null
+                      ? "WAITING FOR DAG"
+                      : "DAG MATERIALIZED"
                     : "NOT CREATED"}
               </small>
             </div>
@@ -1176,6 +1249,41 @@ export function ProjectTaskPanel({
                 <p>高级档位会只读分析当前 Project，并生成一份持久、可审阅的步骤清单。</p>
               </div>
             )}
+            {detailState.detail.activeGraph !== null ? (
+              <TaskGraph graph={detailState.detail.activeGraph} />
+            ) : detailState.detail.confirmedPlan !== null &&
+              detailState.detail.candidatePlan === null ? (
+              <div className="task-graph-materialization">
+                <div>
+                  <span>NEXT AUTHORITY</span>
+                  <strong>
+                    把 P{detailState.detail.confirmedPlan.revisionNumber} 固化为 TODO / DAG
+                  </strong>
+                  <p>每个 Plan step 生成一个 pending 节点，按当前顺序建立保守的串行依赖。</p>
+                </div>
+                <button
+                  type="button"
+                  data-task-graph-materialize
+                  disabled={!canMaterializeGraph}
+                  onClick={() => void materializeGraph()}
+                >
+                  {graphStatus === "materializing" ? "正在构建 DAG" : "创建任务节点与 DAG"}
+                </button>
+              </div>
+            ) : null}
+            {detailState.detail.activeGraph !== null ||
+            detailState.detail.confirmedPlan !== null ? (
+              <span
+                className="task-graph-feedback"
+                data-task-graph-status={graphStatus}
+                aria-live="polite"
+              >
+                {taskGraphMaterializationFeedback(
+                  graphStatus,
+                  detailState.detail.activeGraph !== null,
+                )}
+              </span>
+            ) : null}
             {detailState.detail.candidatePlan !== null || planConfirmationStatus !== "idle" ? (
               <span
                 className="plan-confirmation-feedback"
@@ -1261,6 +1369,51 @@ export function CandidatePlan({
                   ))}
                 </ul>
               ) : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+export function TaskGraph({
+  graph,
+}: Readonly<{ graph: NonNullable<DesktopProjectTaskDetail["activeGraph"]> }>) {
+  return (
+    <section className="task-active-graph" data-task-graph-revision={graph.revisionNumber}>
+      <header>
+        <div>
+          <span>ACTIVE DAG</span>
+          <strong>G{graph.revisionNumber}</strong>
+        </div>
+        <small>EXECUTION LOCKED · {graph.nodes.length} NODES</small>
+      </header>
+      <ol>
+        {graph.nodes.map((node) => (
+          <li key={node.nodeNumber} data-task-node-status={node.status}>
+            <span>T{String(node.nodeNumber).padStart(2, "0")}</span>
+            <div>
+              <header>
+                <strong>{node.title}</strong>
+                <small>{node.status.toUpperCase()}</small>
+              </header>
+              <p>{node.description}</p>
+              {node.acceptanceCriteria.length > 0 ? (
+                <ul>
+                  {node.acceptanceCriteria.map((criterion, criterionIndex) => (
+                    <li key={`${criterionIndex}:${criterion}`}>{criterion}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <small>
+                PLAN STEP {String(node.sourcePlanStepNumber).padStart(2, "0")} ·{" "}
+                {node.dependsOnNodeNumbers.length === 0
+                  ? "起始节点"
+                  : `依赖 ${node.dependsOnNodeNumbers
+                      .map((dependency) => `T${String(dependency).padStart(2, "0")}`)
+                      .join("、")}`}
+              </small>
             </div>
           </li>
         ))}
@@ -1395,6 +1548,29 @@ export function taskCandidatePlanConfirmationFeedback(
       return "Task 或候选计划已经变化；已刷新权威详情，请重新审阅后再确认。";
     case "unavailable":
       return "结果当前未知；请重启并核对 confirmed Plan 修订号，不要盲目重复确认。";
+  }
+}
+
+export function taskGraphMaterializationFeedback(
+  status: "idle" | "materializing" | DesktopProjectTaskGraphMaterializationResult["status"],
+  hasGraph: boolean,
+): string {
+  if (status === "idle" && hasGraph) {
+    return "DAG 已持久化；所有节点仍为 pending，尚未创建 Run 或开放执行。";
+  }
+  switch (status) {
+    case "idle":
+      return "此步骤不调用模型；只把 confirmed Plan 确定性转换为持久 DAG。";
+    case "materializing":
+      return "正在复核 Task、Requirement 与 confirmed Plan 栅栏并原子提交 DAG。";
+    case "materialized":
+      return "DAG 已持久化；所有节点为 pending，执行仍锁定。";
+    case "existing":
+      return "相同 DAG 命令已经落盘，已重新读取当前权威图。";
+    case "conflict":
+      return "Task 或 confirmed Plan 已变化；已刷新权威详情，请重新核对。";
+    case "unavailable":
+      return "结果当前未知；请重启并核对 DAG 修订号，不要盲目重复创建。";
   }
 }
 
@@ -1718,6 +1894,9 @@ function desktopTaskApi(): Readonly<{
   confirmProjectTaskCandidatePlan(
     input: DesktopProjectTaskCandidatePlanConfirmation,
   ): Promise<DesktopProjectTaskCandidatePlanConfirmationResult>;
+  materializeProjectTaskGraph(
+    input: DesktopProjectTaskGraphMaterialization,
+  ): Promise<DesktopProjectTaskGraphMaterializationResult>;
 }> {
   return (
     globalThis as unknown as {
@@ -1738,6 +1917,9 @@ function desktopTaskApi(): Readonly<{
         confirmProjectTaskCandidatePlan(
           input: DesktopProjectTaskCandidatePlanConfirmation,
         ): Promise<DesktopProjectTaskCandidatePlanConfirmationResult>;
+        materializeProjectTaskGraph(
+          input: DesktopProjectTaskGraphMaterialization,
+        ): Promise<DesktopProjectTaskGraphMaterializationResult>;
       }>;
     }
   ).codexHarness;

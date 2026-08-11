@@ -125,7 +125,7 @@ describe("task graph normalization", () => {
     expect(() =>
       normalizeTaskGraphDraft(graph([node({ description: "x".repeat(8 * 1024 + 1) })])),
     ).toThrowError(TaskGraphValidationError);
-    const oversizedNodes = Array.from({ length: 15 }, (_, index) =>
+    const oversizedNodes = Array.from({ length: 17 }, (_, index) =>
       node({
         nodeId: `00000000-0000-4000-8000-${String(index + 100).padStart(12, "0")}`,
         description: "x".repeat(8 * 1024),

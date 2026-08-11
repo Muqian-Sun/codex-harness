@@ -20,6 +20,7 @@ const MAX_TASK_REQUIREMENT_TOTAL_BYTES = 256 * 1_024;
 const MAX_TASK_PLAN_STEP_TITLE_BYTES = 512;
 const MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES = 8 * 1_024;
 const MAX_TASK_PLAN_TOTAL_BYTES = 256 * 1_024;
+const MAX_TASK_GRAPH_DEPENDENCIES = 2_000;
 
 export const MAX_MODEL_CATALOG_PAGE_SIZE = 16;
 export const MAX_MODEL_REASONING_EFFORTS = 64;
@@ -28,6 +29,17 @@ export const MAX_PROJECT_ROUTING_BINDING_BATCH_SIZE = 16;
 export const MAX_TASK_CATALOG_PAGE_SIZE = 12;
 export const MAX_TASK_REQUIREMENT_ITEMS = 100;
 export const MAX_TASK_PLAN_STEPS = 200;
+
+export const TASK_NODE_STATUSES = Object.freeze([
+  "pending",
+  "ready",
+  "running",
+  "blocked",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "cancelled",
+] as const);
 
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
@@ -460,6 +472,105 @@ const TaskPlanRevisionSchema = z
     }
   });
 
+const TaskGraphNodeSchema = z
+  .object({
+    nodeId: z.string().regex(UUID_PATTERN),
+    sourcePlanStepId: z.string().regex(UUID_PATTERN),
+    title: z
+      .string()
+      .min(1)
+      .refine(
+        (value) =>
+          value.trim().length > 0 &&
+          utf8ByteLength(value) <= MAX_TASK_PLAN_STEP_TITLE_BYTES &&
+          !value.includes("\0"),
+      ),
+    description: z
+      .string()
+      .min(1)
+      .refine(
+        (value) =>
+          value.trim().length > 0 &&
+          utf8ByteLength(value) <= MAX_TASK_PLAN_STEP_DESCRIPTION_BYTES &&
+          !value.includes("\0"),
+      ),
+    acceptanceCriteria: z.array(TaskRequirementItemSchema).max(MAX_TASK_REQUIREMENT_ITEMS),
+    dependsOnNodeIds: z.array(z.string().regex(UUID_PATTERN)).max(MAX_TASK_PLAN_STEPS),
+    status: z.enum(TASK_NODE_STATUSES),
+  })
+  .strict();
+
+const TaskGraphRevisionSchema = z
+  .object({
+    revisionId: z.string().regex(UUID_PATTERN),
+    revisionNumber: NonNegativeSafeIntegerSchema.min(1),
+    basedOnPlanRevisionId: z.string().regex(UUID_PATTERN),
+    nodes: z.array(TaskGraphNodeSchema).min(1).max(MAX_TASK_PLAN_STEPS),
+    topologicalOrder: z.array(z.string().regex(UUID_PATTERN)).min(1).max(MAX_TASK_PLAN_STEPS),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const nodeIds = value.nodes.map((node) => node.nodeId);
+    const nodeIdSet = new Set(nodeIds);
+    if (
+      value.nodes.reduce((total, node) => total + node.dependsOnNodeIds.length, 0) >
+      MAX_TASK_GRAPH_DEPENDENCIES
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["nodes"],
+        message: "Task graph dependency count exceeds the aggregate limit",
+      });
+    }
+    if (nodeIdSet.size !== nodeIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["nodes"],
+        message: "Task graph node identifiers must be unique",
+      });
+    }
+    const orderIndex = new Map(value.topologicalOrder.map((nodeId, index) => [nodeId, index]));
+    if (
+      orderIndex.size !== nodeIds.length ||
+      value.topologicalOrder.length !== nodeIds.length ||
+      value.topologicalOrder.some((nodeId) => !nodeIdSet.has(nodeId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["topologicalOrder"],
+        message: "Task graph topological order must contain every node exactly once",
+      });
+    }
+    value.nodes.forEach((node, nodeIndex) => {
+      const dependencies = new Set(node.dependsOnNodeIds);
+      if (
+        dependencies.size !== node.dependsOnNodeIds.length ||
+        dependencies.has(node.nodeId) ||
+        node.dependsOnNodeIds.some((dependencyId) => !nodeIdSet.has(dependencyId))
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["nodes", nodeIndex, "dependsOnNodeIds"],
+          message: "Task graph dependencies must be unique references to other nodes",
+        });
+      }
+      const nodeOrder = orderIndex.get(node.nodeId);
+      if (
+        nodeOrder === undefined ||
+        node.dependsOnNodeIds.some((dependencyId) => {
+          const dependencyOrder = orderIndex.get(dependencyId);
+          return dependencyOrder === undefined || dependencyOrder >= nodeOrder;
+        })
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["topologicalOrder"],
+          message: "Task graph topological order must place dependencies first",
+        });
+      }
+    });
+  });
+
 const TaskSummarySchema = z
   .object({
     taskId: z.string().regex(UUID_PATTERN),
@@ -554,6 +665,7 @@ export const TaskDetailResultSchema = z
     latestPlanRevisionId: z.string().regex(UUID_PATTERN).nullable(),
     candidatePlan: TaskPlanRevisionSchema.nullable(),
     confirmedPlan: TaskPlanRevisionSchema.nullable(),
+    activeGraph: TaskGraphRevisionSchema.nullable(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -563,6 +675,8 @@ export const TaskDetailResultSchema = z
       value.stage === "confirmed_plan" ||
       value.stage === "active_graph" ||
       value.stage === "active_graph_with_candidate";
+    const stageHasGraph =
+      value.stage === "active_graph" || value.stage === "active_graph_with_candidate";
     if ((value.candidatePlan !== null) !== stageHasCandidate) {
       context.addIssue({
         code: "custom",
@@ -578,6 +692,13 @@ export const TaskDetailResultSchema = z
         code: "custom",
         path: ["confirmedPlan"],
         message: "Task stage and confirmed plan must agree",
+      });
+    }
+    if ((value.activeGraph !== null) !== stageHasGraph) {
+      context.addIssue({
+        code: "custom",
+        path: ["activeGraph"],
+        message: "Task stage and active graph must agree",
       });
     }
     if (
@@ -603,6 +724,22 @@ export const TaskDetailResultSchema = z
         path: ["confirmedPlan"],
         message: "Task confirmed plan fences must match current detail",
       });
+    }
+    if (value.activeGraph !== null && value.confirmedPlan !== null) {
+      const planStepIds = new Set(value.confirmedPlan.steps.map((step) => step.stepId));
+      const coveredStepIds = new Set(value.activeGraph.nodes.map((node) => node.sourcePlanStepId));
+      if (
+        value.activeGraph.basedOnPlanRevisionId !== value.confirmedPlan.revisionId ||
+        value.activeGraph.nodes.some((node) => !planStepIds.has(node.sourcePlanStepId)) ||
+        coveredStepIds.size !== planStepIds.size ||
+        [...planStepIds].some((stepId) => !coveredStepIds.has(stepId))
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["activeGraph"],
+          message: "Task graph fences and Plan step coverage must match the confirmed Plan",
+        });
+      }
     }
   });
 
@@ -680,6 +817,44 @@ export const TaskCandidatePlanConfirmResultSchema = z
   .object({
     schemaVersion: z.literal(1),
     status: z.enum(["confirmed", "existing"]),
+    taskId: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
+export const TaskGraphMaterializeParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedOwnershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    previousRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    confirmedPlanRevisionId: z.string().regex(UUID_PATTERN),
+    previousGraphRevisionId: z.string().regex(UUID_PATTERN).nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const identifiers = [
+      value.commandId,
+      value.projectId,
+      value.taskId,
+      value.previousRequirementRevisionId,
+      value.confirmedPlanRevisionId,
+      ...(value.previousGraphRevisionId === null ? [] : [value.previousGraphRevisionId]),
+    ];
+    if (new Set(identifiers).size !== identifiers.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "Task graph materialization identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskGraphMaterializeResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["materialized", "existing"]),
     taskId: z.string().regex(UUID_PATTERN),
   })
   .strict();
@@ -772,6 +947,23 @@ export type HarnessTaskPlanRevision = Readonly<{
 }>;
 export type HarnessTaskCandidatePlan = HarnessTaskPlanRevision;
 export type HarnessTaskConfirmedPlan = HarnessTaskPlanRevision;
+export type HarnessTaskNodeStatus = (typeof TASK_NODE_STATUSES)[number];
+export type HarnessTaskGraphNode = Readonly<{
+  nodeId: string;
+  sourcePlanStepId: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: readonly string[];
+  dependsOnNodeIds: readonly string[];
+  status: HarnessTaskNodeStatus;
+}>;
+export type HarnessTaskGraphRevision = Readonly<{
+  revisionId: string;
+  revisionNumber: number;
+  basedOnPlanRevisionId: string;
+  nodes: readonly HarnessTaskGraphNode[];
+  topologicalOrder: readonly string[];
+}>;
 export type HarnessTaskDetailParams = Readonly<{
   projectId: string;
   taskId: string;
@@ -788,6 +980,7 @@ export type HarnessTaskDetailResult = Readonly<{
   latestPlanRevisionId: string | null;
   candidatePlan: HarnessTaskCandidatePlan | null;
   confirmedPlan: HarnessTaskConfirmedPlan | null;
+  activeGraph: HarnessTaskGraphRevision | null;
 }>;
 export type HarnessTaskCandidatePlanGenerateParams = Readonly<{
   commandId: string;
@@ -819,6 +1012,21 @@ export type HarnessTaskCandidatePlanConfirmParams = Readonly<{
 export type HarnessTaskCandidatePlanConfirmResult = Readonly<{
   schemaVersion: 1;
   status: "confirmed" | "existing";
+  taskId: string;
+}>;
+export type HarnessTaskGraphMaterializeParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  expectedOwnershipVersion: number;
+  previousRequirementRevisionId: string;
+  confirmedPlanRevisionId: string;
+  previousGraphRevisionId: string | null;
+}>;
+export type HarnessTaskGraphMaterializeResult = Readonly<{
+  schemaVersion: 1;
+  status: "materialized" | "existing";
   taskId: string;
 }>;
 export type HarnessTaskRequirementReviseParams = Readonly<{
@@ -1157,6 +1365,10 @@ export const METHOD_CONTRACTS = Object.freeze({
   "task.plan.confirm_candidate": Object.freeze({
     params: TaskCandidatePlanConfirmParamsSchema,
     result: TaskCandidatePlanConfirmResultSchema,
+  }),
+  "task.graph.materialize": Object.freeze({
+    params: TaskGraphMaterializeParamsSchema,
+    result: TaskGraphMaterializeResultSchema,
   }),
   "task.requirement.revise": Object.freeze({
     params: TaskRequirementReviseParamsSchema,

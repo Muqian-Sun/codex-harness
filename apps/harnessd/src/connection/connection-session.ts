@@ -52,6 +52,7 @@ export type ConnectionSessionConfig = Readonly<{
   readProjectTaskDetail?: (params: JsonValue) => unknown;
   reviseProjectTaskRequirement?: (params: JsonValue) => unknown;
   confirmProjectTaskCandidatePlan?: (params: JsonValue) => unknown;
+  materializeProjectTaskGraph?: (params: JsonValue) => unknown;
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
@@ -133,6 +134,7 @@ export class ConnectionSession {
   readonly #readProjectTaskDetail: (params: JsonValue) => unknown;
   readonly #reviseProjectTaskRequirement: (params: JsonValue) => unknown;
   readonly #confirmProjectTaskCandidatePlan: (params: JsonValue) => unknown;
+  readonly #materializeProjectTaskGraph: (params: JsonValue) => unknown;
   readonly #generateProjectTaskCandidatePlan: (params: JsonValue) => unknown | Promise<unknown>;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
@@ -173,6 +175,8 @@ export class ConnectionSession {
         typeof config.reviseProjectTaskRequirement !== "function") ||
       (config.confirmProjectTaskCandidatePlan !== undefined &&
         typeof config.confirmProjectTaskCandidatePlan !== "function") ||
+      (config.materializeProjectTaskGraph !== undefined &&
+        typeof config.materializeProjectTaskGraph !== "function") ||
       (config.generateProjectTaskCandidatePlan !== undefined &&
         typeof config.generateProjectTaskCandidatePlan !== "function")
     ) {
@@ -202,6 +206,7 @@ export class ConnectionSession {
     this.#readProjectTaskDetail = config.readProjectTaskDetail ?? (() => null);
     this.#reviseProjectTaskRequirement = config.reviseProjectTaskRequirement ?? (() => null);
     this.#confirmProjectTaskCandidatePlan = config.confirmProjectTaskCandidatePlan ?? (() => null);
+    this.#materializeProjectTaskGraph = config.materializeProjectTaskGraph ?? (() => null);
     this.#generateProjectTaskCandidatePlan =
       config.generateProjectTaskCandidatePlan ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
@@ -386,6 +391,7 @@ export class ConnectionSession {
       readProjectTaskDetail: this.#readProjectTaskDetail,
       reviseProjectTaskRequirement: this.#reviseProjectTaskRequirement,
       confirmProjectTaskCandidatePlan: this.#confirmProjectTaskCandidatePlan,
+      materializeProjectTaskGraph: this.#materializeProjectTaskGraph,
       generateProjectTaskCandidatePlan: this.#generateProjectTaskCandidatePlan,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
