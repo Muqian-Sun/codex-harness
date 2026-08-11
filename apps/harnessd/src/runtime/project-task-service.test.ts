@@ -30,6 +30,8 @@ const GRAPH_ID = "00000000-0000-4000-8000-00000000093c";
 const NODE_ID = "00000000-0000-4000-8000-00000000093d";
 const REQUIREMENT_REVISION_ID = "00000000-0000-4000-8000-00000000093e";
 const LATER_REQUIREMENT_REVISION_ID = "00000000-0000-4000-8000-00000000093f";
+const STALE_CONFIRMATION_ID = "00000000-0000-4000-8000-000000000950";
+const CONFIRM_AFTER_GRAPH_ID = "00000000-0000-4000-8000-000000000951";
 const temporaryDirectories: string[] = [];
 const stores: DaemonStateStore[] = [];
 
@@ -116,6 +118,19 @@ function reviseParams(overrides: Readonly<Record<string, unknown>> = {}) {
     expectedOwnershipVersion: 1,
     previousRequirementRevisionId: TASK_COMMAND_ID,
     sourceText: "用户澄清后的需求。",
+    ...overrides,
+  };
+}
+
+function confirmParams(overrides: Readonly<Record<string, unknown>> = {}) {
+  return {
+    commandId: CONFIRMED_PLAN_ID,
+    projectId: PROJECT_ID,
+    taskId: TASK_ID,
+    expectedTaskVersion: 2,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: TASK_COMMAND_ID,
+    candidatePlanRevisionId: CANDIDATE_PLAN_ID,
     ...overrides,
   };
 }
@@ -260,6 +275,21 @@ describe("ProjectTaskService", () => {
     expect(service.list({ projectId: PROJECT_ID, cursor: null, limit: 12 }).tasks[0]?.stage).toBe(
       "active_graph_with_candidate",
     );
+    expect(
+      new ProjectTaskService(store, { now: () => 108 }).confirmCandidatePlan(
+        confirmParams({
+          commandId: CONFIRM_AFTER_GRAPH_ID,
+          expectedTaskVersion: 5,
+          candidatePlanRevisionId: CANDIDATE_AFTER_GRAPH_ID,
+        }),
+      ).status,
+    ).toBe("confirmed");
+    expect(service.detail({ projectId: PROJECT_ID, taskId: TASK_ID })).toMatchObject({
+      stage: "confirmed_plan",
+      candidatePlan: null,
+      confirmedPlan: { revisionId: CONFIRM_AFTER_GRAPH_ID },
+    });
+    expect(tasks.readTask(TASK_ID).activeGraph).toBeNull();
   });
 
   it("reads, revises, and recovers a Project-bound Task Requirement", async () => {
@@ -289,6 +319,7 @@ describe("ProjectTaskService", () => {
       },
       latestPlanRevisionId: null,
       candidatePlan: null,
+      confirmedPlan: null,
     });
     expect(Object.isFrozen(initial.activeRequirement.constraints)).toBe(true);
     expect(service.reviseRequirement(reviseParams())).toEqual({
@@ -329,6 +360,91 @@ describe("ProjectTaskService", () => {
     expect(
       new ProjectTaskService(reopened).detail({ projectId: PROJECT_ID, taskId: TASK_ID }),
     ).toEqual(revised);
+  });
+
+  it("confirms only the current candidate Plan with stable steps and durable idempotence", async () => {
+    const store = await openStore();
+    registerProject(store);
+    bindDefaultProfile(store);
+    new ProjectTaskService(store, { now: () => 103 }).create(createParams());
+    const tasks = new TaskPlanRepository(store.events);
+    const step = {
+      stepId: STEP_ID,
+      title: "形成计划",
+      description: "确认时保留稳定步骤标识。",
+      acceptanceCriteria: ["确认后仍不可执行"],
+    };
+    tasks.revisePlan({
+      eventId: CANDIDATE_PLAN_ID,
+      taskId: TASK_ID,
+      occurredAtMs: 104,
+      expectedTaskVersion: 1,
+      previousPlanRevisionId: null,
+      plan: {
+        revisionId: CANDIDATE_PLAN_ID,
+        status: "candidate",
+        basedOnRequirementRevisionId: TASK_COMMAND_ID,
+        steps: [step],
+      },
+    });
+    const now = vi.fn(() => 105);
+    const service = new ProjectTaskService(store, { now });
+
+    expect(service.confirmCandidatePlan(confirmParams())).toEqual({
+      schemaVersion: 1,
+      status: "confirmed",
+      taskId: TASK_ID,
+    });
+    const confirmed = service.detail({ projectId: PROJECT_ID, taskId: TASK_ID });
+    expect(confirmed).toMatchObject({
+      taskVersion: 3,
+      stage: "confirmed_plan",
+      latestPlanRevisionId: CONFIRMED_PLAN_ID,
+      candidatePlan: null,
+      confirmedPlan: {
+        revisionId: CONFIRMED_PLAN_ID,
+        revisionNumber: 2,
+        basedOnRequirementRevisionId: TASK_COMMAND_ID,
+        steps: [step],
+      },
+    });
+    expect(Object.isFrozen(confirmed.confirmedPlan?.steps[0]?.acceptanceCriteria)).toBe(true);
+    expect(store.events.readByEventId(CONFIRMED_PLAN_ID)).toMatchObject({
+      eventType: "task.plan_revised",
+      metadata: { actor: "desktop.project_task.plan_confirmation" },
+      payload: {
+        expectedTaskVersion: 2,
+        previousPlanRevisionId: CANDIDATE_PLAN_ID,
+        plan: { status: "confirmed", steps: [step] },
+      },
+    });
+
+    tasks.revisePlan({
+      eventId: CANDIDATE_AFTER_GRAPH_ID,
+      taskId: TASK_ID,
+      occurredAtMs: 106,
+      expectedTaskVersion: 3,
+      previousPlanRevisionId: CONFIRMED_PLAN_ID,
+      plan: {
+        revisionId: CANDIDATE_AFTER_GRAPH_ID,
+        status: "candidate",
+        basedOnRequirementRevisionId: TASK_COMMAND_ID,
+        steps: [step],
+      },
+    });
+    expect(service.confirmCandidatePlan(confirmParams())).toEqual({
+      schemaVersion: 1,
+      status: "existing",
+      taskId: TASK_ID,
+    });
+    expect(now).toHaveBeenCalledTimes(1);
+    expect(() =>
+      service.confirmCandidatePlan(confirmParams({ expectedTaskVersion: 3 })),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(() =>
+      service.confirmCandidatePlan(confirmParams({ commandId: STALE_CONFIRMATION_ID })),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(store.events.readByEventId(STALE_CONFIRMATION_ID)).toBeUndefined();
   });
 
   it("retries exact Requirement history and rejects stale or cross-Project commands", async () => {
@@ -447,10 +563,16 @@ describe("ProjectTaskService", () => {
       expect.objectContaining({ code: "conflict" }),
     );
     expect(() =>
+      service.confirmCandidatePlan(confirmParams({ expectedTaskVersion: 0 })),
+    ).toThrowError(expect.objectContaining({ code: "conflict" }));
+    expect(() =>
       service.list({ projectId: "00000000-0000-4000-8000-000000000942", cursor: null, limit: 12 }),
     ).toThrowError(expect.objectContaining({ code: "conflict" }));
 
     unbound.close();
+    expect(() => service.confirmCandidatePlan(confirmParams())).toThrowError(
+      expect.objectContaining({ code: "unavailable" }),
+    );
     expect(() => service.list({ projectId: PROJECT_ID, cursor: null, limit: 12 })).toThrowError(
       expect.objectContaining({ code: "unavailable" }),
     );

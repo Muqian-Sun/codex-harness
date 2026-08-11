@@ -176,15 +176,18 @@ export type DesktopProjectTaskRequirement = Readonly<{
   constraints: readonly string[];
   acceptanceCriteria: readonly string[];
 }>;
-export type DesktopProjectTaskCandidatePlanStep = Readonly<{
+export type DesktopProjectTaskPlanStep = Readonly<{
   title: string;
   description: string;
   acceptanceCriteria: readonly string[];
 }>;
-export type DesktopProjectTaskCandidatePlan = Readonly<{
+export type DesktopProjectTaskPlan = Readonly<{
   revisionNumber: number;
-  steps: readonly DesktopProjectTaskCandidatePlanStep[];
+  steps: readonly DesktopProjectTaskPlanStep[];
 }>;
+export type DesktopProjectTaskCandidatePlanStep = DesktopProjectTaskPlanStep;
+export type DesktopProjectTaskCandidatePlan = DesktopProjectTaskPlan;
+export type DesktopProjectTaskConfirmedPlan = DesktopProjectTaskPlan;
 export type DesktopProjectTaskDetail = Readonly<{
   projectId: string;
   taskId: string;
@@ -193,6 +196,7 @@ export type DesktopProjectTaskDetail = Readonly<{
   stage: DesktopTaskStage;
   activeRequirement: DesktopProjectTaskRequirement;
   candidatePlan: DesktopProjectTaskCandidatePlan | null;
+  confirmedPlan: DesktopProjectTaskConfirmedPlan | null;
 }>;
 export type DesktopProjectTaskDetailResult =
   | Readonly<{ status: "loaded"; detail: DesktopProjectTaskDetail }>
@@ -223,6 +227,20 @@ export type DesktopProjectTaskCandidatePlanGeneration = Readonly<{
 export type DesktopProjectTaskCandidatePlanMutationResult =
   | Readonly<{
       status: "generated" | "existing";
+      taskId: string;
+      detail: DesktopProjectTaskDetail;
+      catalog: DesktopProjectTaskCatalog;
+    }>
+  | Readonly<{ status: "conflict" | "unavailable" }>;
+export type DesktopProjectTaskCandidatePlanConfirmation = Readonly<{
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  candidatePlanRevisionNumber: number;
+}>;
+export type DesktopProjectTaskCandidatePlanConfirmationResult =
+  | Readonly<{
+      status: "confirmed" | "existing";
       taskId: string;
       detail: DesktopProjectTaskDetail;
       catalog: DesktopProjectTaskCatalog;
@@ -575,6 +593,7 @@ export function projectDesktopProjectTaskDetail(
   const record = exactRecord(input, [
     "activeRequirement",
     "candidatePlan",
+    "confirmedPlan",
     "latestPlanRevisionId",
     "ownershipVersion",
     "projectId",
@@ -586,6 +605,7 @@ export function projectDesktopProjectTaskDetail(
   ]);
   const requirement = decodeDesktopProjectTaskRequirement(record?.activeRequirement);
   const candidatePlan = decodeDesktopProjectTaskCandidatePlan(record?.candidatePlan, true);
+  const confirmedPlan = decodeDesktopProjectTaskCandidatePlan(record?.confirmedPlan, true);
   if (
     !isUuid(expectedProjectId) ||
     !isUuid(expectedTaskId) ||
@@ -599,10 +619,12 @@ export function projectDesktopProjectTaskDetail(
     !taskStages.has(record.stage) ||
     requirement === undefined ||
     candidatePlan === undefined ||
-    !candidatePlanMatchesStage(record.candidatePlan, record.stage) ||
+    confirmedPlan === undefined ||
+    !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage) ||
     (record.latestPlanRevisionId !== null && !isUuid(record.latestPlanRevisionId)) ||
-    !candidatePlanMatchesLatest(record.candidatePlan, record.latestPlanRevisionId) ||
-    !candidatePlanMatchesRequirement(record.candidatePlan, record.activeRequirement)
+    !plansMatchLatest(record.candidatePlan, record.confirmedPlan, record.latestPlanRevisionId) ||
+    !planMatchesRequirement(record.candidatePlan, record.activeRequirement) ||
+    !planMatchesRequirement(record.confirmedPlan, record.activeRequirement)
   ) {
     throw new BootstrapStateTransitionError();
   }
@@ -614,6 +636,7 @@ export function projectDesktopProjectTaskDetail(
     stage: record.stage as DesktopTaskStage,
     activeRequirement: requirement,
     candidatePlan,
+    confirmedPlan,
   });
 }
 
@@ -688,6 +711,31 @@ export function decodeDesktopProjectTaskCandidatePlanGeneration(
   });
 }
 
+export function decodeDesktopProjectTaskCandidatePlanConfirmation(
+  input: unknown,
+): DesktopProjectTaskCandidatePlanConfirmation | undefined {
+  const record = exactRecord(input, [
+    "candidatePlanRevisionNumber",
+    "expectedTaskVersion",
+    "projectId",
+    "taskId",
+  ]);
+  if (
+    !isUuid(record?.projectId) ||
+    !isUuid(record.taskId) ||
+    !isPositiveSafeInteger(record.expectedTaskVersion) ||
+    !isPositiveSafeInteger(record.candidatePlanRevisionNumber)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    projectId: record.projectId,
+    taskId: record.taskId,
+    expectedTaskVersion: record.expectedTaskVersion,
+    candidatePlanRevisionNumber: record.candidatePlanRevisionNumber,
+  });
+}
+
 export function decodeDesktopProjectTaskCandidatePlanMutationResult(
   input: unknown,
   expectedProjectId: string,
@@ -710,6 +758,47 @@ export function decodeDesktopProjectTaskCandidatePlanMutationResult(
       status: record.status,
       taskId: expectedTaskId,
       detail: decodeProjectedDesktopTaskDetail(record.detail, expectedProjectId, expectedTaskId),
+      catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+export function decodeDesktopProjectTaskCandidatePlanConfirmationResult(
+  input: unknown,
+  expectedProjectId: string,
+  expectedTaskId: string,
+): DesktopProjectTaskCandidatePlanConfirmationResult | undefined {
+  const terminal = exactRecord(input, ["status"]);
+  if (terminal?.status === "conflict" || terminal?.status === "unavailable") {
+    return Object.freeze({ status: terminal.status });
+  }
+  const record = exactRecord(input, ["catalog", "detail", "status", "taskId"]);
+  if (
+    record === undefined ||
+    (record.status !== "confirmed" && record.status !== "existing") ||
+    record.taskId !== expectedTaskId
+  ) {
+    return undefined;
+  }
+  try {
+    const detail = decodeProjectedDesktopTaskDetail(
+      record.detail,
+      expectedProjectId,
+      expectedTaskId,
+    );
+    if (
+      detail.stage !== "confirmed_plan" ||
+      detail.candidatePlan !== null ||
+      detail.confirmedPlan === null
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      status: record.status,
+      taskId: expectedTaskId,
+      detail,
       catalog: decodeProjectedDesktopTaskCatalog(record.catalog, expectedProjectId),
     });
   } catch {
@@ -1338,6 +1427,7 @@ function decodeProjectedDesktopTaskDetail(
   const record = exactRecord(input, [
     "activeRequirement",
     "candidatePlan",
+    "confirmedPlan",
     "projectId",
     "stage",
     "taskId",
@@ -1346,6 +1436,7 @@ function decodeProjectedDesktopTaskDetail(
   ]);
   const requirement = decodeProjectedDesktopTaskRequirement(record?.activeRequirement);
   const candidatePlan = decodeDesktopProjectTaskCandidatePlan(record?.candidatePlan, false);
+  const confirmedPlan = decodeDesktopProjectTaskCandidatePlan(record?.confirmedPlan, false);
   if (
     record?.projectId !== expectedProjectId ||
     record.taskId !== expectedTaskId ||
@@ -1355,7 +1446,8 @@ function decodeProjectedDesktopTaskDetail(
     !taskStages.has(record.stage) ||
     requirement === undefined ||
     candidatePlan === undefined ||
-    !candidatePlanMatchesStage(record.candidatePlan, record.stage)
+    confirmedPlan === undefined ||
+    !plansMatchStage(record.candidatePlan, record.confirmedPlan, record.stage)
   ) {
     throw new BootstrapStateTransitionError();
   }
@@ -1367,6 +1459,7 @@ function decodeProjectedDesktopTaskDetail(
     stage: record.stage as DesktopTaskStage,
     activeRequirement: requirement,
     candidatePlan,
+    confirmedPlan,
   });
 }
 
@@ -1436,15 +1529,15 @@ function decodeDesktopProjectTaskCandidatePlan(
   }
   return Object.freeze({
     revisionNumber: record.revisionNumber,
-    steps: Object.freeze(steps as DesktopProjectTaskCandidatePlanStep[]),
+    steps: Object.freeze(steps as DesktopProjectTaskPlanStep[]),
   });
 }
 
-function candidatePlanMatchesRequirement(candidate: unknown, requirement: unknown): boolean {
-  if (candidate === null) {
+function planMatchesRequirement(plan: unknown, requirement: unknown): boolean {
+  if (plan === null) {
     return true;
   }
-  const candidateRecord = exactRecord(candidate, [
+  const planRecord = exactRecord(plan, [
     "basedOnRequirementRevisionId",
     "revisionId",
     "revisionNumber",
@@ -1458,25 +1551,34 @@ function candidatePlanMatchesRequirement(candidate: unknown, requirement: unknow
     "revisionNumber",
     "sourceText",
   ]);
-  return candidateRecord?.basedOnRequirementRevisionId === requirementRecord?.revisionId;
+  return planRecord?.basedOnRequirementRevisionId === requirementRecord?.revisionId;
 }
 
-function candidatePlanMatchesStage(candidate: unknown, stage: unknown): boolean {
+function plansMatchStage(candidate: unknown, confirmed: unknown, stage: unknown): boolean {
   const stageHasCandidate = stage === "candidate_plan" || stage === "active_graph_with_candidate";
-  return (candidate !== null) === stageHasCandidate;
+  const stageRequiresConfirmed =
+    stage === "confirmed_plan" ||
+    stage === "active_graph" ||
+    stage === "active_graph_with_candidate";
+  return (
+    (candidate !== null) === stageHasCandidate &&
+    (!stageRequiresConfirmed || confirmed !== null) &&
+    (stage !== "requirements_only" || confirmed === null)
+  );
 }
 
-function candidatePlanMatchesLatest(candidate: unknown, latestPlanRevisionId: unknown): boolean {
-  if (candidate === null) {
-    return true;
+function plansMatchLatest(
+  candidate: unknown,
+  confirmed: unknown,
+  latestPlanRevisionId: unknown,
+): boolean {
+  const latest = candidate ?? confirmed;
+  if (latest === null) {
+    return latestPlanRevisionId === null;
   }
   return (
-    exactRecord(candidate, [
-      "basedOnRequirementRevisionId",
-      "revisionId",
-      "revisionNumber",
-      "steps",
-    ])?.revisionId === latestPlanRevisionId
+    exactRecord(latest, ["basedOnRequirementRevisionId", "revisionId", "revisionNumber", "steps"])
+      ?.revisionId === latestPlanRevisionId
   );
 }
 

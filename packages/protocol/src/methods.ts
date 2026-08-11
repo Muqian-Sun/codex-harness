@@ -429,7 +429,7 @@ const TaskPlanStepSchema = z
   })
   .strict();
 
-const TaskCandidatePlanSchema = z
+const TaskPlanRevisionSchema = z
   .object({
     revisionId: z.string().regex(UUID_PATTERN),
     revisionNumber: NonNegativeSafeIntegerSchema.min(1),
@@ -552,17 +552,32 @@ export const TaskDetailResultSchema = z
     stage: z.enum(TASK_STAGES),
     activeRequirement: TaskRequirementSchema,
     latestPlanRevisionId: z.string().regex(UUID_PATTERN).nullable(),
-    candidatePlan: TaskCandidatePlanSchema.nullable(),
+    candidatePlan: TaskPlanRevisionSchema.nullable(),
+    confirmedPlan: TaskPlanRevisionSchema.nullable(),
   })
   .strict()
   .superRefine((value, context) => {
     const stageHasCandidate =
       value.stage === "candidate_plan" || value.stage === "active_graph_with_candidate";
+    const stageRequiresConfirmed =
+      value.stage === "confirmed_plan" ||
+      value.stage === "active_graph" ||
+      value.stage === "active_graph_with_candidate";
     if ((value.candidatePlan !== null) !== stageHasCandidate) {
       context.addIssue({
         code: "custom",
         path: ["candidatePlan"],
         message: "Task stage and candidate plan must agree",
+      });
+    }
+    if (
+      (stageRequiresConfirmed && value.confirmedPlan === null) ||
+      (value.stage === "requirements_only" && value.confirmedPlan !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["confirmedPlan"],
+        message: "Task stage and confirmed plan must agree",
       });
     }
     if (
@@ -574,6 +589,19 @@ export const TaskDetailResultSchema = z
         code: "custom",
         path: ["candidatePlan"],
         message: "Task candidate plan fences must match current detail",
+      });
+    }
+    if (
+      value.confirmedPlan !== null &&
+      (value.confirmedPlan.basedOnRequirementRevisionId !== value.activeRequirement.revisionId ||
+        (value.candidatePlan === null &&
+          value.confirmedPlan.revisionId !== value.latestPlanRevisionId) ||
+        value.confirmedPlan.revisionId === value.candidatePlan?.revisionId)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["confirmedPlan"],
+        message: "Task confirmed plan fences must match current detail",
       });
     }
   });
@@ -615,6 +643,43 @@ export const TaskCandidatePlanGenerateResultSchema = z
   .object({
     schemaVersion: z.literal(1),
     status: z.enum(["generated", "existing"]),
+    taskId: z.string().regex(UUID_PATTERN),
+  })
+  .strict();
+
+export const TaskCandidatePlanConfirmParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedOwnershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    previousRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    candidatePlanRevisionId: z.string().regex(UUID_PATTERN),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      new Set([
+        value.commandId,
+        value.projectId,
+        value.taskId,
+        value.previousRequirementRevisionId,
+        value.candidatePlanRevisionId,
+      ]).size !== 5
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["commandId"],
+        message: "Task candidate Plan confirmation identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskCandidatePlanConfirmResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["confirmed", "existing"]),
     taskId: z.string().regex(UUID_PATTERN),
   })
   .strict();
@@ -699,12 +764,14 @@ export type HarnessTaskPlanStep = Readonly<{
   description: string;
   acceptanceCriteria: readonly string[];
 }>;
-export type HarnessTaskCandidatePlan = Readonly<{
+export type HarnessTaskPlanRevision = Readonly<{
   revisionId: string;
   revisionNumber: number;
   basedOnRequirementRevisionId: string;
   steps: readonly HarnessTaskPlanStep[];
 }>;
+export type HarnessTaskCandidatePlan = HarnessTaskPlanRevision;
+export type HarnessTaskConfirmedPlan = HarnessTaskPlanRevision;
 export type HarnessTaskDetailParams = Readonly<{
   projectId: string;
   taskId: string;
@@ -720,6 +787,7 @@ export type HarnessTaskDetailResult = Readonly<{
   activeRequirement: HarnessTaskRequirement;
   latestPlanRevisionId: string | null;
   candidatePlan: HarnessTaskCandidatePlan | null;
+  confirmedPlan: HarnessTaskConfirmedPlan | null;
 }>;
 export type HarnessTaskCandidatePlanGenerateParams = Readonly<{
   commandId: string;
@@ -737,6 +805,20 @@ export type HarnessTaskCandidatePlanGenerateParams = Readonly<{
 export type HarnessTaskCandidatePlanGenerateResult = Readonly<{
   schemaVersion: 1;
   status: "generated" | "existing";
+  taskId: string;
+}>;
+export type HarnessTaskCandidatePlanConfirmParams = Readonly<{
+  commandId: string;
+  projectId: string;
+  taskId: string;
+  expectedTaskVersion: number;
+  expectedOwnershipVersion: number;
+  previousRequirementRevisionId: string;
+  candidatePlanRevisionId: string;
+}>;
+export type HarnessTaskCandidatePlanConfirmResult = Readonly<{
+  schemaVersion: 1;
+  status: "confirmed" | "existing";
   taskId: string;
 }>;
 export type HarnessTaskRequirementReviseParams = Readonly<{
@@ -1071,6 +1153,10 @@ export const METHOD_CONTRACTS = Object.freeze({
   "task.plan.generate_candidate": Object.freeze({
     params: TaskCandidatePlanGenerateParamsSchema,
     result: TaskCandidatePlanGenerateResultSchema,
+  }),
+  "task.plan.confirm_candidate": Object.freeze({
+    params: TaskCandidatePlanConfirmParamsSchema,
+    result: TaskCandidatePlanConfirmResultSchema,
   }),
   "task.requirement.revise": Object.freeze({
     params: TaskRequirementReviseParamsSchema,

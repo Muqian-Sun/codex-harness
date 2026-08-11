@@ -1,6 +1,10 @@
+import { createHash } from "node:crypto";
+
 import {
   decodeRequestParams,
   decodeResponseResult,
+  type HarnessTaskCandidatePlanConfirmParams,
+  type HarnessTaskCandidatePlanConfirmResult,
   type HarnessTaskCatalogPageParams,
   type HarnessTaskCatalogPageResult,
   type HarnessTaskCreateParams,
@@ -11,6 +15,7 @@ import {
   type HarnessTaskRequirementReviseResult,
   type HarnessTaskStage,
   type HarnessTaskSummary,
+  type JsonValue,
 } from "@codex-harness/protocol";
 
 import {
@@ -32,6 +37,11 @@ import {
 } from "../domain/task-project-ownership-repository.js";
 import type { DaemonStateStore } from "./daemon-state-store.js";
 import { DESKTOP_DEFAULT_ROUTING_PROFILE_ID } from "./desktop-default-routing-profile.js";
+import type { StoredEvent } from "../persistence/event-store.js";
+
+const PLAN_CONFIRMATION_ACTOR = "desktop.project_task.plan_confirmation";
+const TASK_PLAN_STREAM = "task.plan";
+const PLAN_REVISED_EVENT = "task.plan_revised";
 
 export type ProjectTaskServiceErrorCode = "conflict" | "unavailable";
 
@@ -263,6 +273,75 @@ export class ProjectTaskService {
     }
   }
 
+  confirmCandidatePlan(input: unknown): HarnessTaskCandidatePlanConfirmResult {
+    const decoded = decodeRequestParams("task.plan.confirm_candidate", input);
+    if (!decoded.ok) {
+      throw new ProjectTaskServiceError("conflict");
+    }
+    const params = decoded.value as HarnessTaskCandidatePlanConfirmParams;
+
+    try {
+      this.#assertAvailable();
+      const existing = this.#stateStore.events.readByEventId(params.commandId);
+      if (existing !== undefined) {
+        assertExistingPlanConfirmation(existing, params);
+        return validatePlanConfirmationResult({
+          schemaVersion: 1,
+          status: "existing",
+          taskId: params.taskId,
+        });
+      }
+
+      const project = this.#projects.readProject(params.projectId);
+      const ownership = this.#ownerships.readOwnership(params.taskId);
+      const task = this.#tasks.readTask(params.taskId);
+      const candidate = task.latestPlan?.status === "candidate" ? task.latestPlan : null;
+      if (
+        ownership.projectId !== params.projectId ||
+        ownership.ownershipVersion !== params.expectedOwnershipVersion ||
+        task.taskVersion !== params.expectedTaskVersion ||
+        task.activeRequirement.revisionId !== params.previousRequirementRevisionId ||
+        candidate?.revisionId !== params.candidatePlanRevisionId ||
+        candidate.basedOnRequirementRevisionId !== params.previousRequirementRevisionId ||
+        task.activeGraph?.nodes.some((node) => node.status === "running") === true
+      ) {
+        throw new ProjectTaskServiceError("conflict");
+      }
+      const occurredAtMs = requireTimestamp(this.#dependencies.now());
+      if (
+        occurredAtMs < project.updatedAtMs ||
+        occurredAtMs < ownership.updatedAtMs ||
+        occurredAtMs < task.updatedAtMs
+      ) {
+        throw new ProjectTaskServiceError("conflict");
+      }
+      const revised = this.#tasks.revisePlan({
+        eventId: params.commandId,
+        taskId: params.taskId,
+        occurredAtMs,
+        expectedTaskVersion: params.expectedTaskVersion,
+        previousPlanRevisionId: params.candidatePlanRevisionId,
+        plan: {
+          revisionId: params.commandId,
+          status: "confirmed",
+          basedOnRequirementRevisionId: params.previousRequirementRevisionId,
+          steps: candidate.steps,
+        },
+        metadata: {
+          actor: PLAN_CONFIRMATION_ACTOR,
+          correlationId: planConfirmationFingerprint(params),
+        },
+      });
+      return validatePlanConfirmationResult({
+        schemaVersion: 1,
+        status: revised.duplicate ? "existing" : "confirmed",
+        taskId: params.taskId,
+      });
+    } catch (error: unknown) {
+      throw mapServiceError(error);
+    }
+  }
+
   #assertAvailable(): void {
     if (this.#stateStore.state !== "ready") {
       throw new ProjectTaskServiceError("unavailable");
@@ -291,6 +370,11 @@ function taskDetail(
     task.latestPlan.basedOnRequirementRevisionId === task.activeRequirement.revisionId
       ? task.latestPlan
       : null;
+  const confirmedPlan =
+    task.confirmedPlan?.status === "confirmed" &&
+    task.confirmedPlan.basedOnRequirementRevisionId === task.activeRequirement.revisionId
+      ? task.confirmedPlan
+      : null;
   return Object.freeze({
     schemaVersion: 1,
     projectId,
@@ -305,23 +389,29 @@ function taskDetail(
       acceptanceCriteria: Object.freeze([...task.activeRequirement.acceptanceCriteria]),
     }),
     latestPlanRevisionId: task.latestPlan?.revisionId ?? null,
-    candidatePlan:
-      candidatePlan === null
-        ? null
-        : Object.freeze({
-            revisionId: candidatePlan.revisionId,
-            revisionNumber: candidatePlan.revisionNumber,
-            basedOnRequirementRevisionId: candidatePlan.basedOnRequirementRevisionId,
-            steps: Object.freeze(
-              candidatePlan.steps.map((step) =>
-                Object.freeze({
-                  ...step,
-                  acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
-                }),
-              ),
-            ),
-          }),
+    candidatePlan: projectTaskPlan(candidatePlan),
+    confirmedPlan: projectTaskPlan(confirmedPlan),
   });
+}
+
+function projectTaskPlan(
+  plan: TaskPlanRecord["latestPlan"],
+): HarnessTaskDetailResult["candidatePlan"] {
+  return plan === null
+    ? null
+    : Object.freeze({
+        revisionId: plan.revisionId,
+        revisionNumber: plan.revisionNumber,
+        basedOnRequirementRevisionId: plan.basedOnRequirementRevisionId,
+        steps: Object.freeze(
+          plan.steps.map((step) =>
+            Object.freeze({
+              ...step,
+              acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
+            }),
+          ),
+        ),
+      });
 }
 
 function taskStage(task: TaskPlanRecord): HarnessTaskStage {
@@ -416,7 +506,29 @@ function validateDetailResult(
               ),
             ),
           }),
+    confirmedPlan:
+      result.confirmedPlan === null
+        ? null
+        : Object.freeze({
+            ...result.confirmedPlan,
+            steps: Object.freeze(
+              result.confirmedPlan.steps.map((step) =>
+                Object.freeze({
+                  ...step,
+                  acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
+                }),
+              ),
+            ),
+          }),
   });
+}
+
+function validatePlanConfirmationResult(input: unknown): HarnessTaskCandidatePlanConfirmResult {
+  const decoded = decodeResponseResult("task.plan.confirm_candidate", input);
+  if (!decoded.ok) {
+    throw new ProjectTaskServiceError("unavailable");
+  }
+  return Object.freeze(decoded.value as unknown as HarnessTaskCandidatePlanConfirmResult);
 }
 
 function validateRequirementRevisionResult(input: unknown): HarnessTaskRequirementReviseResult {
@@ -432,6 +544,71 @@ function requireTimestamp(input: number): number {
     throw new ProjectTaskServiceError("unavailable");
   }
   return input;
+}
+
+function planConfirmationFingerprint(params: HarnessTaskCandidatePlanConfirmParams): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        params.commandId,
+        params.projectId,
+        params.taskId,
+        params.expectedTaskVersion,
+        params.expectedOwnershipVersion,
+        params.previousRequirementRevisionId,
+        params.candidatePlanRevisionId,
+      ]),
+    )
+    .digest("hex");
+}
+
+function assertExistingPlanConfirmation(
+  event: StoredEvent,
+  params: HarnessTaskCandidatePlanConfirmParams,
+): void {
+  const payload = exactRecord(event.payload, [
+    "expectedTaskVersion",
+    "plan",
+    "previousPlanRevisionId",
+    "taskId",
+  ]);
+  const plan = exactRecord(payload?.plan, [
+    "basedOnRequirementRevisionId",
+    "revisionId",
+    "status",
+    "steps",
+  ]);
+  if (
+    event.streamType !== TASK_PLAN_STREAM ||
+    event.streamId !== params.taskId ||
+    event.eventType !== PLAN_REVISED_EVENT ||
+    event.metadata.actor !== PLAN_CONFIRMATION_ACTOR ||
+    event.metadata.correlationId !== planConfirmationFingerprint(params) ||
+    payload?.taskId !== params.taskId ||
+    payload.expectedTaskVersion !== params.expectedTaskVersion ||
+    payload.previousPlanRevisionId !== params.candidatePlanRevisionId ||
+    plan?.revisionId !== params.commandId ||
+    plan.status !== "confirmed" ||
+    plan.basedOnRequirementRevisionId !== params.previousRequirementRevisionId ||
+    !Array.isArray(plan.steps)
+  ) {
+    throw new ProjectTaskServiceError("conflict");
+  }
+}
+
+function exactRecord(
+  input: JsonValue | undefined,
+  expectedKeys: readonly string[],
+): Readonly<Record<string, JsonValue>> | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const record = input as Record<string, JsonValue>;
+  const keys = Object.keys(record).sort();
+  const expected = [...expectedKeys].sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index])
+    ? record
+    : undefined;
 }
 
 function mapServiceError(error: unknown): ProjectTaskServiceError {

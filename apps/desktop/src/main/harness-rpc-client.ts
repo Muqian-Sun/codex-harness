@@ -32,6 +32,8 @@ import {
   type HarnessRoutingConfigurationSetParams as ProtocolRoutingConfigurationSetParams,
   type HarnessTaskCatalogPageParams as ProtocolTaskCatalogPageParams,
   type HarnessTaskCatalogPageResult as ProtocolTaskCatalogPageResult,
+  type HarnessTaskCandidatePlanConfirmParams as ProtocolTaskCandidatePlanConfirmParams,
+  type HarnessTaskCandidatePlanConfirmResult as ProtocolTaskCandidatePlanConfirmResult,
   type HarnessTaskCandidatePlanGenerateParams as ProtocolTaskCandidatePlanGenerateParams,
   type HarnessTaskCandidatePlanGenerateResult as ProtocolTaskCandidatePlanGenerateResult,
   type HarnessTaskCreateParams as ProtocolTaskCreateParams,
@@ -133,6 +135,10 @@ export type HarnessRoutingConfigurationResult = Readonly<ProtocolRoutingConfigur
 export type HarnessRoutingConfigurationSetParams = Readonly<ProtocolRoutingConfigurationSetParams>;
 export type HarnessTaskCatalogPageParams = Readonly<ProtocolTaskCatalogPageParams>;
 export type HarnessTaskCatalogPageResult = Readonly<ProtocolTaskCatalogPageResult>;
+export type HarnessTaskCandidatePlanConfirmParams =
+  Readonly<ProtocolTaskCandidatePlanConfirmParams>;
+export type HarnessTaskCandidatePlanConfirmResult =
+  Readonly<ProtocolTaskCandidatePlanConfirmResult>;
 export type HarnessTaskCandidatePlanGenerateParams =
   Readonly<ProtocolTaskCandidatePlanGenerateParams>;
 export type HarnessTaskCandidatePlanGenerateResult =
@@ -410,6 +416,15 @@ export class HarnessRpcClient {
         CANDIDATE_PLAN_REQUEST_TIMEOUT_MS,
       )
     ).value as unknown as HarnessTaskCandidatePlanGenerateResult;
+  }
+
+  async confirmProjectTaskCandidatePlan(
+    params: HarnessTaskCandidatePlanConfirmParams,
+  ): Promise<HarnessTaskCandidatePlanConfirmResult> {
+    return (await this.request(
+      "task.plan.confirm_candidate",
+      params as unknown as JsonValue,
+    )) as unknown as HarnessTaskCandidatePlanConfirmResult;
   }
 
   async reviseProjectTaskRequirement(

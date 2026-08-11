@@ -196,6 +196,7 @@ function projectMethods(): Pick<
       },
       latestPlanRevisionId: null,
       candidatePlan: null,
+      confirmedPlan: null,
     })),
     reviseProjectTaskRequirement: vi.fn(async (params) => ({
       schemaVersion: 1 as const,
@@ -821,6 +822,7 @@ describe("desktop application controller", () => {
       },
       latestPlanRevisionId: null,
       candidatePlan: null,
+      confirmedPlan: null,
     }));
     const readProjectTaskCatalogPage = vi.fn(async () => ({
       schemaVersion: 1 as const,
@@ -882,6 +884,7 @@ describe("desktop application controller", () => {
           acceptanceCriteria: [],
         },
         candidatePlan: null,
+        confirmedPlan: null,
       },
     });
     const revised = await controller.reviseProjectTaskRequirement({
@@ -920,13 +923,14 @@ describe("desktop application controller", () => {
     expect(reviseProjectTaskRequirement).toHaveBeenCalledTimes(1);
   });
 
-  it("generates a candidate Plan with main-owned routing and Task fences", async () => {
+  it("generates and confirms a Plan with main-owned hidden fences", async () => {
     const stateStore = new BootstrapStateStore();
     const taskId = "00000000-0000-4000-8000-000000000894";
     const requirementId = "00000000-0000-4000-8000-000000000895";
     const stepId = "00000000-0000-4000-8000-000000000896";
     let taskVersion = 1;
     let planRevisionId: string | null = null;
+    let confirmedPlanRevisionId: string | null = null;
     const rawDetail = () => ({
       schemaVersion: 1 as const,
       projectId: PROJECT.projectId,
@@ -934,7 +938,12 @@ describe("desktop application controller", () => {
       taskId,
       taskVersion,
       title: "候选计划 Task",
-      stage: planRevisionId === null ? ("requirements_only" as const) : ("candidate_plan" as const),
+      stage:
+        planRevisionId !== null
+          ? ("candidate_plan" as const)
+          : confirmedPlanRevisionId !== null
+            ? ("confirmed_plan" as const)
+            : ("requirements_only" as const),
       activeRequirement: {
         revisionId: requirementId,
         revisionNumber: 1,
@@ -943,13 +952,29 @@ describe("desktop application controller", () => {
         constraints: Object.freeze([]),
         acceptanceCriteria: Object.freeze([]),
       },
-      latestPlanRevisionId: planRevisionId,
+      latestPlanRevisionId: planRevisionId ?? confirmedPlanRevisionId,
       candidatePlan:
         planRevisionId === null
           ? null
           : {
               revisionId: planRevisionId,
               revisionNumber: 1,
+              basedOnRequirementRevisionId: requirementId,
+              steps: [
+                {
+                  stepId,
+                  title: "生成计划",
+                  description: "写入待确认步骤。",
+                  acceptanceCriteria: ["renderer 不接收 ID。"],
+                },
+              ],
+            },
+      confirmedPlan:
+        confirmedPlanRevisionId === null
+          ? null
+          : {
+              revisionId: confirmedPlanRevisionId,
+              revisionNumber: 2,
               basedOnRequirementRevisionId: requirementId,
               steps: [
                 {
@@ -972,7 +997,11 @@ describe("desktop application controller", () => {
           title: "候选计划 Task",
           objective: "生成只读候选计划。",
           stage:
-            planRevisionId === null ? ("requirements_only" as const) : ("candidate_plan" as const),
+            planRevisionId !== null
+              ? ("candidate_plan" as const)
+              : confirmedPlanRevisionId !== null
+                ? ("confirmed_plan" as const)
+                : ("requirements_only" as const),
         },
       ],
       nextCursor: null,
@@ -981,6 +1010,12 @@ describe("desktop application controller", () => {
       taskVersion += 1;
       planRevisionId = command.commandId;
       return { schemaVersion: 1 as const, status: "generated" as const, taskId };
+    });
+    const confirmProjectTaskCandidatePlan = vi.fn(async (command) => {
+      taskVersion += 1;
+      confirmedPlanRevisionId = command.commandId;
+      planRevisionId = null;
+      return { schemaVersion: 1 as const, status: "confirmed" as const, taskId };
     });
     const defaultBinding = {
       projectId: PROJECT.projectId,
@@ -1014,6 +1049,7 @@ describe("desktop application controller", () => {
         readProjectTaskCatalogPage,
         readProjectTaskDetail,
         generateProjectTaskCandidatePlan,
+        confirmProjectTaskCandidatePlan,
         readRoutingConfiguration: vi.fn(async () => CONFIGURED_ROUTING),
         setRoutingConfiguration: routingMethods().setRoutingConfiguration,
         stop: vi.fn(async () => closeResult("graceful")),
@@ -1050,6 +1086,34 @@ describe("desktop application controller", () => {
     });
     expect(JSON.stringify(result)).not.toContain(stepId);
     expect(JSON.stringify(result)).not.toContain(command.commandId);
+    const confirmation = await controller.confirmProjectTaskCandidatePlan({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 2,
+      candidatePlanRevisionNumber: 1,
+    });
+    expect(confirmation).toMatchObject({
+      status: "confirmed",
+      taskId,
+      detail: {
+        taskVersion: 3,
+        stage: "confirmed_plan",
+        candidatePlan: null,
+        confirmedPlan: { revisionNumber: 2, steps: [{ title: "生成计划" }] },
+      },
+      catalog: { tasks: [{ taskVersion: 3, stage: "confirmed_plan" }] },
+    });
+    const confirmationCommand = confirmProjectTaskCandidatePlan.mock.calls[0]![0];
+    expect(confirmationCommand).toMatchObject({
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 2,
+      expectedOwnershipVersion: 2,
+      previousRequirementRevisionId: requirementId,
+      candidatePlanRevisionId: command.commandId,
+    });
+    expect(JSON.stringify(confirmation)).not.toContain(stepId);
+    expect(JSON.stringify(confirmation)).not.toContain(confirmationCommand.commandId);
     await expect(
       controller.generateProjectTaskCandidatePlan({
         projectId: PROJECT.projectId,

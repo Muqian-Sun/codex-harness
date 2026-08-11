@@ -591,10 +591,13 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
                     },
                     latestPlanRevisionId: null,
                     candidatePlan: null,
+                    confirmedPlan: null,
                   }
                 : method === "task.plan.generate_candidate"
                   ? { schemaVersion: 1, status: "generated", taskId }
-                  : { schemaVersion: 1, status: "revised", taskId },
+                  : method === "task.plan.confirm_candidate"
+                    ? { schemaVersion: 1, status: "confirmed", taskId }
+                    : { schemaVersion: 1, status: "revised", taskId },
       });
     });
     const client = await createClient(endpoint);
@@ -635,6 +638,17 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       }),
     ).resolves.toEqual({ schemaVersion: 1, status: "generated", taskId });
     await expect(
+      client.confirmProjectTaskCandidatePlan({
+        commandId: "00000000-0000-4000-8000-000000000917",
+        projectId,
+        taskId,
+        expectedTaskVersion: 2,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        candidatePlanRevisionId: "00000000-0000-4000-8000-000000000915",
+      }),
+    ).resolves.toEqual({ schemaVersion: 1, status: "confirmed", taskId });
+    await expect(
       client.reviseProjectTaskRequirement({
         commandId: "00000000-0000-4000-8000-000000000914",
         projectId,
@@ -650,6 +664,7 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       "task.create",
       "task.detail",
       "task.plan.generate_candidate",
+      "task.plan.confirm_candidate",
       "task.requirement.revise",
     ]);
     await expect(
@@ -664,6 +679,17 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
         expectedOwnershipVersion: 1,
         previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
         sourceText: "invalid",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(
+      client.confirmProjectTaskCandidatePlan({
+        commandId: "00000000-0000-4000-8000-000000000917",
+        projectId,
+        taskId,
+        expectedTaskVersion: 2,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        candidatePlanRevisionId: "00000000-0000-4000-8000-000000000917",
       }),
     ).rejects.toMatchObject({ code: "invalid_request" });
   });

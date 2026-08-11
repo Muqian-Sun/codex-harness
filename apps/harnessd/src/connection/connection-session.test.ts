@@ -37,6 +37,7 @@ function createSession(options?: {
   createProjectTask?: (params: JsonValue) => unknown;
   readProjectTaskDetail?: (params: JsonValue) => unknown;
   reviseProjectTaskRequirement?: (params: JsonValue) => unknown;
+  confirmProjectTaskCandidatePlan?: (params: JsonValue) => unknown;
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
@@ -70,6 +71,9 @@ function createSession(options?: {
     ...(options?.reviseProjectTaskRequirement === undefined
       ? {}
       : { reviseProjectTaskRequirement: options.reviseProjectTaskRequirement }),
+    ...(options?.confirmProjectTaskCandidatePlan === undefined
+      ? {}
+      : { confirmProjectTaskCandidatePlan: options.confirmProjectTaskCandidatePlan }),
     ...(options?.generateProjectTaskCandidatePlan === undefined
       ? {}
       : { generateProjectTaskCandidatePlan: options.generateProjectTaskCandidatePlan }),
@@ -368,7 +372,7 @@ describe("daemon connection session", () => {
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
   });
 
-  it("serves Project Task catalog, creation, detail, and revision through explicit providers", async () => {
+  it("serves Project Task reads and local writes through explicit providers", async () => {
     const projectId = "00000000-0000-4000-8000-000000000861";
     const taskId = "00000000-0000-4000-8000-000000000911";
     const readProjectTaskCatalogPage = vi.fn(() => ({
@@ -408,10 +412,16 @@ describe("daemon connection session", () => {
       },
       latestPlanRevisionId: null,
       candidatePlan: null,
+      confirmedPlan: null,
     }));
     const reviseProjectTaskRequirement = vi.fn(() => ({
       schemaVersion: 1,
       status: "revised",
+      taskId,
+    }));
+    const confirmProjectTaskCandidatePlan = vi.fn(() => ({
+      schemaVersion: 1,
+      status: "confirmed",
       taskId,
     }));
     const session = createSession({
@@ -419,6 +429,7 @@ describe("daemon connection session", () => {
       createProjectTask,
       readProjectTaskDetail,
       reviseProjectTaskRequirement,
+      confirmProjectTaskCandidatePlan,
     });
     await authenticate(session);
     const catalogParams = { projectId, cursor: null, limit: 12 };
@@ -465,6 +476,24 @@ describe("daemon connection session", () => {
       )[0],
     ).toMatchObject({ kind: "response", result: { status: "revised", taskId } });
     expect(reviseProjectTaskRequirement).toHaveBeenCalledWith(reviseParams);
+
+    const confirmParams = {
+      commandId: "00000000-0000-4000-8000-000000000915",
+      projectId,
+      taskId,
+      expectedTaskVersion: 2,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+      candidatePlanRevisionId: "00000000-0000-4000-8000-000000000916",
+    };
+    expect(
+      sentValues(
+        await session.receive(
+          frame(rpc("task-confirm", "task.plan.confirm_candidate", confirmParams)),
+        ),
+      )[0],
+    ).toMatchObject({ kind: "response", result: { status: "confirmed", taskId } });
+    expect(confirmProjectTaskCandidatePlan).toHaveBeenCalledWith(confirmParams);
 
     const missing = createSession();
     await authenticate(missing);

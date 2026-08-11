@@ -633,6 +633,7 @@ describe("method contracts", () => {
       activeRequirement: requirement,
       latestPlanRevisionId: null,
       candidatePlan: null,
+      confirmedPlan: null,
     } as const;
     const revise = {
       commandId,
@@ -747,6 +748,7 @@ describe("method contracts", () => {
       },
       latestPlanRevisionId: params.commandId,
       candidatePlan,
+      confirmedPlan: null,
     } as const;
 
     expect(decodeRequestParams("task.plan.generate_candidate", params).ok).toBe(true);
@@ -788,6 +790,68 @@ describe("method contracts", () => {
         candidatePlan: {
           ...candidatePlan,
           steps: [{ ...candidatePlan.steps[0], title: " " }],
+        },
+      },
+    ]) {
+      expect(decodeResponseResult("task.detail", invalid).ok).toBe(false);
+    }
+
+    const confirmation = {
+      commandId: "00000000-0000-4000-8000-000000000948",
+      projectId: params.projectId,
+      taskId: params.taskId,
+      expectedTaskVersion: detail.taskVersion,
+      expectedOwnershipVersion: detail.ownershipVersion,
+      previousRequirementRevisionId: params.previousRequirementRevisionId,
+      candidatePlanRevisionId: params.commandId,
+    } as const;
+    const confirmedPlan = {
+      ...candidatePlan,
+      revisionId: confirmation.commandId,
+      revisionNumber: 2,
+    } as const;
+    const confirmedDetail = {
+      ...detail,
+      taskVersion: 4,
+      stage: "confirmed_plan",
+      latestPlanRevisionId: confirmation.commandId,
+      candidatePlan: null,
+      confirmedPlan,
+    } as const;
+    expect(decodeRequestParams("task.plan.confirm_candidate", confirmation).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.plan.confirm_candidate", {
+        schemaVersion: 1,
+        status: "confirmed",
+        taskId: params.taskId,
+      }).ok,
+    ).toBe(true);
+    expect(decodeResponseResult("task.detail", confirmedDetail).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.detail", {
+        ...detail,
+        confirmedPlan: {
+          ...confirmedPlan,
+          revisionId: "00000000-0000-4000-8000-000000000949",
+          revisionNumber: 1,
+        },
+      }).ok,
+    ).toBe(true);
+    for (const invalid of [
+      { ...confirmation, expectedTaskVersion: 0 },
+      { ...confirmation, commandId: confirmation.candidatePlanRevisionId },
+      { ...confirmation, extra: true },
+    ]) {
+      expect(decodeRequestParams("task.plan.confirm_candidate", invalid).ok).toBe(false);
+    }
+    for (const invalid of [
+      { ...confirmedDetail, confirmedPlan: null },
+      { ...confirmedDetail, latestPlanRevisionId: confirmation.candidatePlanRevisionId },
+      {
+        ...confirmedDetail,
+        confirmedPlan: {
+          ...confirmedPlan,
+          basedOnRequirementRevisionId: "00000000-0000-4000-8000-00000000094a",
         },
       },
     ]) {

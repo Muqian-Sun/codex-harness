@@ -25,6 +25,8 @@ import {
   decodeDesktopProjectRoutingBindingMutationResult,
   decodeDesktopProjectRoutingBindingProjectId,
   decodeDesktopProjectTaskCatalogResult,
+  decodeDesktopProjectTaskCandidatePlanConfirmation,
+  decodeDesktopProjectTaskCandidatePlanConfirmationResult,
   decodeDesktopProjectTaskCandidatePlanGeneration,
   decodeDesktopProjectTaskCandidatePlanMutationResult,
   decodeDesktopProjectTaskCreation,
@@ -60,6 +62,7 @@ const BIND_PROJECT_DEFAULT_ROUTING_CHANNEL = "desktop.project.routing.bind_defau
 const READ_PROJECT_TASK_CATALOG_CHANNEL = "desktop.task.catalog_page";
 const CREATE_PROJECT_TASK_CHANNEL = "desktop.task.create";
 const READ_PROJECT_TASK_DETAIL_CHANNEL = "desktop.task.detail";
+const CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.confirm_candidate";
 const GENERATE_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL = "desktop.task.plan.generate_candidate";
 const REVISE_PROJECT_TASK_REQUIREMENT_CHANNEL = "desktop.task.requirement.revise";
 const DEVELOPMENT_CODEX_ENVIRONMENT = "CODEX_HARNESS_CODEX_EXECUTABLE";
@@ -172,6 +175,7 @@ async function runDesktopApplication(): Promise<void> {
   const activeProjectTaskCreations = new Set<string>();
   const activeProjectTaskRequirementRevisions = new Set<string>();
   const activeProjectTaskCandidatePlanGenerations = new Set<string>();
+  const activeProjectTaskCandidatePlanConfirmations = new Set<string>();
 
   ipcMain.handle(
     GET_BOOTSTRAP_STATE_CHANNEL,
@@ -378,7 +382,8 @@ async function runDesktopApplication(): Promise<void> {
       const mutationKey = `${revision.projectId}/${revision.taskId}`;
       if (
         activeProjectTaskRequirementRevisions.has(mutationKey) ||
-        activeProjectTaskCandidatePlanGenerations.has(mutationKey)
+        activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
+        activeProjectTaskCandidatePlanConfirmations.has(mutationKey)
       ) {
         return Object.freeze({ status: "unavailable" as const });
       }
@@ -416,7 +421,8 @@ async function runDesktopApplication(): Promise<void> {
       const mutationKey = `${generation.projectId}/${generation.taskId}`;
       if (
         activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
-        activeProjectTaskRequirementRevisions.has(mutationKey)
+        activeProjectTaskRequirementRevisions.has(mutationKey) ||
+        activeProjectTaskCandidatePlanConfirmations.has(mutationKey)
       ) {
         return Object.freeze({ status: "unavailable" as const });
       }
@@ -432,6 +438,45 @@ async function runDesktopApplication(): Promise<void> {
         return Object.freeze({ status: "unavailable" as const });
       } finally {
         activeProjectTaskCandidatePlanGenerations.delete(mutationKey);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    CONFIRM_PROJECT_TASK_CANDIDATE_PLAN_CHANNEL,
+    async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+      if (args.length !== 1 || !isManagedRenderer(event, windows)) {
+        throw new Error("The desktop IPC sender is not authorized.");
+      }
+      const confirmation = decodeDesktopProjectTaskCandidatePlanConfirmation(args[0]);
+      const state = stateStore.current;
+      if (
+        confirmation === undefined ||
+        state.phase !== "ready" ||
+        !state.projects.projects.some((project) => project.projectId === confirmation.projectId)
+      ) {
+        throw new Error("The desktop Project Task candidate Plan confirmation is invalid.");
+      }
+      const mutationKey = `${confirmation.projectId}/${confirmation.taskId}`;
+      if (
+        activeProjectTaskCandidatePlanConfirmations.has(mutationKey) ||
+        activeProjectTaskCandidatePlanGenerations.has(mutationKey) ||
+        activeProjectTaskRequirementRevisions.has(mutationKey)
+      ) {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      activeProjectTaskCandidatePlanConfirmations.add(mutationKey);
+      try {
+        const result = decodeDesktopProjectTaskCandidatePlanConfirmationResult(
+          await controller.confirmProjectTaskCandidatePlan(confirmation),
+          confirmation.projectId,
+          confirmation.taskId,
+        );
+        return result ?? Object.freeze({ status: "unavailable" as const });
+      } catch {
+        return Object.freeze({ status: "unavailable" as const });
+      } finally {
+        activeProjectTaskCandidatePlanConfirmations.delete(mutationKey);
       }
     },
   );

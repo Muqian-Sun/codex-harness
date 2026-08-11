@@ -30,6 +30,7 @@ type ExposedApi = Readonly<{
   readProjectTaskDetail(input: unknown): Promise<unknown>;
   reviseProjectTaskRequirement(input: unknown): Promise<unknown>;
   generateProjectTaskCandidatePlan(input: unknown): Promise<unknown>;
+  confirmProjectTaskCandidatePlan(input: unknown): Promise<unknown>;
 }>;
 
 function readyState(binding: unknown): unknown {
@@ -262,6 +263,7 @@ describe("desktop preload Project routing binding boundary", () => {
           },
         ],
       },
+      confirmedPlan: null,
     };
     await expect(api.readProjectTaskDetail({ ...selection, extra: true })).rejects.toThrow(
       "valid desktop Project Task selection",
@@ -346,6 +348,47 @@ describe("desktop preload Project routing binding boundary", () => {
     });
     await expect(api.generateProjectTaskCandidatePlan(generation)).rejects.toThrow(
       "Project Task candidate Plan result is invalid",
+    );
+
+    const confirmation = { ...generation, candidatePlanRevisionNumber: 1 };
+    await expect(
+      api.confirmProjectTaskCandidatePlan({ ...confirmation, candidatePlanRevisionNumber: 0 }),
+    ).rejects.toThrow("valid desktop Project Task candidate Plan confirmation");
+    const confirmedDetail = {
+      ...detail,
+      taskVersion: 2,
+      stage: "confirmed_plan",
+      candidatePlan: null,
+      confirmedPlan: { ...detail.candidatePlan, revisionNumber: 2 },
+    };
+    harness.invoke.mockResolvedValueOnce({
+      status: "confirmed",
+      taskId,
+      detail: confirmedDetail,
+      catalog,
+    });
+    await expect(api.confirmProjectTaskCandidatePlan(confirmation)).resolves.toEqual({
+      status: "confirmed",
+      taskId,
+      detail: confirmedDetail,
+      catalog,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith(
+      "desktop.task.plan.confirm_candidate",
+      confirmation,
+    );
+    harness.invoke.mockResolvedValueOnce({ status: "conflict" });
+    await expect(api.confirmProjectTaskCandidatePlan(confirmation)).resolves.toEqual({
+      status: "conflict",
+    });
+    harness.invoke.mockResolvedValueOnce({
+      status: "confirmed",
+      taskId,
+      detail,
+      catalog,
+    });
+    await expect(api.confirmProjectTaskCandidatePlan(confirmation)).rejects.toThrow(
+      "candidate Plan confirmation result is invalid",
     );
   });
 });
