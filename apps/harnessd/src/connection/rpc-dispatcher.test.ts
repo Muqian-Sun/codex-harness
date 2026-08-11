@@ -1016,3 +1016,92 @@ describe("RPC dispatcher Project Task methods", () => {
     }
   });
 });
+
+describe("RPC dispatcher execution admission", () => {
+  const params = {
+    activationId: "00000000-0000-4000-8000-000000000951",
+    decisionId: "00000000-0000-4000-8000-000000000952",
+    projectId: "00000000-0000-4000-8000-000000000953",
+    taskId: "00000000-0000-4000-8000-000000000954",
+    nodeId: "00000000-0000-4000-8000-000000000955",
+    manifestId: "00000000-0000-4000-8000-000000000956",
+    expectedProjectVersion: 1,
+    expectedTaskVersion: 3,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: "00000000-0000-4000-8000-000000000957",
+    confirmedPlanRevisionId: "00000000-0000-4000-8000-000000000958",
+    graphRevisionId: "00000000-0000-4000-8000-000000000959",
+    expectedManifestStateVersion: 2,
+    expectedRoutingBindingVersion: 1,
+    expectedProfileVersion: 1,
+    expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000960",
+    userConfirmed: true,
+  } as const;
+  const result = {
+    schemaVersion: 1,
+    status: "denied",
+    activationId: params.activationId,
+    taskId: params.taskId,
+    nodeId: params.nodeId,
+    rejectionReason: "workspace_dirty",
+    route: null,
+    permission: null,
+    evidence: null,
+  } as const;
+
+  it("dispatches asynchronously and validates the public result", async () => {
+    const provider = vi.fn(async () => result);
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.activate", params), {
+        ...context(() => ACCOUNT_STATUS),
+        activateProjectTaskExecution: provider,
+      }),
+    ).resolves.toMatchObject({ envelope: { kind: "response", result } });
+    expect(provider).toHaveBeenCalledWith(params);
+
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.activate", params), {
+        ...context(() => ACCOUNT_STATUS),
+        activateProjectTaskExecution: async () => ({ private: true }),
+      }),
+    ).resolves.toMatchObject({
+      envelope: { kind: "error", error: { code: RPC_ERROR_CODES.unavailable } },
+    });
+  });
+
+  it("maps missing providers, malformed parameters and provider failures", async () => {
+    const base = context(() => ACCOUNT_STATUS);
+    expect(
+      dispatchRpcRequest(request("task.execution.activate", params), base).envelope,
+    ).toMatchObject({
+      kind: "error",
+      error: { code: RPC_ERROR_CODES.unavailable },
+    });
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.activate", { ...params, extra: true }), {
+        ...base,
+        activateProjectTaskExecution: vi.fn(),
+      }),
+    ).resolves.toMatchObject({
+      envelope: { kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } },
+    });
+    for (const failure of [new RpcProviderError("conflict"), new Error("private")]) {
+      await expect(
+        dispatchRpcRequestAsync(request("task.execution.activate", params), {
+          ...base,
+          activateProjectTaskExecution: async () => Promise.reject(failure),
+        }),
+      ).resolves.toMatchObject({
+        envelope: {
+          kind: "error",
+          error: {
+            code:
+              failure instanceof RpcProviderError
+                ? RPC_ERROR_CODES.conflict
+                : RPC_ERROR_CODES.unavailable,
+          },
+        },
+      });
+    }
+  });
+});

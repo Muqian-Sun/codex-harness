@@ -1187,6 +1187,95 @@ describe("method contracts", () => {
     expect(decodeResponseResult("system.health", { status: "bad" }).ok).toBe(false);
   });
 
+  it("strictly validates execution activation fences, denials and activated evidence", () => {
+    const params = {
+      activationId: "00000000-0000-4000-8000-000000000901",
+      decisionId: "00000000-0000-4000-8000-000000000902",
+      projectId: "00000000-0000-4000-8000-000000000903",
+      taskId: "00000000-0000-4000-8000-000000000904",
+      nodeId: "00000000-0000-4000-8000-000000000905",
+      manifestId: "00000000-0000-4000-8000-000000000906",
+      expectedProjectVersion: 1,
+      expectedTaskVersion: 3,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000907",
+      confirmedPlanRevisionId: "00000000-0000-4000-8000-000000000908",
+      graphRevisionId: "00000000-0000-4000-8000-000000000909",
+      expectedManifestStateVersion: 2,
+      expectedRoutingBindingVersion: 1,
+      expectedProfileVersion: 1,
+      expectedConfigurationRevisionId: "00000000-0000-4000-8000-000000000910",
+      userConfirmed: true,
+    } as const;
+    expect(decodeRequestParams("task.execution.activate", params).ok).toBe(true);
+    expect(
+      decodeRequestParams("task.execution.activate", {
+        ...params,
+        decisionId: params.activationId,
+      }).ok,
+    ).toBe(false);
+    expect(decodeRequestParams("task.execution.activate", { ...params, extra: true }).ok).toBe(
+      false,
+    );
+
+    const activated = {
+      schemaVersion: 1,
+      status: "activated",
+      activationId: params.activationId,
+      taskId: params.taskId,
+      nodeId: params.nodeId,
+      rejectionReason: null,
+      route: { tier: "fast", provider: "openai", model: "fast", reasoningEffort: "low" },
+      permission: {
+        workspaceMode: "read_only",
+        commandExecution: false,
+        networkAccess: false,
+        allowedOperationKinds: ["answer"],
+      },
+      evidence: {
+        manifestId: params.manifestId,
+        catalogSnapshotId: "00000000-0000-4000-8000-000000000911",
+        workspaceDigest: "a".repeat(64),
+        gitHead: "b".repeat(40),
+      },
+    } as const;
+    expect(decodeResponseResult("task.execution.activate", activated).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.execution.activate", {
+        ...activated,
+        permission: {
+          ...activated.permission,
+          allowedOperationKinds: ["answer", "answer"],
+        },
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeResponseResult("task.execution.activate", {
+        ...activated,
+        status: "denied",
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeResponseResult("task.execution.activate", {
+        ...activated,
+        status: "denied",
+        rejectionReason: "workspace_dirty",
+        route: null,
+        permission: null,
+        evidence: null,
+      }).ok,
+    ).toBe(true);
+    expect(
+      decodeResponseResult("task.execution.activate", {
+        ...activated,
+        status: "denied",
+        route: null,
+        permission: null,
+        evidence: null,
+      }).ok,
+    ).toBe(false);
+  });
+
   it("strictly validates the account status changed event contract", () => {
     const valid = {
       schemaVersion: 1,

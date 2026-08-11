@@ -60,6 +60,20 @@ export const TASK_OPERATION_KINDS = Object.freeze([
   "user_interaction",
 ] as const);
 
+export const EXECUTION_ADMISSION_REJECTION_REASONS = Object.freeze([
+  "user_confirmation_required",
+  "task_not_ready",
+  "operation_not_allowed",
+  "validation_command_required",
+  "unsupported_platform",
+  "workspace_unavailable",
+  "workspace_not_canonical",
+  "workspace_not_git_root",
+  "workspace_dirty",
+  "workspace_changed",
+  "model_unavailable",
+] as const);
+
 export const SystemHealthParamsSchema = z.object({}).strict();
 export const SystemHealthResultSchema = z
   .object({
@@ -1129,6 +1143,119 @@ export const TaskOperationManifestConfirmResultSchema = z
   })
   .strict();
 
+const ExecutionRouteSummarySchema = z
+  .object({
+    tier: z.enum(["fast", "standard", "deep"]),
+    provider: routingIdentifier(MAX_PROVIDER_CHARACTERS),
+    model: routingIdentifier(MAX_MODEL_CHARACTERS),
+    reasoningEffort: routingIdentifier(MAX_REASONING_EFFORT_CHARACTERS),
+  })
+  .strict();
+
+const ExecutionPermissionSummarySchema = z
+  .object({
+    workspaceMode: z.enum(["read_only", "workspace_write"]),
+    commandExecution: z.boolean(),
+    networkAccess: z.literal(false),
+    allowedOperationKinds: z.array(z.enum(TASK_OPERATION_KINDS)).min(1).max(256),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.allowedOperationKinds).size !== value.allowedOperationKinds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["allowedOperationKinds"],
+        message: "Execution permission operation kinds must be unique",
+      });
+    }
+  });
+
+const ExecutionAdmissionEvidenceSummarySchema = z
+  .object({
+    manifestId: z.string().regex(UUID_PATTERN),
+    catalogSnapshotId: z.string().regex(UUID_PATTERN),
+    workspaceDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    gitHead: z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/),
+  })
+  .strict();
+
+export const TaskExecutionActivateParamsSchema = z
+  .object({
+    activationId: z.string().regex(UUID_PATTERN),
+    decisionId: z.string().regex(UUID_PATTERN),
+    projectId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    manifestId: z.string().regex(UUID_PATTERN),
+    expectedProjectVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedOwnershipVersion: NonNegativeSafeIntegerSchema.min(1),
+    previousRequirementRevisionId: z.string().regex(UUID_PATTERN),
+    confirmedPlanRevisionId: z.string().regex(UUID_PATTERN),
+    graphRevisionId: z.string().regex(UUID_PATTERN),
+    expectedManifestStateVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedRoutingBindingVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedProfileVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedConfigurationRevisionId: z.string().regex(UUID_PATTERN),
+    userConfirmed: z.boolean(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const identifiers = [
+      value.activationId,
+      value.decisionId,
+      value.projectId,
+      value.taskId,
+      value.nodeId,
+      value.manifestId,
+      value.previousRequirementRevisionId,
+      value.confirmedPlanRevisionId,
+      value.graphRevisionId,
+      value.expectedConfigurationRevisionId,
+    ];
+    if (new Set(identifiers).size !== identifiers.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["activationId"],
+        message: "Task execution activation identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskExecutionActivateResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["activated", "existing", "denied", "existing_denial"]),
+    activationId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    rejectionReason: z.enum(EXECUTION_ADMISSION_REJECTION_REASONS).nullable(),
+    route: ExecutionRouteSummarySchema.nullable(),
+    permission: ExecutionPermissionSummarySchema.nullable(),
+    evidence: ExecutionAdmissionEvidenceSummarySchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const activated = value.status === "activated" || value.status === "existing";
+    const activatedFields =
+      value.rejectionReason === null &&
+      value.route !== null &&
+      value.permission !== null &&
+      value.evidence !== null;
+    const deniedFields =
+      value.rejectionReason !== null &&
+      value.route === null &&
+      value.permission === null &&
+      value.evidence === null;
+    if ((activated && !activatedFields) || (!activated && !deniedFields)) {
+      context.addIssue({
+        code: "custom",
+        path: ["status"],
+        message: "Task execution activation result fields do not match its status",
+      });
+    }
+  });
+
 export const TaskRequirementReviseParamsSchema = z
   .object({
     commandId: z.string().regex(UUID_PATTERN),
@@ -1361,6 +1488,10 @@ export type HarnessTaskOperationManifestConfirmResult = Readonly<{
   taskId: string;
   nodeId: string;
 }>;
+export type HarnessExecutionAdmissionRejectionReason =
+  (typeof EXECUTION_ADMISSION_REJECTION_REASONS)[number];
+export type HarnessTaskExecutionActivateParams = z.infer<typeof TaskExecutionActivateParamsSchema>;
+export type HarnessTaskExecutionActivateResult = z.infer<typeof TaskExecutionActivateResultSchema>;
 export type HarnessTaskRequirementReviseParams = Readonly<{
   commandId: string;
   projectId: string;
@@ -1709,6 +1840,10 @@ export const METHOD_CONTRACTS = Object.freeze({
   "task.operation_manifest.confirm_candidate": Object.freeze({
     params: TaskOperationManifestConfirmParamsSchema,
     result: TaskOperationManifestConfirmResultSchema,
+  }),
+  "task.execution.activate": Object.freeze({
+    params: TaskExecutionActivateParamsSchema,
+    result: TaskExecutionActivateResultSchema,
   }),
   "task.requirement.revise": Object.freeze({
     params: TaskRequirementReviseParamsSchema,

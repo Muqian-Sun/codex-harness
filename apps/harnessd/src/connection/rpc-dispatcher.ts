@@ -28,6 +28,7 @@ export type RpcDispatchContext = Readonly<{
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   generateProjectTaskOperationManifest?: (params: JsonValue) => unknown | Promise<unknown>;
   confirmProjectTaskOperationManifest?: (params: JsonValue) => unknown;
+  activateProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -467,6 +468,10 @@ export function dispatchRpcRequest(
       );
     }
 
+    if (request.method === "task.execution.activate") {
+      return unavailable(request.id, "The node execution admission service is unavailable.");
+    }
+
     if (request.method === "routing.configuration.set") {
       let candidate: unknown;
       try {
@@ -559,6 +564,17 @@ export async function dispatchRpcRequestAsync(
       context.generateProjectTaskOperationManifest,
     );
   }
+  if (request.method === "task.execution.activate") {
+    const decodedParams = decodeRequestParams(request.method, request.params);
+    if (!decodedParams.ok || context.activateProjectTaskExecution === undefined) {
+      return dispatchRpcRequest(request, context);
+    }
+    return await dispatchExecutionActivation(
+      request.id,
+      decodedParams.value,
+      context.activateProjectTaskExecution,
+    );
+  }
   if (request.method !== "task.plan.generate_candidate") {
     return dispatchRpcRequest(request, context);
   }
@@ -605,6 +621,38 @@ async function dispatchOperationManifestGeneration(
         shutdownReason: undefined,
       }
     : unavailable(requestId, "The candidate operation manifest generation service is unavailable.");
+}
+
+async function dispatchExecutionActivation(
+  requestId: string,
+  params: JsonValue,
+  provider: NonNullable<RpcDispatchContext["activateProjectTaskExecution"]>,
+): Promise<RpcDispatchResult> {
+  let candidate: unknown;
+  try {
+    candidate = await provider(params);
+  } catch (error: unknown) {
+    if (error instanceof RpcProviderError && error.code === "conflict") {
+      return {
+        envelope: rpcError(
+          requestId,
+          RPC_ERROR_CODES.conflict,
+          "The execution admission state changed.",
+        ),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      };
+    }
+    return unavailable(requestId, "The node execution admission service is unavailable.");
+  }
+  const decodedResult = decodeResponseResult("task.execution.activate", candidate);
+  return decodedResult.ok
+    ? {
+        envelope: rpcResponse(requestId, decodedResult.value),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      }
+    : unavailable(requestId, "The node execution admission service is unavailable.");
 }
 
 async function dispatchCandidatePlanGeneration(
