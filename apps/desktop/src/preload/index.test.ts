@@ -31,6 +31,7 @@ type ExposedApi = Readonly<{
   reviseProjectTaskRequirement(input: unknown): Promise<unknown>;
   generateProjectTaskCandidatePlan(input: unknown): Promise<unknown>;
   confirmProjectTaskCandidatePlan(input: unknown): Promise<unknown>;
+  materializeProjectTaskGraph(input: unknown): Promise<unknown>;
 }>;
 
 function readyState(binding: unknown): unknown {
@@ -264,6 +265,7 @@ describe("desktop preload Project routing binding boundary", () => {
         ],
       },
       confirmedPlan: null,
+      activeGraph: null,
     };
     await expect(api.readProjectTaskDetail({ ...selection, extra: true })).rejects.toThrow(
       "valid desktop Project Task selection",
@@ -389,6 +391,87 @@ describe("desktop preload Project routing binding boundary", () => {
     });
     await expect(api.confirmProjectTaskCandidatePlan(confirmation)).rejects.toThrow(
       "candidate Plan confirmation result is invalid",
+    );
+
+    const materialization = {
+      ...selection,
+      expectedTaskVersion: 2,
+      confirmedPlanRevisionNumber: 2,
+    };
+    await expect(
+      api.materializeProjectTaskGraph({ ...materialization, confirmedPlanRevisionNumber: 0 }),
+    ).rejects.toThrow("valid desktop Project Task graph materialization");
+    const graphDetail = {
+      ...confirmedDetail,
+      taskVersion: 3,
+      stage: "active_graph",
+      activeGraph: {
+        revisionNumber: 1,
+        nodes: [
+          {
+            nodeNumber: 1,
+            sourcePlanStepNumber: 1,
+            title: "Generate plan",
+            description: "Persist a review-only candidate.",
+            acceptanceCriteria: ["It survives restart."],
+            dependsOnNodeNumbers: [],
+            status: "pending",
+          },
+        ],
+      },
+    };
+    const graphCatalog = {
+      ...catalog,
+      tasks: catalog.tasks.map((task) => ({ ...task, taskVersion: 3, stage: "active_graph" })),
+    };
+    harness.invoke.mockResolvedValueOnce({
+      status: "materialized",
+      taskId,
+      detail: graphDetail,
+      catalog: graphCatalog,
+    });
+    await expect(api.materializeProjectTaskGraph(materialization)).resolves.toEqual({
+      status: "materialized",
+      taskId,
+      detail: graphDetail,
+      catalog: graphCatalog,
+    });
+    expect(harness.invoke).toHaveBeenLastCalledWith(
+      "desktop.task.graph.materialize",
+      materialization,
+    );
+    harness.invoke.mockResolvedValueOnce({
+      status: "materialized",
+      taskId,
+      detail: {
+        ...graphDetail,
+        activeGraph: {
+          ...graphDetail.activeGraph,
+          nodes: [
+            {
+              ...graphDetail.activeGraph.nodes[0],
+              dependsOnNodeNumbers: Array.from({ length: 201 }, () => 1),
+            },
+          ],
+        },
+      },
+      catalog: graphCatalog,
+    });
+    await expect(api.materializeProjectTaskGraph(materialization)).rejects.toThrow(
+      "graph materialization result is invalid",
+    );
+    harness.invoke.mockResolvedValueOnce({ status: "conflict" });
+    await expect(api.materializeProjectTaskGraph(materialization)).resolves.toEqual({
+      status: "conflict",
+    });
+    harness.invoke.mockResolvedValueOnce({
+      status: "materialized",
+      taskId,
+      detail: confirmedDetail,
+      catalog,
+    });
+    await expect(api.materializeProjectTaskGraph(materialization)).rejects.toThrow(
+      "graph materialization result is invalid",
     );
   });
 });

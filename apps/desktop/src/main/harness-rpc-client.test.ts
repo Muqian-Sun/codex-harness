@@ -592,12 +592,15 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
                     latestPlanRevisionId: null,
                     candidatePlan: null,
                     confirmedPlan: null,
+                    activeGraph: null,
                   }
                 : method === "task.plan.generate_candidate"
                   ? { schemaVersion: 1, status: "generated", taskId }
                   : method === "task.plan.confirm_candidate"
                     ? { schemaVersion: 1, status: "confirmed", taskId }
-                    : { schemaVersion: 1, status: "revised", taskId },
+                    : method === "task.graph.materialize"
+                      ? { schemaVersion: 1, status: "materialized", taskId }
+                      : { schemaVersion: 1, status: "revised", taskId },
       });
     });
     const client = await createClient(endpoint);
@@ -649,6 +652,18 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       }),
     ).resolves.toEqual({ schemaVersion: 1, status: "confirmed", taskId });
     await expect(
+      client.materializeProjectTaskGraph({
+        commandId: "00000000-0000-4000-8000-000000000918",
+        projectId,
+        taskId,
+        expectedTaskVersion: 3,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+        confirmedPlanRevisionId: "00000000-0000-4000-8000-000000000917",
+        previousGraphRevisionId: null,
+      }),
+    ).resolves.toEqual({ schemaVersion: 1, status: "materialized", taskId });
+    await expect(
       client.reviseProjectTaskRequirement({
         commandId: "00000000-0000-4000-8000-000000000914",
         projectId,
@@ -665,6 +680,7 @@ describe.skipIf(process.platform === "win32")("Harness RPC client over a local U
       "task.detail",
       "task.plan.generate_candidate",
       "task.plan.confirm_candidate",
+      "task.graph.materialize",
       "task.requirement.revise",
     ]);
     await expect(

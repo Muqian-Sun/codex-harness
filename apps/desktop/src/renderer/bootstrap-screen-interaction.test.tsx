@@ -16,6 +16,7 @@ const hooks = vi.hoisted(() => ({
     vi.fn(),
     vi.fn(),
     vi.fn(),
+    vi.fn(),
   ],
   values: [] as unknown[],
 }));
@@ -43,9 +44,11 @@ import {
   ProjectRegistryPanel,
   ProjectTaskPanel,
   RequirementItems,
+  TaskGraph,
   SettingsWorkspace,
   taskCandidatePlanFeedback,
   taskCandidatePlanConfirmationFeedback,
+  taskGraphMaterializationFeedback,
 } from "./bootstrap-screen.js";
 
 const PROJECTS = {
@@ -145,6 +148,7 @@ function findTaskControl(
     | "data-task-plan-confirm"
     | "data-task-plan-confirm-commit"
     | "data-task-plan-confirm-cancel"
+    | "data-task-graph-materialize"
     | "data-task-project-select"
     | "data-task-revise"
     | "data-task-revision-source"
@@ -398,6 +402,7 @@ describe("Project Task interaction", () => {
       },
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     } as const;
     const generatedDetail = {
       ...detail,
@@ -517,6 +522,20 @@ describe("Project Task interaction", () => {
       },
       candidatePlan: plan,
       confirmedPlan: { ...plan, revisionNumber: 1 },
+      activeGraph: {
+        revisionNumber: 1,
+        nodes: [
+          {
+            nodeNumber: 1,
+            sourcePlanStepNumber: 1,
+            title: "Previous authority",
+            description: "Current graph remains visible until confirmation.",
+            acceptanceCriteria: [],
+            dependsOnNodeNumbers: [],
+            status: "pending" as const,
+          },
+        ],
+      },
     };
     const confirmedDetail = {
       ...detail,
@@ -524,6 +543,7 @@ describe("Project Task interaction", () => {
       stage: "confirmed_plan" as const,
       candidatePlan: null,
       confirmedPlan: { ...plan, revisionNumber: 3 },
+      activeGraph: null,
     };
     const catalog = {
       projectId: PROJECT_ID,
@@ -607,6 +627,168 @@ describe("Project Task interaction", () => {
     expect(JSON.stringify(authority)).toContain("EXECUTION LOCKED");
   });
 
+  it("materializes and renders a confirmed Plan as a locked pending DAG", async () => {
+    const taskId = "00000000-0000-4000-8000-000000000898";
+    const confirmedPlan = {
+      revisionNumber: 2,
+      steps: [
+        {
+          title: "Persist graph",
+          description: "Create deterministic pending nodes.",
+          acceptanceCriteria: ["No Run is created."],
+        },
+      ],
+    };
+    const detail = {
+      projectId: PROJECT_ID,
+      taskId,
+      taskVersion: 3,
+      title: "DAG Task",
+      stage: "confirmed_plan" as const,
+      activeRequirement: {
+        revisionNumber: 1,
+        sourceText: "Materialize a local DAG.",
+        objective: "Materialize a local DAG.",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      candidatePlan: null,
+      confirmedPlan,
+      activeGraph: null,
+    };
+    const graph = {
+      revisionNumber: 1,
+      nodes: [
+        {
+          nodeNumber: 1,
+          sourcePlanStepNumber: 1,
+          title: "Persist graph",
+          description: "Create deterministic pending nodes.",
+          acceptanceCriteria: ["No Run is created."],
+          dependsOnNodeNumbers: [],
+          status: "pending" as const,
+        },
+      ],
+    };
+    const graphDetail = {
+      ...detail,
+      taskVersion: 4,
+      stage: "active_graph" as const,
+      activeGraph: graph,
+    };
+    const catalog = {
+      projectId: PROJECT_ID,
+      tasks: [
+        {
+          taskId,
+          projectId: PROJECT_ID,
+          taskVersion: 4,
+          title: detail.title,
+          objective: detail.activeRequirement.objective,
+          stage: "active_graph" as const,
+        },
+      ],
+      hasMore: false,
+    };
+    const materializeProjectTaskGraph = vi.fn(
+      async (
+        _input: unknown,
+      ): Promise<
+        | Readonly<{
+            status: "materialized";
+            taskId: string;
+            detail: typeof graphDetail;
+            catalog: typeof catalog;
+          }>
+        | Readonly<{ status: "conflict" }>
+      > => {
+        void _input;
+        return {
+          status: "materialized",
+          taskId,
+          detail: graphDetail,
+          catalog,
+        };
+      },
+    );
+    const readProjectTaskCatalog = vi.fn();
+    const readProjectTaskDetail = vi.fn();
+    Object.assign(globalThis, {
+      codexHarness: {
+        materializeProjectTaskGraph,
+        readProjectTaskCatalog,
+        readProjectTaskDetail,
+      },
+    });
+    const render = (currentDetail: typeof detail | typeof graphDetail, graphState: string) => {
+      hooks.cursor = 0;
+      hooks.effects = [];
+      hooks.values = [
+        PROJECT_ID,
+        { status: "loaded", catalog },
+        taskId,
+        { status: "loaded", detail: currentDetail },
+        "",
+        "",
+        currentDetail.activeRequirement.sourceText,
+        "idle",
+        "idle",
+        "idle",
+        "idle",
+        graphState,
+      ];
+      return ProjectTaskPanel({
+        projects: PROJECTS,
+        projectRoutingBindings: {
+          bindings: [{ projectId: PROJECT_ID, status: "default_bound", bindingVersion: 1 }],
+        },
+      });
+    };
+
+    const confirmed = render(detail, "idle");
+    const create = findTaskControl(confirmed, "data-task-graph-materialize");
+    expect(create.props.disabled).toBe(false);
+    (create.props.onClick as () => void)();
+    await vi.waitFor(() =>
+      expect(materializeProjectTaskGraph).toHaveBeenCalledWith({
+        projectId: PROJECT_ID,
+        taskId,
+        expectedTaskVersion: 3,
+        confirmedPlanRevisionNumber: 2,
+      }),
+    );
+    expect(hooks.setters[11]).toHaveBeenNthCalledWith(1, "materializing");
+    expect(hooks.setters[11]).toHaveBeenLastCalledWith("materialized");
+    expect(hooks.setters[3]).toHaveBeenCalledWith({ status: "loaded", detail: graphDetail });
+
+    const active = render(graphDetail, "materialized");
+    const graphElement = findElementByType(active, TaskGraph);
+    expect(graphElement?.props.graph).toBe(graph);
+    expect(JSON.stringify(TaskGraph({ graph }))).toContain("EXECUTION LOCKED");
+    expect(JSON.stringify(TaskGraph({ graph }))).toContain("起始节点");
+    expect(JSON.stringify(TaskGraph({ graph }))).toContain("No Run is created.");
+    expect(taskGraphMaterializationFeedback("idle", false)).toContain("不调用模型");
+    expect(taskGraphMaterializationFeedback("idle", true)).toContain("pending");
+    expect(taskGraphMaterializationFeedback("materializing", false)).toContain("原子提交");
+    expect(taskGraphMaterializationFeedback("existing", true)).toContain("已经落盘");
+    expect(taskGraphMaterializationFeedback("conflict", false)).toContain("已刷新");
+    expect(taskGraphMaterializationFeedback("unavailable", false)).toContain("结果当前未知");
+
+    materializeProjectTaskGraph.mockResolvedValueOnce({ status: "conflict" as const });
+    readProjectTaskDetail.mockResolvedValueOnce({ status: "loaded", detail });
+    readProjectTaskCatalog.mockResolvedValueOnce({ status: "loaded", catalog });
+    const conflicted = render(detail, "idle");
+    (findTaskControl(conflicted, "data-task-graph-materialize").props.onClick as () => void)();
+    await vi.waitFor(() => expect(readProjectTaskDetail).toHaveBeenCalled());
+    expect(hooks.setters[3]).toHaveBeenLastCalledWith({ status: "loaded", detail });
+    expect(hooks.setters[1]).toHaveBeenLastCalledWith({ status: "loaded", catalog });
+
+    materializeProjectTaskGraph.mockRejectedValueOnce(new Error("contained"));
+    const unavailable = render(detail, "idle");
+    (findTaskControl(unavailable, "data-task-graph-materialize").props.onClick as () => void)();
+    await vi.waitFor(() => expect(hooks.setters[11]).toHaveBeenLastCalledWith("unavailable"));
+  });
+
   it("refreshes authority after confirmation conflicts and contains confirmation failures", async () => {
     const taskId = "00000000-0000-4000-8000-000000000894";
     const detail = {
@@ -635,6 +817,7 @@ describe("Project Task interaction", () => {
         ],
       },
       confirmedPlan: null,
+      activeGraph: null,
     };
     const catalog = {
       projectId: PROJECT_ID,
@@ -720,6 +903,7 @@ describe("Project Task interaction", () => {
       },
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     };
     const catalog = {
       projectId: PROJECT_ID,
@@ -1037,6 +1221,7 @@ describe("Project Task interaction", () => {
       },
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     };
     const revisedDetail = {
       ...detail,

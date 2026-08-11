@@ -14,6 +14,7 @@ import {
   decodeDesktopProjectTaskCreation,
   decodeDesktopProjectTaskCandidatePlanConfirmation,
   decodeDesktopProjectTaskCandidatePlanGeneration,
+  decodeDesktopProjectTaskGraphMaterialization,
   decodeDesktopProjectTaskRequirementRevision,
   decodeDesktopProjectTaskSelection,
   decodeDesktopRoutingConfigurationUpdate,
@@ -35,6 +36,7 @@ import {
   type DesktopProjectTaskCandidatePlanConfirmationResult,
   type DesktopProjectTaskCandidatePlanMutationResult,
   type DesktopProjectTaskDetailResult,
+  type DesktopProjectTaskGraphMaterializationResult,
   type DesktopProjectTaskMutationResult,
   type DesktopProjectTaskRequirementMutationResult,
 } from "../shared/bootstrap-state.js";
@@ -60,7 +62,9 @@ export type DesktopSupervisorHandle = Pick<
   Partial<
     Pick<
       DaemonProcessSupervisor,
-      "confirmProjectTaskCandidatePlan" | "generateProjectTaskCandidatePlan"
+      | "confirmProjectTaskCandidatePlan"
+      | "generateProjectTaskCandidatePlan"
+      | "materializeProjectTaskGraph"
     >
   >;
 
@@ -581,6 +585,90 @@ export class DesktopApplicationController {
         detail.stage !== "confirmed_plan" ||
         detail.candidatePlan !== null ||
         detail.confirmedPlan === null
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      return this.#stateStore.current.phase === "ready"
+        ? Object.freeze({ status: result.status, taskId: result.taskId, detail, catalog })
+        : Object.freeze({ status: "unavailable" });
+    } catch (error: unknown) {
+      return error instanceof HarnessRpcClientError && error.remoteCode === "rpc.conflict"
+        ? Object.freeze({ status: "conflict" })
+        : Object.freeze({ status: "unavailable" });
+    }
+  }
+
+  async materializeProjectTaskGraph(
+    input: unknown,
+  ): Promise<DesktopProjectTaskGraphMaterializationResult> {
+    const materialization = decodeDesktopProjectTaskGraphMaterialization(input);
+    const state = this.#stateStore.current;
+    const supervisor = this.#supervisor;
+    if (
+      materialization === undefined ||
+      state.phase !== "ready" ||
+      supervisor === undefined ||
+      typeof supervisor.materializeProjectTaskGraph !== "function" ||
+      !state.projects.projects.some((project) => project.projectId === materialization.projectId)
+    ) {
+      return Object.freeze({ status: "unavailable" });
+    }
+
+    try {
+      const current = await supervisor.readProjectTaskDetail({
+        projectId: materialization.projectId,
+        taskId: materialization.taskId,
+      });
+      projectDesktopProjectTaskDetail(current, materialization.projectId, materialization.taskId);
+      if (
+        current.taskVersion !== materialization.expectedTaskVersion ||
+        current.stage !== "confirmed_plan" ||
+        current.candidatePlan !== null ||
+        current.confirmedPlan === null ||
+        current.confirmedPlan.revisionNumber !== materialization.confirmedPlanRevisionNumber ||
+        current.activeGraph !== null
+      ) {
+        return Object.freeze({ status: "conflict" });
+      }
+      const result = await supervisor.materializeProjectTaskGraph({
+        commandId: randomUUID(),
+        projectId: materialization.projectId,
+        taskId: materialization.taskId,
+        expectedTaskVersion: current.taskVersion,
+        expectedOwnershipVersion: current.ownershipVersion,
+        previousRequirementRevisionId: current.activeRequirement.revisionId,
+        confirmedPlanRevisionId: current.confirmedPlan.revisionId,
+        previousGraphRevisionId: null,
+      });
+      if (
+        (result.status !== "materialized" && result.status !== "existing") ||
+        result.taskId !== materialization.taskId ||
+        this.#stateStore.current.phase !== "ready"
+      ) {
+        return Object.freeze({ status: "unavailable" });
+      }
+      const [rawDetail, rawCatalog] = await Promise.all([
+        supervisor.readProjectTaskDetail({
+          projectId: materialization.projectId,
+          taskId: materialization.taskId,
+        }),
+        supervisor.readProjectTaskCatalogPage({
+          projectId: materialization.projectId,
+          cursor: null,
+          limit: 12,
+        }),
+      ]);
+      const detail = projectDesktopProjectTaskDetail(
+        rawDetail,
+        materialization.projectId,
+        materialization.taskId,
+      );
+      const catalog = projectDesktopProjectTaskCatalog(rawCatalog, materialization.projectId);
+      if (
+        detail.stage !== "active_graph" ||
+        detail.candidatePlan !== null ||
+        detail.confirmedPlan === null ||
+        detail.activeGraph === null
       ) {
         return Object.freeze({ status: "unavailable" });
       }

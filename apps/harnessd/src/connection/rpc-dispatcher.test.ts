@@ -126,6 +126,7 @@ const PROJECT_TASK_DETAIL = Object.freeze({
   latestPlanRevisionId: null,
   candidatePlan: null,
   confirmedPlan: null,
+  activeGraph: null,
 });
 
 const PROJECT_TASK_REVISED = Object.freeze({
@@ -166,6 +167,11 @@ function context(
     confirmProjectTaskCandidatePlan: () => ({
       schemaVersion: 1,
       status: "confirmed",
+      taskId: PROJECT_TASK_DETAIL.taskId,
+    }),
+    materializeProjectTaskGraph: () => ({
+      schemaVersion: 1,
+      status: "materialized",
       taskId: PROJECT_TASK_DETAIL.taskId,
     }),
     readRoutingConfiguration: () => ROUTING_CONFIGURATION,
@@ -640,6 +646,21 @@ describe("RPC dispatcher Project Task methods", () => {
     status: "confirmed" as const,
     taskId: PROJECT_TASK_CREATED.taskId,
   };
+  const graphParams = {
+    commandId: "00000000-0000-4000-8000-000000000918",
+    projectId: PROJECT.projectId,
+    taskId: PROJECT_TASK_CREATED.taskId,
+    expectedTaskVersion: 3,
+    expectedOwnershipVersion: 1,
+    previousRequirementRevisionId: PROJECT_TASK_DETAIL.activeRequirement.revisionId,
+    confirmedPlanRevisionId: confirmParams.commandId,
+    previousGraphRevisionId: null,
+  };
+  const materialized = {
+    schemaVersion: 1 as const,
+    status: "materialized" as const,
+    taskId: PROJECT_TASK_CREATED.taskId,
+  };
 
   it("awaits candidate Plan generation and maps its stable outcomes", async () => {
     const base = context(() => ACCOUNT_STATUS);
@@ -743,6 +764,15 @@ describe("RPC dispatcher Project Task methods", () => {
       }).envelope,
     ).toMatchObject({ kind: "response", result: confirmed });
     expect(confirmProjectTaskCandidatePlan).toHaveBeenCalledWith(confirmParams);
+
+    const materializeProjectTaskGraph = vi.fn(() => materialized);
+    expect(
+      dispatchRpcRequest(request("task.graph.materialize", graphParams), {
+        ...base,
+        materializeProjectTaskGraph,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: materialized });
+    expect(materializeProjectTaskGraph).toHaveBeenCalledWith(graphParams);
   });
 
   it("rejects malformed Task parameters before consulting providers", () => {
@@ -751,6 +781,7 @@ describe("RPC dispatcher Project Task methods", () => {
     const readProjectTaskDetail = vi.fn(() => PROJECT_TASK_DETAIL);
     const reviseProjectTaskRequirement = vi.fn(() => PROJECT_TASK_REVISED);
     const confirmProjectTaskCandidatePlan = vi.fn(() => confirmed);
+    const materializeProjectTaskGraph = vi.fn(() => materialized);
     const base = context(() => ACCOUNT_STATUS);
     expect(
       dispatchRpcRequest(request("task.catalog_page", { ...catalogParams, limit: 13 }), {
@@ -765,6 +796,12 @@ describe("RPC dispatcher Project Task methods", () => {
           ownershipCommandId: createParams.commandId,
         }),
         { ...base, createProjectTask },
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
+    expect(
+      dispatchRpcRequest(
+        request("task.graph.materialize", { ...graphParams, expectedTaskVersion: 0 }),
+        { ...base, materializeProjectTaskGraph },
       ).envelope,
     ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.invalidParams } });
     expect(
@@ -790,6 +827,7 @@ describe("RPC dispatcher Project Task methods", () => {
     expect(readProjectTaskDetail).not.toHaveBeenCalled();
     expect(reviseProjectTaskRequirement).not.toHaveBeenCalled();
     expect(confirmProjectTaskCandidatePlan).not.toHaveBeenCalled();
+    expect(materializeProjectTaskGraph).not.toHaveBeenCalled();
   });
 
   it("maps Task conflicts and invalid provider results to stable public errors", () => {
@@ -800,6 +838,7 @@ describe("RPC dispatcher Project Task methods", () => {
       ["task.detail", detailParams, "readProjectTaskDetail"],
       ["task.requirement.revise", reviseParams, "reviseProjectTaskRequirement"],
       ["task.plan.confirm_candidate", confirmParams, "confirmProjectTaskCandidatePlan"],
+      ["task.graph.materialize", graphParams, "materializeProjectTaskGraph"],
     ] as const) {
       const conflict = dispatchRpcRequest(request(method, params), {
         ...base,

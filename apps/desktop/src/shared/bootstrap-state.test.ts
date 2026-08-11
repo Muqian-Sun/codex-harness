@@ -15,6 +15,8 @@ import {
   decodeDesktopProjectTaskCandidatePlanMutationResult,
   decodeDesktopProjectTaskCreation,
   decodeDesktopProjectTaskDetailResult,
+  decodeDesktopProjectTaskGraphMaterialization,
+  decodeDesktopProjectTaskGraphMaterializationResult,
   decodeDesktopProjectTaskMutationResult,
   decodeDesktopProjectTaskRequirementMutationResult,
   decodeDesktopProjectTaskRequirementRevision,
@@ -568,6 +570,7 @@ describe("desktop bootstrap state", () => {
         ],
       },
       confirmedPlan: null,
+      activeGraph: null,
     };
     const detail = projectDesktopProjectTaskDetail(raw, PROJECT.projectId, taskId);
     expect(detail).toEqual({
@@ -594,6 +597,7 @@ describe("desktop bootstrap state", () => {
         ],
       },
       confirmedPlan: null,
+      activeGraph: null,
     });
     expect(JSON.stringify(detail)).not.toContain(raw.activeRequirement.revisionId);
     expect(JSON.stringify(detail)).not.toContain(raw.latestPlanRevisionId);
@@ -706,6 +710,161 @@ describe("desktop bootstrap state", () => {
       detail: confirmedDetail,
       catalog: confirmedCatalog,
     });
+    const graphId = "00000000-0000-4000-8000-000000000888";
+    const nodeId = "00000000-0000-4000-8000-000000000889";
+    const graphRaw = {
+      ...confirmedRaw,
+      taskVersion: 6,
+      stage: "active_graph",
+      activeGraph: {
+        revisionId: graphId,
+        revisionNumber: 1,
+        basedOnPlanRevisionId: confirmedRaw.confirmedPlan.revisionId,
+        nodes: [
+          {
+            nodeId,
+            sourcePlanStepId: raw.candidatePlan.steps[0]!.stepId,
+            title: "生成候选计划",
+            description: "只生成并持久化待确认步骤。",
+            acceptanceCriteria: ["内部 ID 不进入 renderer。"],
+            dependsOnNodeIds: [],
+            status: "pending",
+          },
+        ],
+        topologicalOrder: [nodeId],
+      },
+    };
+    const graphDetail = projectDesktopProjectTaskDetail(graphRaw, PROJECT.projectId, taskId);
+    expect(graphDetail).toMatchObject({
+      stage: "active_graph",
+      activeGraph: {
+        revisionNumber: 1,
+        nodes: [
+          {
+            nodeNumber: 1,
+            sourcePlanStepNumber: 1,
+            dependsOnNodeNumbers: [],
+            status: "pending",
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(graphDetail)).not.toContain(graphId);
+    expect(JSON.stringify(graphDetail)).not.toContain(nodeId);
+    const materialization = {
+      projectId: PROJECT.projectId,
+      taskId,
+      expectedTaskVersion: 5,
+      confirmedPlanRevisionNumber: 2,
+    };
+    expect(decodeDesktopProjectTaskGraphMaterialization(materialization)).toEqual(materialization);
+    const graphCatalog = {
+      ...confirmedCatalog,
+      tasks: [{ ...confirmedCatalog.tasks[0], taskVersion: 6, stage: "active_graph" }],
+    };
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        { status: "materialized", taskId, detail: graphDetail, catalog: graphCatalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({
+      status: "materialized",
+      taskId,
+      detail: graphDetail,
+      catalog: graphCatalog,
+    });
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        {
+          status: "materialized",
+          taskId,
+          detail: {
+            ...graphDetail,
+            activeGraph: {
+              ...graphDetail.activeGraph!,
+              nodes: [
+                {
+                  ...graphDetail.activeGraph!.nodes[0]!,
+                  dependsOnNodeNumbers: Array.from({ length: 201 }, () => 1),
+                },
+              ],
+            },
+          },
+          catalog: graphCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        { status: "conflict" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toEqual({ status: "conflict" });
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        { status: "invalid" },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        { status: "materialized", taskId, detail: confirmedDetail, catalog: confirmedCatalog },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeDesktopProjectTaskGraphMaterializationResult(
+        {
+          status: "materialized",
+          taskId,
+          detail: { ...graphDetail, projectId: "00000000-0000-4000-8000-000000000890" },
+          catalog: graphCatalog,
+        },
+        PROJECT.projectId,
+        taskId,
+      ),
+    ).toBeUndefined();
+    for (const invalidGraph of [
+      {
+        ...graphRaw.activeGraph,
+        nodes: [{ ...graphRaw.activeGraph.nodes[0], unexpected: true }],
+      },
+      {
+        ...graphRaw.activeGraph,
+        topologicalOrder: ["00000000-0000-4000-8000-000000000890"],
+      },
+      {
+        ...graphRaw.activeGraph,
+        nodes: [{ ...graphRaw.activeGraph.nodes[0], status: "unknown" }],
+      },
+      {
+        ...graphRaw.activeGraph,
+        nodes: [
+          {
+            ...graphRaw.activeGraph.nodes[0],
+            dependsOnNodeIds: Array.from({ length: 201 }, () => nodeId),
+          },
+        ],
+      },
+      {
+        ...graphRaw.activeGraph,
+        nodes: [{ ...graphRaw.activeGraph.nodes[0], dependsOnNodeIds: [nodeId] }],
+      },
+    ]) {
+      expect(() =>
+        projectDesktopProjectTaskDetail(
+          { ...graphRaw, activeGraph: invalidGraph },
+          PROJECT.projectId,
+          taskId,
+        ),
+      ).toThrow(BootstrapStateTransitionError);
+    }
     expect(
       decodeDesktopProjectTaskCandidatePlanConfirmation({
         ...confirmation,

@@ -634,6 +634,7 @@ describe("method contracts", () => {
       latestPlanRevisionId: null,
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     } as const;
     const revise = {
       commandId,
@@ -749,6 +750,7 @@ describe("method contracts", () => {
       latestPlanRevisionId: params.commandId,
       candidatePlan,
       confirmedPlan: null,
+      activeGraph: null,
     } as const;
 
     expect(decodeRequestParams("task.plan.generate_candidate", params).ok).toBe(true);
@@ -852,6 +854,147 @@ describe("method contracts", () => {
         confirmedPlan: {
           ...confirmedPlan,
           basedOnRequirementRevisionId: "00000000-0000-4000-8000-00000000094a",
+        },
+      },
+    ]) {
+      expect(decodeResponseResult("task.detail", invalid).ok).toBe(false);
+    }
+  });
+
+  it("strictly validates Task graph materialization and graph topology", () => {
+    const projectId = "00000000-0000-4000-8000-000000000961";
+    const taskId = "00000000-0000-4000-8000-000000000962";
+    const requirementId = "00000000-0000-4000-8000-000000000963";
+    const planId = "00000000-0000-4000-8000-000000000964";
+    const stepOneId = "00000000-0000-4000-8000-000000000965";
+    const stepTwoId = "00000000-0000-4000-8000-000000000966";
+    const graphId = "00000000-0000-4000-8000-000000000967";
+    const nodeOneId = "00000000-0000-4000-8000-000000000968";
+    const nodeTwoId = "00000000-0000-4000-8000-000000000969";
+    const params = {
+      commandId: graphId,
+      projectId,
+      taskId,
+      expectedTaskVersion: 3,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: requirementId,
+      confirmedPlanRevisionId: planId,
+      previousGraphRevisionId: null,
+    } as const;
+    const confirmedPlan = {
+      revisionId: planId,
+      revisionNumber: 2,
+      basedOnRequirementRevisionId: requirementId,
+      steps: [
+        {
+          stepId: stepOneId,
+          title: "固定需求",
+          description: "先确认工作边界。",
+          acceptanceCriteria: ["边界可验证。"],
+        },
+        {
+          stepId: stepTwoId,
+          title: "实现功能",
+          description: "在边界内完成实现。",
+          acceptanceCriteria: ["实现可恢复。"],
+        },
+      ],
+    } as const;
+    const activeGraph = {
+      revisionId: graphId,
+      revisionNumber: 1,
+      basedOnPlanRevisionId: planId,
+      nodes: [
+        {
+          nodeId: nodeOneId,
+          sourcePlanStepId: stepOneId,
+          title: "固定需求",
+          description: "先确认工作边界。",
+          acceptanceCriteria: ["边界可验证。"],
+          dependsOnNodeIds: [],
+          status: "pending",
+        },
+        {
+          nodeId: nodeTwoId,
+          sourcePlanStepId: stepTwoId,
+          title: "实现功能",
+          description: "在边界内完成实现。",
+          acceptanceCriteria: ["实现可恢复。"],
+          dependsOnNodeIds: [nodeOneId],
+          status: "pending",
+        },
+      ],
+      topologicalOrder: [nodeOneId, nodeTwoId],
+    } as const;
+    const detail = {
+      schemaVersion: 1,
+      projectId,
+      ownershipVersion: 1,
+      taskId,
+      taskVersion: 4,
+      title: "持久 DAG",
+      stage: "active_graph",
+      activeRequirement: {
+        revisionId: requirementId,
+        revisionNumber: 1,
+        sourceText: "完成持久 DAG。",
+        objective: "完成持久 DAG。",
+        constraints: [],
+        acceptanceCriteria: [],
+      },
+      latestPlanRevisionId: planId,
+      candidatePlan: null,
+      confirmedPlan,
+      activeGraph,
+    } as const;
+
+    expect(decodeRequestParams("task.graph.materialize", params).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.graph.materialize", {
+        schemaVersion: 1,
+        status: "materialized",
+        taskId,
+      }).ok,
+    ).toBe(true);
+    expect(decodeResponseResult("task.detail", detail).ok).toBe(true);
+    for (const invalid of [
+      { ...params, expectedTaskVersion: 0 },
+      { ...params, confirmedPlanRevisionId: requirementId },
+      { ...params, extra: true },
+    ]) {
+      expect(decodeRequestParams("task.graph.materialize", invalid).ok).toBe(false);
+    }
+    for (const invalid of [
+      { ...detail, stage: "confirmed_plan" },
+      { ...detail, activeGraph: null },
+      { ...detail, activeGraph: { ...activeGraph, basedOnPlanRevisionId: requirementId } },
+      {
+        ...detail,
+        activeGraph: { ...activeGraph, topologicalOrder: [nodeTwoId, nodeOneId] },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          nodes: [activeGraph.nodes[0], { ...activeGraph.nodes[1], nodeId: nodeOneId }],
+        },
+      },
+      {
+        ...detail,
+        activeGraph: { ...activeGraph, topologicalOrder: [nodeOneId, nodeOneId] },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          nodes: [activeGraph.nodes[0], { ...activeGraph.nodes[1], sourcePlanStepId: stepOneId }],
+        },
+      },
+      {
+        ...detail,
+        activeGraph: {
+          ...activeGraph,
+          nodes: [activeGraph.nodes[0], { ...activeGraph.nodes[1], dependsOnNodeIds: [nodeTwoId] }],
         },
       },
     ]) {

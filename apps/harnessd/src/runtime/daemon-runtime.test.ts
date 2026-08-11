@@ -1089,6 +1089,42 @@ describe.skipIf(process.platform === "win32")("daemon local runtime", () => {
       },
     });
 
+    const graphCommandId = "00000000-0000-4000-8000-00000000099b";
+    const graphPromise = readFrame(socket);
+    sendFrame(
+      socket,
+      rpc("graph-materialize", "task.graph.materialize", {
+        commandId: graphCommandId,
+        projectId,
+        taskId,
+        expectedTaskVersion: 3,
+        expectedOwnershipVersion: 1,
+        previousRequirementRevisionId: requirementRevisionId,
+        confirmedPlanRevisionId: confirmationCommandId,
+        previousGraphRevisionId: null,
+      }),
+    );
+    await expect(graphPromise).resolves.toMatchObject({
+      kind: "response",
+      id: "graph-materialize",
+      result: { status: "materialized", taskId },
+    });
+    const graphDetailPromise = readFrame(socket);
+    sendFrame(socket, rpc("graph-detail", "task.detail", { projectId, taskId }));
+    await expect(graphDetailPromise).resolves.toMatchObject({
+      kind: "response",
+      result: {
+        taskVersion: 4,
+        stage: "active_graph",
+        activeGraph: {
+          revisionId: graphCommandId,
+          revisionNumber: 1,
+          basedOnPlanRevisionId: confirmationCommandId,
+          nodes: [{ status: "pending", dependsOnNodeIds: [] }],
+        },
+      },
+    });
+
     const stalePromise = readFrame(socket);
     sendFrame(
       socket,

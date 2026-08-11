@@ -38,6 +38,7 @@ function createSession(options?: {
   readProjectTaskDetail?: (params: JsonValue) => unknown;
   reviseProjectTaskRequirement?: (params: JsonValue) => unknown;
   confirmProjectTaskCandidatePlan?: (params: JsonValue) => unknown;
+  materializeProjectTaskGraph?: (params: JsonValue) => unknown;
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
@@ -74,6 +75,9 @@ function createSession(options?: {
     ...(options?.confirmProjectTaskCandidatePlan === undefined
       ? {}
       : { confirmProjectTaskCandidatePlan: options.confirmProjectTaskCandidatePlan }),
+    ...(options?.materializeProjectTaskGraph === undefined
+      ? {}
+      : { materializeProjectTaskGraph: options.materializeProjectTaskGraph }),
     ...(options?.generateProjectTaskCandidatePlan === undefined
       ? {}
       : { generateProjectTaskCandidatePlan: options.generateProjectTaskCandidatePlan }),
@@ -413,6 +417,7 @@ describe("daemon connection session", () => {
       latestPlanRevisionId: null,
       candidatePlan: null,
       confirmedPlan: null,
+      activeGraph: null,
     }));
     const reviseProjectTaskRequirement = vi.fn(() => ({
       schemaVersion: 1,
@@ -424,12 +429,18 @@ describe("daemon connection session", () => {
       status: "confirmed",
       taskId,
     }));
+    const materializeProjectTaskGraph = vi.fn(() => ({
+      schemaVersion: 1,
+      status: "materialized",
+      taskId,
+    }));
     const session = createSession({
       readProjectTaskCatalogPage,
       createProjectTask,
       readProjectTaskDetail,
       reviseProjectTaskRequirement,
       confirmProjectTaskCandidatePlan,
+      materializeProjectTaskGraph,
     });
     await authenticate(session);
     const catalogParams = { projectId, cursor: null, limit: 12 };
@@ -494,6 +505,23 @@ describe("daemon connection session", () => {
       )[0],
     ).toMatchObject({ kind: "response", result: { status: "confirmed", taskId } });
     expect(confirmProjectTaskCandidatePlan).toHaveBeenCalledWith(confirmParams);
+
+    const graphParams = {
+      commandId: "00000000-0000-4000-8000-000000000917",
+      projectId,
+      taskId,
+      expectedTaskVersion: 3,
+      expectedOwnershipVersion: 1,
+      previousRequirementRevisionId: "00000000-0000-4000-8000-000000000912",
+      confirmedPlanRevisionId: confirmParams.commandId,
+      previousGraphRevisionId: null,
+    };
+    expect(
+      sentValues(
+        await session.receive(frame(rpc("task-graph", "task.graph.materialize", graphParams))),
+      )[0],
+    ).toMatchObject({ kind: "response", result: { status: "materialized", taskId } });
+    expect(materializeProjectTaskGraph).toHaveBeenCalledWith(graphParams);
 
     const missing = createSession();
     await authenticate(missing);

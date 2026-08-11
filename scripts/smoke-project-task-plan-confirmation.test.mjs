@@ -9,8 +9,8 @@ import { DESKTOP_DEFAULT_ROUTING_PROFILE_ID } from "../apps/harnessd/src/runtime
 import { ProjectTaskService } from "../apps/harnessd/src/runtime/project-task-service.ts";
 import { smokeProjectTaskPlanConfirmation } from "./smoke-project-task-plan-confirmation.mjs";
 
-describe("候选 Plan 确认构建 smoke", () => {
-  it("使用与编译产物相同的公开模块契约持久化并恢复确认结果", async () => {
+describe("候选 Plan 确认与 DAG 构建 smoke", () => {
+  it("使用与编译产物相同的公开模块契约持久化并恢复确认结果和 DAG", async () => {
     await expect(
       smokeProjectTaskPlanConfirmation({
         DaemonStateStore,

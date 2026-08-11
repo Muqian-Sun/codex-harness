@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   decodeRequestParams,
@@ -11,6 +11,8 @@ import {
   type HarnessTaskCreateResult,
   type HarnessTaskDetailParams,
   type HarnessTaskDetailResult,
+  type HarnessTaskGraphMaterializeParams,
+  type HarnessTaskGraphMaterializeResult,
   type HarnessTaskRequirementReviseParams,
   type HarnessTaskRequirementReviseResult,
   type HarnessTaskStage,
@@ -40,8 +42,11 @@ import { DESKTOP_DEFAULT_ROUTING_PROFILE_ID } from "./desktop-default-routing-pr
 import type { StoredEvent } from "../persistence/event-store.js";
 
 const PLAN_CONFIRMATION_ACTOR = "desktop.project_task.plan_confirmation";
+const GRAPH_MATERIALIZATION_ACTOR = "desktop.project_task.graph_materialization";
 const TASK_PLAN_STREAM = "task.plan";
 const PLAN_REVISED_EVENT = "task.plan_revised";
+const GRAPH_COMMITTED_EVENT = "task.graph_committed";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export type ProjectTaskServiceErrorCode = "conflict" | "unavailable";
 
@@ -60,9 +65,13 @@ export class ProjectTaskServiceError extends Error {
   }
 }
 
-type ServiceDependencies = Readonly<{ now(): number }>;
+type ServiceDependencies = Readonly<{ now(): number; newId?(): string }>;
+type NormalizedServiceDependencies = Readonly<{ now(): number; newId(): string }>;
 
-const PRODUCTION_DEPENDENCIES: ServiceDependencies = Object.freeze({ now: () => Date.now() });
+const PRODUCTION_DEPENDENCIES: NormalizedServiceDependencies = Object.freeze({
+  now: () => Date.now(),
+  newId: randomUUID,
+});
 
 export class ProjectTaskService {
   readonly #stateStore: DaemonStateStore;
@@ -70,14 +79,18 @@ export class ProjectTaskService {
   readonly #bindings: ProjectRoutingProfileBindingRepository;
   readonly #tasks: TaskPlanRepository;
   readonly #ownerships: TaskProjectOwnershipRepository;
-  readonly #dependencies: ServiceDependencies;
+  readonly #dependencies: NormalizedServiceDependencies;
 
   constructor(
     stateStore: DaemonStateStore,
     dependencies: ServiceDependencies = PRODUCTION_DEPENDENCIES,
   ) {
     try {
-      if (stateStore.state !== "ready" || typeof dependencies?.now !== "function") {
+      if (
+        stateStore.state !== "ready" ||
+        typeof dependencies?.now !== "function" ||
+        (dependencies.newId !== undefined && typeof dependencies.newId !== "function")
+      ) {
         throw new ProjectTaskServiceError("unavailable");
       }
       this.#stateStore = stateStore;
@@ -85,7 +98,10 @@ export class ProjectTaskService {
       this.#bindings = new ProjectRoutingProfileBindingRepository(stateStore.events);
       this.#tasks = new TaskPlanRepository(stateStore.events);
       this.#ownerships = new TaskProjectOwnershipRepository(stateStore.events);
-      this.#dependencies = Object.freeze({ now: dependencies.now });
+      this.#dependencies = Object.freeze({
+        now: dependencies.now,
+        newId: dependencies.newId ?? PRODUCTION_DEPENDENCIES.newId,
+      });
     } catch (error: unknown) {
       if (error instanceof ProjectTaskServiceError) {
         throw error;
@@ -342,6 +358,102 @@ export class ProjectTaskService {
     }
   }
 
+  materializeGraph(input: unknown): HarnessTaskGraphMaterializeResult {
+    const decoded = decodeRequestParams("task.graph.materialize", input);
+    if (!decoded.ok) {
+      throw new ProjectTaskServiceError("conflict");
+    }
+    const params = decoded.value as HarnessTaskGraphMaterializeParams;
+
+    try {
+      this.#assertAvailable();
+      const existing = this.#stateStore.events.readByEventId(params.commandId);
+      if (existing !== undefined) {
+        assertExistingGraphMaterialization(existing, params);
+        return validateGraphMaterializationResult({
+          schemaVersion: 1,
+          status: "existing",
+          taskId: params.taskId,
+        });
+      }
+
+      const project = this.#projects.readProject(params.projectId);
+      const ownership = this.#ownerships.readOwnership(params.taskId);
+      const task = this.#tasks.readTask(params.taskId);
+      const confirmed = task.confirmedPlan;
+      if (
+        ownership.projectId !== params.projectId ||
+        ownership.ownershipVersion !== params.expectedOwnershipVersion ||
+        task.taskVersion !== params.expectedTaskVersion ||
+        task.activeRequirement.revisionId !== params.previousRequirementRevisionId ||
+        confirmed?.status !== "confirmed" ||
+        confirmed.revisionId !== params.confirmedPlanRevisionId ||
+        confirmed.basedOnRequirementRevisionId !== params.previousRequirementRevisionId ||
+        task.latestPlan?.revisionId !== confirmed.revisionId ||
+        task.latestPlan.status !== "confirmed" ||
+        task.activeGraph !== null ||
+        params.previousGraphRevisionId !== null
+      ) {
+        throw new ProjectTaskServiceError("conflict");
+      }
+      const occurredAtMs = requireTimestamp(this.#dependencies.now());
+      if (
+        occurredAtMs < project.updatedAtMs ||
+        occurredAtMs < ownership.updatedAtMs ||
+        occurredAtMs < task.updatedAtMs
+      ) {
+        throw new ProjectTaskServiceError("conflict");
+      }
+      const reservedIds = new Set([
+        params.commandId,
+        params.projectId,
+        params.taskId,
+        params.previousRequirementRevisionId,
+        params.confirmedPlanRevisionId,
+        ...confirmed.steps.map((step) => step.stepId),
+      ]);
+      const nodeIds = confirmed.steps.map(() => requireGeneratedUuid(this.#dependencies.newId()));
+      if (
+        nodeIds.some((nodeId) => reservedIds.has(nodeId)) ||
+        new Set(nodeIds).size !== nodeIds.length
+      ) {
+        throw new ProjectTaskServiceError("unavailable");
+      }
+      const committed = this.#tasks.commitTaskGraph({
+        eventId: params.commandId,
+        taskId: params.taskId,
+        occurredAtMs,
+        expectedTaskVersion: params.expectedTaskVersion,
+        previousGraphRevisionId: params.previousGraphRevisionId,
+        graph: {
+          revisionId: params.commandId,
+          basedOnPlanRevisionId: confirmed.revisionId,
+          nodes: confirmed.steps.map((step, index) =>
+            Object.freeze({
+              nodeId: nodeIds[index]!,
+              sourcePlanStepId: step.stepId,
+              title: step.title,
+              description: step.description,
+              acceptanceCriteria: Object.freeze([...step.acceptanceCriteria]),
+              dependsOnNodeIds: Object.freeze(index === 0 ? [] : [nodeIds[index - 1]!]),
+            }),
+          ),
+        },
+        metadata: {
+          actor: GRAPH_MATERIALIZATION_ACTOR,
+          correlationId: graphMaterializationFingerprint(params),
+        },
+      });
+      return validateGraphMaterializationResult({
+        schemaVersion: 1,
+        status: committed.duplicate ? "existing" : "materialized",
+        taskId: params.taskId,
+      });
+    } catch (error: unknown) {
+      throw mapServiceError(error);
+    }
+  }
+
   #assertAvailable(): void {
     if (this.#stateStore.state !== "ready") {
       throw new ProjectTaskServiceError("unavailable");
@@ -391,6 +503,22 @@ function taskDetail(
     latestPlanRevisionId: task.latestPlan?.revisionId ?? null,
     candidatePlan: projectTaskPlan(candidatePlan),
     confirmedPlan: projectTaskPlan(confirmedPlan),
+    activeGraph:
+      task.activeGraph === null
+        ? null
+        : Object.freeze({
+            ...task.activeGraph,
+            nodes: Object.freeze(
+              task.activeGraph.nodes.map((node) =>
+                Object.freeze({
+                  ...node,
+                  acceptanceCriteria: Object.freeze([...node.acceptanceCriteria]),
+                  dependsOnNodeIds: Object.freeze([...node.dependsOnNodeIds]),
+                }),
+              ),
+            ),
+            topologicalOrder: Object.freeze([...task.activeGraph.topologicalOrder]),
+          }),
   });
 }
 
@@ -520,6 +648,22 @@ function validateDetailResult(
               ),
             ),
           }),
+    activeGraph:
+      result.activeGraph === null
+        ? null
+        : Object.freeze({
+            ...result.activeGraph,
+            nodes: Object.freeze(
+              result.activeGraph.nodes.map((node) =>
+                Object.freeze({
+                  ...node,
+                  acceptanceCriteria: Object.freeze([...node.acceptanceCriteria]),
+                  dependsOnNodeIds: Object.freeze([...node.dependsOnNodeIds]),
+                }),
+              ),
+            ),
+            topologicalOrder: Object.freeze([...result.activeGraph.topologicalOrder]),
+          }),
   });
 }
 
@@ -529,6 +673,14 @@ function validatePlanConfirmationResult(input: unknown): HarnessTaskCandidatePla
     throw new ProjectTaskServiceError("unavailable");
   }
   return Object.freeze(decoded.value as unknown as HarnessTaskCandidatePlanConfirmResult);
+}
+
+function validateGraphMaterializationResult(input: unknown): HarnessTaskGraphMaterializeResult {
+  const decoded = decodeResponseResult("task.graph.materialize", input);
+  if (!decoded.ok) {
+    throw new ProjectTaskServiceError("unavailable");
+  }
+  return Object.freeze(decoded.value as unknown as HarnessTaskGraphMaterializeResult);
 }
 
 function validateRequirementRevisionResult(input: unknown): HarnessTaskRequirementReviseResult {
@@ -546,6 +698,13 @@ function requireTimestamp(input: number): number {
   return input;
 }
 
+function requireGeneratedUuid(input: string): string {
+  if (!UUID_PATTERN.test(input)) {
+    throw new ProjectTaskServiceError("unavailable");
+  }
+  return input;
+}
+
 function planConfirmationFingerprint(params: HarnessTaskCandidatePlanConfirmParams): string {
   return createHash("sha256")
     .update(
@@ -557,6 +716,23 @@ function planConfirmationFingerprint(params: HarnessTaskCandidatePlanConfirmPara
         params.expectedOwnershipVersion,
         params.previousRequirementRevisionId,
         params.candidatePlanRevisionId,
+      ]),
+    )
+    .digest("hex");
+}
+
+function graphMaterializationFingerprint(params: HarnessTaskGraphMaterializeParams): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        params.commandId,
+        params.projectId,
+        params.taskId,
+        params.expectedTaskVersion,
+        params.expectedOwnershipVersion,
+        params.previousRequirementRevisionId,
+        params.confirmedPlanRevisionId,
+        params.previousGraphRevisionId,
       ]),
     )
     .digest("hex");
@@ -591,6 +767,34 @@ function assertExistingPlanConfirmation(
     plan.status !== "confirmed" ||
     plan.basedOnRequirementRevisionId !== params.previousRequirementRevisionId ||
     !Array.isArray(plan.steps)
+  ) {
+    throw new ProjectTaskServiceError("conflict");
+  }
+}
+
+function assertExistingGraphMaterialization(
+  event: StoredEvent,
+  params: HarnessTaskGraphMaterializeParams,
+): void {
+  const payload = exactRecord(event.payload, [
+    "expectedTaskVersion",
+    "graph",
+    "previousGraphRevisionId",
+    "taskId",
+  ]);
+  const graph = exactRecord(payload?.graph, ["basedOnPlanRevisionId", "nodes", "revisionId"]);
+  if (
+    event.streamType !== TASK_PLAN_STREAM ||
+    event.streamId !== params.taskId ||
+    event.eventType !== GRAPH_COMMITTED_EVENT ||
+    event.metadata.actor !== GRAPH_MATERIALIZATION_ACTOR ||
+    event.metadata.correlationId !== graphMaterializationFingerprint(params) ||
+    payload?.taskId !== params.taskId ||
+    payload.expectedTaskVersion !== params.expectedTaskVersion ||
+    payload.previousGraphRevisionId !== params.previousGraphRevisionId ||
+    graph?.revisionId !== params.commandId ||
+    graph.basedOnPlanRevisionId !== params.confirmedPlanRevisionId ||
+    !Array.isArray(graph.nodes)
   ) {
     throw new ProjectTaskServiceError("conflict");
   }
