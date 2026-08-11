@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   BootstrapScreen,
+  SettingsWorkspace,
   createRoutingDraftInputUpdate,
   projectBindingFeedback,
   taskRequirementFeedback,
@@ -150,7 +151,7 @@ describe("desktop bootstrap screen", () => {
     "renders the %s account observation without exposing raw account data",
     (status, credentialKind, planType, statusLabel, credentialLabel, planLabel) => {
       const markup = renderToStaticMarkup(
-        <BootstrapScreen
+        <SettingsWorkspace
           state={{
             phase: "ready",
             account: { status, credentialKind, planType },
@@ -159,10 +160,11 @@ describe("desktop bootstrap screen", () => {
             projects: EMPTY_PROJECTS,
             projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
           }}
+          onClose={() => undefined}
         />,
       );
 
-      expect(markup).toContain('data-bootstrap-phase="ready"');
+      expect(markup).toContain('data-settings-workspace="true"');
       expect(markup).toContain(`data-account-status="${status}"`);
       expect(markup).toContain(
         `data-account-credential="${credentialKind === null ? "none" : credentialKind}"`,
@@ -185,7 +187,7 @@ describe("desktop bootstrap screen", () => {
 
   it("renders the observed model roster without claiming configuration or leaking cursors", () => {
     const markup = renderToStaticMarkup(
-      <BootstrapScreen
+      <SettingsWorkspace
         state={{
           phase: "ready",
           account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
@@ -194,6 +196,7 @@ describe("desktop bootstrap screen", () => {
           projects: PROJECTS,
           projectRoutingBindings: PROJECT_ROUTING_BINDINGS,
         }}
+        onClose={() => undefined}
       />,
     );
 
@@ -223,13 +226,13 @@ describe("desktop bootstrap screen", () => {
     expect(markup).toContain('data-project-routing-status="unbound"');
     expect(markup).toContain("ROUTING UNBOUND");
     expect(markup).toContain("绑定默认路由");
-    expect(markup).toContain('data-task-detail-status="idle"');
-    expect(markup).toContain("选择一个 Task 查看当前 Requirement");
+    expect(markup).toContain('aria-label="Harness 设置"');
+    expect(markup).toContain('aria-label="设置目录"');
   });
 
   it("renders a stable empty observation when Codex reports no visible model", () => {
     const markup = renderToStaticMarkup(
-      <BootstrapScreen
+      <SettingsWorkspace
         state={{
           phase: "ready",
           account: { status: "not_required", credentialKind: null, planType: null },
@@ -238,6 +241,7 @@ describe("desktop bootstrap screen", () => {
           projects: EMPTY_PROJECTS,
           projectRoutingBindings: EMPTY_PROJECT_ROUTING_BINDINGS,
         }}
+        onClose={() => undefined}
       />,
     );
 
@@ -256,7 +260,7 @@ describe("desktop bootstrap screen", () => {
     "renders the %s Project routing state without exposing profile identity",
     (status, bindingVersion, badge, action, disabled) => {
       const markup = renderToStaticMarkup(
-        <BootstrapScreen
+        <SettingsWorkspace
           state={{
             phase: "ready",
             account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
@@ -267,6 +271,7 @@ describe("desktop bootstrap screen", () => {
               bindings: [{ projectId: PROJECTS.projects[0]!.projectId, status, bindingVersion }],
             },
           }}
+          onClose={() => undefined}
         />,
       );
 
@@ -280,6 +285,31 @@ describe("desktop bootstrap screen", () => {
       expect(markup).not.toContain("00000000-0000-4000-8000-000000000901");
     },
   );
+
+  it("renders a Task-centered ready workspace and keeps low-frequency settings closed", () => {
+    const markup = renderToStaticMarkup(
+      <BootstrapScreen
+        state={{
+          phase: "ready",
+          account: { status: "authenticated", credentialKind: "chatgpt", planType: "plus" },
+          catalog: CATALOG,
+          routing: CONFIGURED_ROUTING,
+          projects: PROJECTS,
+          projectRoutingBindings: PROJECT_ROUTING_BINDINGS,
+        }}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Project Task 工作台"');
+    expect(markup).toContain('aria-label="Project 与 Task 导航"');
+    expect(markup).toContain('aria-label="计划检查器"');
+    expect(markup).toContain("把复杂工作变成可恢复的计划");
+    expect(markup).toContain("EXECUTION LOCKED");
+    expect(markup).toContain('data-open-settings="true"');
+    expect(markup).not.toContain('data-settings-workspace="true"');
+    expect(markup).not.toContain("工作区注册表");
+    expect(markup).not.toContain("三级模型路由配置");
+  });
 
   it("renders only the stable failure code", () => {
     const markup = renderToStaticMarkup(

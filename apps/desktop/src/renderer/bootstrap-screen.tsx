@@ -49,6 +49,12 @@ const unavailableRouting: DesktopRoutingConfiguration = Object.freeze({
   availability: null,
 });
 
+const unavailableAccount: DesktopAccountStatus = Object.freeze({
+  status: "not_required",
+  credentialKind: null,
+  planType: null,
+});
+
 const planLabels: Readonly<Record<DesktopAccountPlanType, string>> = Object.freeze({
   free: "Free",
   go: "Go",
@@ -127,9 +133,31 @@ const phasePresentation = Object.freeze({
 });
 
 export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapState }>) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const presentation = phasePresentation[state.phase];
+
+  if (state.phase === "ready") {
+    return (
+      <main className="shell phase-ready" data-bootstrap-phase="ready">
+        <ProjectTaskPanel
+          projects={state.projects}
+          projectRoutingBindings={state.projectRoutingBindings}
+          routing={state.routing}
+          account={state.account}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+        {settingsOpen ? (
+          <SettingsWorkspace state={state} onClose={() => setSettingsOpen(false)} />
+        ) : null}
+      </main>
+    );
+  }
+
   return (
-    <main className={`shell phase-${state.phase}`} data-bootstrap-phase={state.phase}>
+    <main
+      className={`shell lifecycle-shell phase-${state.phase}`}
+      data-bootstrap-phase={state.phase}
+    >
       <div className="atmosphere" aria-hidden="true" />
       <header className="masthead">
         <div className="brand-lockup">
@@ -168,33 +196,7 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
           ) : null}
         </div>
 
-        {state.phase === "ready" ? (
-          <AccountObservationCard account={state.account} />
-        ) : (
-          <BoundaryCard />
-        )}
-
-        {state.phase === "ready" ? (
-          <ProjectRegistryPanel
-            projects={state.projects}
-            projectRoutingBindings={state.projectRoutingBindings}
-            routingConfigured={state.routing.configured}
-          />
-        ) : null}
-
-        {state.phase === "ready" ? (
-          <ProjectTaskPanel
-            projects={state.projects}
-            projectRoutingBindings={state.projectRoutingBindings}
-            routing={state.routing}
-          />
-        ) : null}
-
-        {state.phase === "ready" ? (
-          <RoutingConfigurationPanel routing={state.routing} catalog={state.catalog} />
-        ) : null}
-
-        {state.phase === "ready" ? <ModelCatalogSummary catalog={state.catalog} /> : null}
+        <BoundaryCard />
       </section>
 
       <footer className="footer-note">
@@ -206,6 +208,74 @@ export function BootstrapScreen({ state }: Readonly<{ state: DesktopBootstrapSta
         <span>LOCAL ONLY</span>
       </footer>
     </main>
+  );
+}
+
+export function SettingsWorkspace({
+  state,
+  onClose,
+}: Readonly<{
+  state: Extract<DesktopBootstrapState, { phase: "ready" }>;
+  onClose: () => void;
+}>) {
+  return (
+    <section
+      className="settings-layer"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Harness 设置"
+      data-settings-workspace
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          onClose();
+        }
+      }}
+    >
+      <header className="settings-titlebar">
+        <div>
+          <span>CODEX HARNESS</span>
+          <h1>设置</h1>
+        </div>
+        <button type="button" data-settings-close onClick={onClose} aria-label="关闭设置" autoFocus>
+          <span aria-hidden="true">×</span>
+        </button>
+      </header>
+      <div className="settings-layout">
+        <nav className="settings-navigation" aria-label="设置目录">
+          <a href="#settings-runtime">运行状态</a>
+          <a href="#settings-projects">Projects</a>
+          <a href="#settings-routing">模型路由</a>
+          <a href="#settings-models">模型目录</a>
+          <footer>
+            <span className="settings-safe-dot" aria-hidden="true" />
+            <span>本地状态已连接</span>
+          </footer>
+        </nav>
+        <div className="settings-content">
+          <section id="settings-runtime" className="settings-section">
+            <header>
+              <span>RUNTIME</span>
+              <h2>运行状态</h2>
+              <p>只展示由受控链路验证的去敏状态，不提供凭据输入或执行入口。</p>
+            </header>
+            <AccountObservationCard account={state.account} />
+          </section>
+          <section id="settings-projects" className="settings-section">
+            <ProjectRegistryPanel
+              projects={state.projects}
+              projectRoutingBindings={state.projectRoutingBindings}
+              routingConfigured={state.routing.configured}
+            />
+          </section>
+          <section id="settings-routing" className="settings-section">
+            <RoutingConfigurationPanel routing={state.routing} catalog={state.catalog} />
+          </section>
+          <section id="settings-models" className="settings-section">
+            <ModelCatalogSummary catalog={state.catalog} />
+          </section>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -373,10 +443,14 @@ export function ProjectTaskPanel({
   projects,
   projectRoutingBindings,
   routing = unavailableRouting,
+  account = unavailableAccount,
+  onOpenSettings,
 }: Readonly<{
   projects: DesktopProjectCatalog;
   projectRoutingBindings: DesktopProjectRoutingBindings;
   routing?: DesktopRoutingConfiguration;
+  account?: DesktopAccountStatus;
+  onOpenSettings?: () => void;
 }>) {
   const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>(() =>
     preferredTaskProjectId(projects, projectRoutingBindings),
@@ -617,22 +691,53 @@ export function ProjectTaskPanel({
   };
 
   const tasks = catalogState.status === "loaded" ? catalogState.catalog.tasks : [];
+  const accountLabel =
+    account.status === "authenticated"
+      ? account.credentialKind === "chatgpt"
+        ? `ChatGPT · ${account.planType === null ? "已认证" : planLabels[account.planType]}`
+        : `${account.credentialKind === null ? "账户" : credentialLabels[account.credentialKind]} · 已认证`
+      : account.status === "authentication_required"
+        ? "Codex 需要认证"
+        : "本地 Codex";
   return (
     <section
-      className="project-tasks"
-      aria-label="Project Task 目录"
+      className="project-tasks workspace-frame"
+      aria-label="Project Task 工作台"
       data-task-project={selectedProjectId ?? "none"}
       data-task-catalog-status={catalogState.status}
       data-task-count={String(tasks.length)}
     >
-      <header className="task-header">
-        <div>
-          <p className="card-index">04 / TASK INTAKE</p>
-          <h2>持久 Task 入口</h2>
-          <p>保存权威需求，并用高级档位生成可审阅候选计划；确认、TODO / DAG 和执行仍保持关闭。</p>
+      <aside className="workspace-sidebar" aria-label="Project 与 Task 导航">
+        <div className="sidebar-brand">
+          <span className="sidebar-brand-mark" aria-hidden="true">
+            H
+          </span>
+          <div>
+            <strong>Harness</strong>
+            <small>Local workspace</small>
+          </div>
+          <span className="sidebar-ready-dot" title="本地运行时已就绪" />
         </div>
-        <label>
-          <span>目标 Project</span>
+
+        <button
+          type="button"
+          className="sidebar-new-task"
+          data-task-new
+          disabled={selectedProject === undefined || taskMutationPending}
+          onClick={() => {
+            setSelectedTaskId(undefined);
+            setDetailState({ status: "idle" });
+            setRequirementSource("");
+            setRevisionStatus("idle");
+            setPlanStatus("idle");
+          }}
+        >
+          <span aria-hidden="true">＋</span>
+          新建 Task
+        </button>
+
+        <label className="project-switcher">
+          <span>当前 Project</span>
           <select
             data-task-project-select
             value={selectedProjectId ?? ""}
@@ -655,56 +760,22 @@ export function ProjectTaskPanel({
             ))}
           </select>
         </label>
-      </header>
-
-      <div className="task-workspace">
-        <div className="task-intake-form">
-          <label>
-            <span>Task 标题</span>
-            <input
-              data-task-title
-              value={title}
-              maxLength={256}
-              disabled={selectedProject === undefined || taskMutationPending}
-              onChange={(event) => setTitle(readInputValue(event.currentTarget))}
-              placeholder="例如：设计并实现持久计划恢复"
-            />
-          </label>
-          <label>
-            <span>需求原文</span>
-            <textarea
-              data-task-source
-              value={sourceText}
-              maxLength={16 * 1_024}
-              disabled={selectedProject === undefined || taskMutationPending}
-              onChange={(event) => setSourceText(readInputValue(event.currentTarget))}
-              placeholder="描述目标、约束和验收预期；Harness 会原样持久化。"
-            />
-          </label>
-          <button
-            type="button"
-            data-task-create
-            disabled={!canCreate}
-            onClick={() => void createTask()}
-          >
-            {mutationStatus === "creating" ? "正在原子提交" : "创建持久 Task"}
-          </button>
-          <span data-task-feedback aria-live="polite">
-            {taskMutationFeedback(mutationStatus, selectedBinding?.status)}
-          </span>
-        </div>
 
         <div className="task-catalog">
-          {catalogState.status === "loading" ? <p>正在读取本地 Task 目录…</p> : null}
+          <header>
+            <span>最近 Tasks</span>
+            <small>{tasks.length}</small>
+          </header>
+          {catalogState.status === "loading" ? <p>正在读取本地 Task…</p> : null}
           {catalogState.status === "unavailable" ? (
-            <p>当前无法确认 Task 目录；请重启后核对，系统不会据此自动重放写入。</p>
+            <p>当前无法确认 Task 目录；不会自动重放写入。</p>
           ) : null}
           {catalogState.status === "loaded" && tasks.length === 0 ? (
-            <p>该 Project 尚无 Task。</p>
+            <p>这个 Project 还没有 Task。</p>
           ) : null}
           {tasks.length > 0 ? (
             <ol>
-              {tasks.map((task, index) => (
+              {tasks.map((task) => (
                 <li
                   key={task.taskId}
                   data-task-id={task.taskId}
@@ -723,133 +794,266 @@ export function ProjectTaskPanel({
                       setPlanStatus("idle");
                     }}
                   >
-                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <span className="task-list-icon" aria-hidden="true">
+                      {task.title.slice(0, 1).toUpperCase()}
+                    </span>
                     <div>
                       <strong>{task.title}</strong>
                       <p>{task.objective}</p>
+                      <small>
+                        V{task.taskVersion} · {taskStageLabels[task.stage]}
+                      </small>
                     </div>
-                    <small>
-                      V{task.taskVersion} · {taskStageLabels[task.stage]}
-                    </small>
                   </button>
                 </li>
               ))}
             </ol>
           ) : null}
           {catalogState.status === "loaded" && catalogState.catalog.hasMore ? (
-            <small>另有 Task 未在首屏展开</small>
+            <small className="task-catalog-more">另有 Task 未在首屏展开</small>
           ) : null}
         </div>
 
-        <div
-          className="task-detail"
-          data-task-detail-status={detailState.status}
-          data-task-revision-status={revisionStatus}
-          data-task-version={detailState.status === "loaded" ? detailState.detail.taskVersion : 0}
-          data-task-requirement-revision={
-            detailState.status === "loaded"
-              ? detailState.detail.activeRequirement.revisionNumber
-              : 0
-          }
+        <button
+          type="button"
+          className="sidebar-account"
+          data-open-settings
+          data-account-status={account.status}
+          data-account-credential={account.credentialKind ?? "none"}
+          data-account-plan={account.planType ?? "not_applicable"}
+          onClick={onOpenSettings}
+          aria-label="打开设置；当前账户观察"
         >
-          {detailState.status === "idle" ? <p>选择一个 Task 查看当前 Requirement。</p> : null}
-          {detailState.status === "loading" ? <p>正在读取当前 Requirement…</p> : null}
-          {detailState.status === "unavailable" ? (
-            <p>当前无法确认 Task 详情；不会把未知状态当作空需求。</p>
-          ) : null}
-          {detailState.status === "loaded" ? (
-            <>
-              <header>
-                <span>REQUIREMENT R{detailState.detail.activeRequirement.revisionNumber}</span>
-                <strong>{detailState.detail.title}</strong>
-                <small>
-                  Task V{detailState.detail.taskVersion} ·{" "}
-                  {taskStageLabels[detailState.detail.stage]}
-                </small>
-              </header>
-              <label>
-                <span>需求原文修订</span>
-                <textarea
-                  data-task-revision-source
-                  value={requirementSource}
-                  maxLength={16 * 1_024}
-                  disabled={taskMutationPending}
-                  onChange={(event) => {
-                    setRequirementSource(readInputValue(event.currentTarget));
-                    if (planStatus !== "generating") {
-                      setPlanStatus("idle");
-                    }
-                    if (revisionStatus !== "revising") {
-                      setRevisionStatus("idle");
-                    }
-                  }}
-                />
-              </label>
-              {requirementSource !== detailState.detail.activeRequirement.sourceText ? (
-                <div className="task-authoritative-requirement">
-                  <span>当前已持久化原文</span>
-                  <p>{detailState.detail.activeRequirement.sourceText}</p>
-                </div>
-              ) : null}
-              {detailState.detail.activeRequirement.constraints.length > 0 ? (
-                <RequirementItems
-                  title="当前约束"
-                  items={detailState.detail.activeRequirement.constraints}
-                />
-              ) : null}
-              {detailState.detail.activeRequirement.acceptanceCriteria.length > 0 ? (
-                <RequirementItems
-                  title="当前验收条件"
-                  items={detailState.detail.activeRequirement.acceptanceCriteria}
-                />
-              ) : null}
-              <button
-                type="button"
-                data-task-revise
-                disabled={!canRevise}
-                onClick={() => void reviseRequirement()}
-              >
-                {revisionStatus === "revising" ? "正在提交新修订" : "保存 Requirement Revision"}
-              </button>
-              <span data-task-revision-feedback aria-live="polite">
-                {taskRequirementFeedback(revisionStatus)}
-              </span>
-              <div className="task-plan-divider" aria-hidden="true">
-                <span>CANDIDATE PLAN</span>
-                <i />
-                <small>UNCONFIRMED</small>
-              </div>
-              {detailState.detail.candidatePlan === null ? (
-                <p className="task-plan-empty">
-                  尚无候选计划。生成只会写入可审阅 TODO，不会确认计划或启动执行。
+          <span className="sidebar-account-avatar" aria-hidden="true">
+            CH
+          </span>
+          <span>
+            <strong>{accountLabel}</strong>
+            <small>设置与本地状态</small>
+          </span>
+          <span aria-hidden="true">···</span>
+        </button>
+      </aside>
+
+      <div className="task-stage">
+        <header className="task-stage-header">
+          <div>
+            <span>{selectedProject?.displayName ?? "LOCAL WORKSPACE"}</span>
+            <strong>
+              {detailState.status === "loaded" ? detailState.detail.title : "从一个清晰目标开始"}
+            </strong>
+          </div>
+          <div className="stage-security-status">
+            <span aria-hidden="true" />
+            EXECUTION LOCKED
+          </div>
+        </header>
+
+        <div className="task-stage-scroll">
+          <div
+            className="task-detail"
+            data-task-detail-status={detailState.status}
+            data-task-revision-status={revisionStatus}
+            data-task-version={detailState.status === "loaded" ? detailState.detail.taskVersion : 0}
+            data-task-requirement-revision={
+              detailState.status === "loaded"
+                ? detailState.detail.activeRequirement.revisionNumber
+                : 0
+            }
+          >
+            {detailState.status === "idle" ? (
+              <div className="task-empty-state">
+                <span aria-hidden="true">H</span>
+                <h1>把复杂工作变成可恢复的计划。</h1>
+                <p>
+                  在下方描述目标。Harness
+                  会先保存权威需求，再让高级档位生成一份只能审阅、不能执行的候选计划。
                 </p>
-              ) : (
-                <CandidatePlan plan={detailState.detail.candidatePlan} />
-              )}
-              <button
-                type="button"
-                data-task-plan-generate
-                disabled={!canGeneratePlan}
-                onClick={() => void generateCandidatePlan()}
-              >
-                {planStatus === "generating"
-                  ? "高级档位正在分析"
-                  : detailState.detail.candidatePlan === null
-                    ? "生成候选计划"
-                    : "重新生成候选计划"}
-              </button>
-              <span data-task-plan-feedback aria-live="polite">
-                {taskCandidatePlanFeedback(
-                  planStatus,
-                  selectedBinding?.status,
-                  routing,
-                  requirementSource !== detailState.detail.activeRequirement.sourceText,
-                )}
-              </span>
-            </>
-          ) : null}
+              </div>
+            ) : null}
+            {detailState.status === "loading" ? (
+              <div className="task-loading-state">
+                <span aria-hidden="true" />
+                <p>正在读取当前 Requirement…</p>
+              </div>
+            ) : null}
+            {detailState.status === "unavailable" ? (
+              <div className="task-unavailable-state">
+                <strong>无法确认 Task 详情</strong>
+                <p>不会把未知状态解释为空需求，也不会自动重放写入。</p>
+              </div>
+            ) : null}
+            {detailState.status === "loaded" ? (
+              <article className="requirement-document">
+                <header>
+                  <div>
+                    <span>REQUIREMENT R{detailState.detail.activeRequirement.revisionNumber}</span>
+                    <small>
+                      TASK V{detailState.detail.taskVersion} ·{" "}
+                      {taskStageLabels[detailState.detail.stage]}
+                    </small>
+                  </div>
+                  <h1>{detailState.detail.activeRequirement.objective}</h1>
+                </header>
+                <label>
+                  <span>需求原文修订</span>
+                  <textarea
+                    data-task-revision-source
+                    value={requirementSource}
+                    maxLength={16 * 1_024}
+                    disabled={taskMutationPending}
+                    onChange={(event) => {
+                      setRequirementSource(readInputValue(event.currentTarget));
+                      if (planStatus !== "generating") {
+                        setPlanStatus("idle");
+                      }
+                      if (revisionStatus !== "revising") {
+                        setRevisionStatus("idle");
+                      }
+                    }}
+                  />
+                </label>
+                {requirementSource !== detailState.detail.activeRequirement.sourceText ? (
+                  <div className="task-authoritative-requirement">
+                    <span>当前已持久化原文</span>
+                    <p>{detailState.detail.activeRequirement.sourceText}</p>
+                  </div>
+                ) : null}
+                {detailState.detail.activeRequirement.constraints.length > 0 ? (
+                  <RequirementItems
+                    title="当前约束"
+                    items={detailState.detail.activeRequirement.constraints}
+                  />
+                ) : null}
+                {detailState.detail.activeRequirement.acceptanceCriteria.length > 0 ? (
+                  <RequirementItems
+                    title="当前验收条件"
+                    items={detailState.detail.activeRequirement.acceptanceCriteria}
+                  />
+                ) : null}
+                <footer>
+                  <button
+                    type="button"
+                    data-task-revise
+                    disabled={!canRevise}
+                    onClick={() => void reviseRequirement()}
+                  >
+                    {revisionStatus === "revising" ? "正在提交新修订" : "保存 Requirement Revision"}
+                  </button>
+                  <span data-task-revision-feedback aria-live="polite">
+                    {taskRequirementFeedback(revisionStatus)}
+                  </span>
+                </footer>
+              </article>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="task-intake-form" id="task-composer">
+          <div className="composer-title-row">
+            <span aria-hidden="true">＋</span>
+            <input
+              data-task-title
+              value={title}
+              maxLength={256}
+              disabled={selectedProject === undefined || taskMutationPending}
+              onChange={(event) => setTitle(readInputValue(event.currentTarget))}
+              placeholder="Task 标题"
+              aria-label="Task 标题"
+            />
+          </div>
+          <textarea
+            data-task-source
+            value={sourceText}
+            maxLength={16 * 1_024}
+            disabled={selectedProject === undefined || taskMutationPending}
+            onChange={(event) => setSourceText(readInputValue(event.currentTarget))}
+            placeholder="描述你希望 Harness 完成的目标、约束和验收预期…"
+            aria-label="需求原文"
+          />
+          <footer>
+            <span data-task-feedback aria-live="polite">
+              {taskMutationFeedback(mutationStatus, selectedBinding?.status)}
+            </span>
+            <button
+              type="button"
+              data-task-create
+              disabled={!canCreate}
+              onClick={() => void createTask()}
+              aria-label="创建持久 Task"
+            >
+              {mutationStatus === "creating" ? "…" : "↑"}
+            </button>
+          </footer>
         </div>
       </div>
+
+      <aside className="task-inspector" aria-label="计划检查器">
+        <header className="inspector-header">
+          <div>
+            <span>PLAN</span>
+            <strong>任务计划</strong>
+          </div>
+          <small>LOCAL · PERSISTED</small>
+        </header>
+        <div className="inspector-security-note">
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>执行保持锁定</strong>
+            <p>候选计划只用于审阅，不会创建 DAG、Run 或工具调用。</p>
+          </div>
+        </div>
+        {detailState.status === "loaded" ? (
+          <div className="inspector-plan-content">
+            <div className="task-plan-divider" aria-hidden="true">
+              <span>CANDIDATE PLAN</span>
+              <i />
+              <small>UNCONFIRMED</small>
+            </div>
+            {detailState.detail.candidatePlan === null ? (
+              <div className="task-plan-empty">
+                <span aria-hidden="true">◇</span>
+                <strong>还没有候选计划</strong>
+                <p>高级档位会只读分析当前 Project，并生成一份持久、可审阅的步骤清单。</p>
+              </div>
+            ) : (
+              <CandidatePlan plan={detailState.detail.candidatePlan} />
+            )}
+            <button
+              type="button"
+              className="plan-generate-button"
+              data-task-plan-generate
+              disabled={!canGeneratePlan}
+              onClick={() => void generateCandidatePlan()}
+            >
+              {planStatus === "generating"
+                ? "高级档位正在分析"
+                : detailState.detail.candidatePlan === null
+                  ? "生成候选计划"
+                  : "重新生成候选计划"}
+            </button>
+            <span className="plan-feedback" data-task-plan-feedback aria-live="polite">
+              {taskCandidatePlanFeedback(
+                planStatus,
+                selectedBinding?.status,
+                routing,
+                requirementSource !== detailState.detail.activeRequirement.sourceText,
+              )}
+            </span>
+          </div>
+        ) : (
+          <div className="inspector-empty">
+            <span aria-hidden="true">↗</span>
+            <p>选择一个 Task 后，这里会显示它的真实候选计划。</p>
+          </div>
+        )}
+        <footer className="inspector-route-summary">
+          <span>高级档位</span>
+          <strong>
+            {routing.availability?.deep === "observed_available" ? "READY" : "NOT READY"}
+          </strong>
+        </footer>
+      </aside>
     </section>
   );
 }
