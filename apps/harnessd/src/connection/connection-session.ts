@@ -56,6 +56,7 @@ export type ConnectionSessionConfig = Readonly<{
   generateProjectTaskCandidatePlan?: (params: JsonValue) => unknown | Promise<unknown>;
   generateProjectTaskOperationManifest?: (params: JsonValue) => unknown | Promise<unknown>;
   confirmProjectTaskOperationManifest?: (params: JsonValue) => unknown;
+  activateProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
@@ -140,6 +141,7 @@ export class ConnectionSession {
   readonly #generateProjectTaskCandidatePlan: (params: JsonValue) => unknown | Promise<unknown>;
   readonly #generateProjectTaskOperationManifest: (params: JsonValue) => unknown | Promise<unknown>;
   readonly #confirmProjectTaskOperationManifest: (params: JsonValue) => unknown;
+  readonly #activateProjectTaskExecution: (params: JsonValue) => unknown | Promise<unknown>;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
@@ -186,7 +188,9 @@ export class ConnectionSession {
       (config.generateProjectTaskOperationManifest !== undefined &&
         typeof config.generateProjectTaskOperationManifest !== "function") ||
       (config.confirmProjectTaskOperationManifest !== undefined &&
-        typeof config.confirmProjectTaskOperationManifest !== "function")
+        typeof config.confirmProjectTaskOperationManifest !== "function") ||
+      (config.activateProjectTaskExecution !== undefined &&
+        typeof config.activateProjectTaskExecution !== "function")
     ) {
       throw new Error("Invalid connection session configuration.");
     }
@@ -221,6 +225,7 @@ export class ConnectionSession {
       config.generateProjectTaskOperationManifest ?? (() => null);
     this.#confirmProjectTaskOperationManifest =
       config.confirmProjectTaskOperationManifest ?? (() => null);
+    this.#activateProjectTaskExecution = config.activateProjectTaskExecution ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
     this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
@@ -407,6 +412,7 @@ export class ConnectionSession {
       generateProjectTaskCandidatePlan: this.#generateProjectTaskCandidatePlan,
       generateProjectTaskOperationManifest: this.#generateProjectTaskOperationManifest,
       confirmProjectTaskOperationManifest: this.#confirmProjectTaskOperationManifest,
+      activateProjectTaskExecution: this.#activateProjectTaskExecution,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
     });

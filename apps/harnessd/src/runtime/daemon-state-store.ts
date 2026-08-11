@@ -22,6 +22,10 @@ import {
   ShadowRouteDecisionRepository,
 } from "../domain/shadow-route-decision-repository.js";
 import {
+  ROUTE_ACTIVATION_PROJECTION,
+  RouteActivationRepository,
+} from "../domain/route-activation-repository.js";
+import {
   PROJECT_TASK_INDEX_PROJECTION,
   TASK_PROJECT_OWNERSHIP_PROJECTION,
   TaskProjectOwnershipRepository,
@@ -45,6 +49,7 @@ const DAEMON_PROJECTIONS: readonly ProjectionDefinition[] = Object.freeze([
   PROJECT_TASK_INDEX_PROJECTION,
   SHADOW_ROUTE_DECISION_PROJECTION,
   NODE_OPERATION_MANIFEST_PROJECTION,
+  ROUTE_ACTIVATION_PROJECTION,
 ]);
 
 export type DaemonStateStoreState = "ready" | "closed";
@@ -150,6 +155,7 @@ export class DaemonStateStore {
       new TaskProjectOwnershipRepository(this.#events);
       new ShadowRouteDecisionRepository(this.#events);
       new NodeOperationManifestRepository(this.#events);
+      new RouteActivationRepository(this.#events);
       this.#events.inspect();
     } catch {
       try {

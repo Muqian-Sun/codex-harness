@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { ModelRoutingProfileRepository } from "../domain/model-routing-profile-repository.js";
 import { NodeOperationManifestRepository } from "../domain/node-operation-manifest-repository.js";
+import { RouteActivationRepository } from "../domain/route-activation-repository.js";
 import { DaemonStateStore, DaemonStateStoreError } from "./daemon-state-store.js";
 
 const directories: string[] = [];
@@ -29,6 +30,7 @@ describe("daemon state store", () => {
     const first = await DaemonStateStore.open({ databasePath: path });
     const profiles = new ModelRoutingProfileRepository(first.events);
     expect(() => new NodeOperationManifestRepository(first.events)).not.toThrow();
+    expect(() => new RouteActivationRepository(first.events)).not.toThrow();
     profiles.setConfiguration({
       profileId: "00000000-0000-4000-8000-000000000921",
       expectedProfileVersion: 0,
