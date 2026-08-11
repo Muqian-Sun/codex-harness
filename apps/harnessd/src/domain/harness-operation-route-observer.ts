@@ -4,6 +4,12 @@ import { validateJsonValue, type JsonValue } from "@codex-harness/protocol";
 
 import type { ModelRouteTaskKind } from "./model-route-classifier.js";
 import {
+  HarnessRouteOperationValidationError,
+  normalizeHarnessRouteOperations,
+  type HarnessRouteOperation,
+  type HarnessRouteOperationKind,
+} from "./harness-route-operation.js";
+import {
   HARNESS_ROUTE_SAFETY_SOURCE_SIGNAL_NAMES,
   HARNESS_ROUTE_TOOL_CLASSES,
   type HarnessRouteSafetyReport,
@@ -22,36 +28,15 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const POLICY_VERSION_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const MAX_POLICY_VERSION_CHARACTERS = 128;
-const MAX_OPERATIONS = 256;
 
 export const HARNESS_OPERATION_ROUTE_OBSERVER_POLICY_VERSION =
   "harness-operation-route-observer-policy-v1" as const;
 
-export const HARNESS_ROUTE_OPERATION_KINDS = Object.freeze([
-  "answer",
-  "inspect_workspace",
-  "modify_workspace",
-  "run_workspace_command",
-  "network_read",
-  "credential_access",
-  "external_write",
-  "database_migration",
-  "production_change",
-  "irreversible_action",
-  "permission_boundary_change",
-  "public_api_change",
-  "concurrent_change",
-  "architecture_decision",
-  "systemic_diagnosis",
-  "user_interaction",
-] as const);
-
-export type HarnessRouteOperationKind = (typeof HARNESS_ROUTE_OPERATION_KINDS)[number];
-
-export type HarnessRouteOperation = Readonly<{
-  operationId: string;
-  kind: HarnessRouteOperationKind;
-}>;
+export {
+  HARNESS_ROUTE_OPERATION_KINDS,
+  type HarnessRouteOperation,
+  type HarnessRouteOperationKind,
+} from "./harness-route-operation.js";
 
 export type HarnessOperationRouteObserverPolicySet = Readonly<{
   taskClassifier: string;
@@ -396,42 +381,24 @@ function normalizeManifestInput(
       ["manifestId", "observedAtMs", "operations", "schemaVersion"],
       errorCode,
     );
-    if (
-      record.schemaVersion !== 1 ||
-      !Array.isArray(record.operations) ||
-      record.operations.length < 1 ||
-      record.operations.length > MAX_OPERATIONS
-    ) {
+    if (record.schemaVersion !== 1 || !Array.isArray(record.operations)) {
       throw new HarnessOperationRouteObserverError(errorCode);
     }
-    const operations = record.operations.map((operation) =>
-      normalizeOperation(operation, errorCode),
-    );
-    if (new Set(operations.map((operation) => operation.operationId)).size !== operations.length) {
-      throw new HarnessOperationRouteObserverError(errorCode);
-    }
+    const operations = normalizeHarnessRouteOperations(record.operations);
     return Object.freeze({
       manifestId: requireUuid(record.manifestId, errorCode),
       observedAtMs: requireNonNegativeInteger(record.observedAtMs, errorCode),
-      operations: Object.freeze(operations),
+      operations,
     });
   } catch (error: unknown) {
     if (error instanceof HarnessOperationRouteObserverError && error.code === errorCode) {
       throw error;
     }
+    if (error instanceof HarnessRouteOperationValidationError) {
+      throw new HarnessOperationRouteObserverError(errorCode);
+    }
     throw new HarnessOperationRouteObserverError(errorCode);
   }
-}
-
-function normalizeOperation(
-  input: unknown,
-  errorCode: "invalid_manifest" | "invalid_snapshot",
-): HarnessRouteOperation {
-  const record = requireExactRecord(input, ["kind", "operationId"], errorCode);
-  return Object.freeze({
-    operationId: requireUuid(record.operationId, errorCode),
-    kind: requireOperationKind(record.kind, errorCode),
-  });
 }
 
 function deriveRouteEvidence(
@@ -678,19 +645,6 @@ function requirePolicyVersion(
     throw new HarnessOperationRouteObserverError(errorCode);
   }
   return input;
-}
-
-function requireOperationKind(
-  input: unknown,
-  errorCode: HarnessOperationRouteObserverErrorCode,
-): HarnessRouteOperationKind {
-  if (
-    typeof input !== "string" ||
-    !HARNESS_ROUTE_OPERATION_KINDS.includes(input as HarnessRouteOperationKind)
-  ) {
-    throw new HarnessOperationRouteObserverError(errorCode);
-  }
-  return input as HarnessRouteOperationKind;
 }
 
 function canonicalJson(value: JsonValue): string {

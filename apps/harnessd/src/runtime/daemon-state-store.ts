@@ -5,6 +5,10 @@ import {
   ModelRoutingProfileRepository,
 } from "../domain/model-routing-profile-repository.js";
 import {
+  NODE_OPERATION_MANIFEST_PROJECTION,
+  NodeOperationManifestRepository,
+} from "../domain/node-operation-manifest-repository.js";
+import {
   PROJECT_REGISTRY_PROJECTION,
   PROJECT_WORKSPACE_OWNER_PROJECTION,
   ProjectRegistryRepository,
@@ -40,6 +44,7 @@ const DAEMON_PROJECTIONS: readonly ProjectionDefinition[] = Object.freeze([
   TASK_PROJECT_OWNERSHIP_PROJECTION,
   PROJECT_TASK_INDEX_PROJECTION,
   SHADOW_ROUTE_DECISION_PROJECTION,
+  NODE_OPERATION_MANIFEST_PROJECTION,
 ]);
 
 export type DaemonStateStoreState = "ready" | "closed";
@@ -144,6 +149,7 @@ export class DaemonStateStore {
       new ProjectRegistryRepository(this.#events);
       new TaskProjectOwnershipRepository(this.#events);
       new ShadowRouteDecisionRepository(this.#events);
+      new NodeOperationManifestRepository(this.#events);
       this.#events.inspect();
     } catch {
       try {
