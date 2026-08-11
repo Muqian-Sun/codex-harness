@@ -122,8 +122,8 @@ import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") {
-  process.stdout.write("codex-cli 0.146.0-alpha.9.2\\n", () => process.exit(0));
-} else if (JSON.stringify(args) !== JSON.stringify(["app-server", "--listen", "stdio://", "--strict-config"])) {
+  process.stdout.write("codex-cli 0.146.0\\n", () => process.exit(0));
+} else if (JSON.stringify(args) !== JSON.stringify(["app-server", "--listen", "stdio://"])) {
   process.exit(64);
 } else {
   process.stderr.write("fake manager app-server diagnostic\\n");

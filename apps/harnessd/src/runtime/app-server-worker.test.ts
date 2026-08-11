@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { SUPPORTED_CODEX_CLI_VERSION } from "@codex-harness/app-server-adapter";
+
 import {
   AppServerWorker,
   AppServerWorkerError,
@@ -53,6 +55,7 @@ type FakeBehavior = Readonly<{
 
 type FakeCodex = Readonly<{ directory: string; executable: string; logPath: string }>;
 
+const DEFAULT_VERSION_OUTPUT = `codex-cli ${SUPPORTED_CODEX_CLI_VERSION}\n`;
 const workers: AppServerWorker[] = [];
 const directories: string[] = [];
 
@@ -128,7 +131,7 @@ if (args.length === 1 && args[0] === "--version") {
   } else {
     const output = behavior.versionOversize
       ? "v".repeat(5000)
-      : (behavior.versionOutput ?? "codex-cli 0.146.0-alpha.9.2\\n");
+      : (behavior.versionOutput ?? ${JSON.stringify(DEFAULT_VERSION_OUTPUT)});
     process.stdout.write(output, () => {
       if (behavior.deleteAfterVersion) {
         unlinkSync(fileURLToPath(import.meta.url));
@@ -136,7 +139,7 @@ if (args.length === 1 && args[0] === "--version") {
       process.exit(behavior.versionExitCode ?? 0);
     });
   }
-} else if (JSON.stringify(args) !== JSON.stringify(["app-server", "--listen", "stdio://", "--strict-config"])) {
+} else if (JSON.stringify(args) !== JSON.stringify(["app-server", "--listen", "stdio://"])) {
   process.exit(64);
 } else {
   if (behavior.stderrText) {
@@ -438,7 +441,7 @@ describe("Codex App Server worker", () => {
     const account = await worker.readAccount();
 
     expect(worker.state).toBe("ready");
-    expect(worker.supportedCodexCliVersion).toBe("0.146.0-alpha.9.2");
+    expect(worker.supportedCodexCliVersion).toBe("0.146.0");
     expect(result).toEqual({
       data: [{ id: "id-root", model: "model-root" }],
       nextCursor: null,
@@ -457,7 +460,7 @@ describe("Codex App Server worker", () => {
         { type: "argv", args: ["--version"] },
         {
           type: "argv",
-          args: ["app-server", "--listen", "stdio://", "--strict-config"],
+          args: ["app-server", "--listen", "stdio://"],
         },
       ]),
     );
@@ -636,7 +639,7 @@ describe("Codex App Server worker", () => {
       const log = await readWireLog(fake);
       expect(log).not.toContainEqual({
         type: "argv",
-        args: ["app-server", "--listen", "stdio://", "--strict-config"],
+        args: ["app-server", "--listen", "stdio://"],
       });
       expect(log.every((entry) => JSON.stringify(entry).includes("--version"))).toBe(true);
     }

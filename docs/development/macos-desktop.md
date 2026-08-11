@@ -22,7 +22,7 @@ Electron main → Harness daemon → SQLite 状态恢复 + Codex App Server work
 预期输出：
 
 ```text
-codex-cli 0.146.0-alpha.9.2
+codex-cli 0.146.0
 ```
 
 Harness 不会自动扫描常见安装位置，也不会自动下载或替换 Codex executable。

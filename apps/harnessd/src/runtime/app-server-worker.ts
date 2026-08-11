@@ -215,11 +215,9 @@ export class AppServerWorker {
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(
-        normalized.codexExecutable,
-        ["app-server", "--listen", "stdio://", "--strict-config"],
-        { stdio: ["pipe", "pipe", "pipe"] },
-      );
+      child = spawn(normalized.codexExecutable, ["app-server", "--listen", "stdio://"], {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
     } catch {
       throw new AppServerWorkerError("spawn_failed");
     }
