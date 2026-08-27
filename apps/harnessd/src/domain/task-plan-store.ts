@@ -28,6 +28,11 @@ const PLAN_REVISED = "task.plan_revised";
 const PLAN_RECONCILED = "task.plan_reconciled";
 const GRAPH_COMMITTED = "task.graph_committed";
 const GRAPH_RECONCILED = "task.graph_reconciled";
+const EXECUTION_RUN_STREAM_TYPE = "execution.run";
+const EXECUTION_RUN_STARTED = "execution.run_started";
+const EXECUTION_RUN_FINISHED = "execution.run_finished";
+const EXECUTION_ADMISSION_STREAM_TYPE = "execution.node_admission";
+const EXECUTION_ADMISSION_DECIDED = "execution.node_admission_decided";
 const TASK_EVENT_TYPES = new Set([
   TASK_CREATED,
   REQUIREMENTS_REVISED,
@@ -221,10 +226,14 @@ export class TaskPlanError extends Error {
 
 export const TASK_PLAN_PROJECTION: ProjectionDefinition = Object.freeze({
   name: TASK_PROJECTION_NAME,
-  version: 3,
+  version: 4,
   selectKeys: (event) =>
-    event.streamType === TASK_STREAM_TYPE &&
-    TASK_EVENT_TYPES.has(event.eventType) &&
+    ((event.streamType === TASK_STREAM_TYPE && TASK_EVENT_TYPES.has(event.eventType)) ||
+      (event.streamType === EXECUTION_ADMISSION_STREAM_TYPE &&
+        event.eventType === EXECUTION_ADMISSION_DECIDED) ||
+      (event.streamType === EXECUTION_RUN_STREAM_TYPE &&
+        (event.eventType === EXECUTION_RUN_STARTED ||
+          event.eventType === EXECUTION_RUN_FINISHED))) &&
     UUID_PATTERN.test(event.streamId)
       ? [event.streamId]
       : [],
@@ -503,6 +512,12 @@ export class TaskPlanStore extends TaskPlanRepository {
 }
 
 function reduceTaskEvent(current: JsonValue | undefined, event: StoredEvent): TaskPlanRecord {
+  if (event.streamType === EXECUTION_ADMISSION_STREAM_TYPE) {
+    return reduceTaskAdmissionEvent(current, event);
+  }
+  if (event.streamType === EXECUTION_RUN_STREAM_TYPE) {
+    return reduceTaskRunEvent(current, event);
+  }
   if (event.eventVersion !== 1 || event.streamType !== TASK_STREAM_TYPE) {
     throw new TaskPlanError("conflict");
   }
@@ -772,6 +787,228 @@ function reduceTaskEvent(current: JsonValue | undefined, event: StoredEvent): Ta
     });
   }
   throw new TaskPlanError("conflict");
+}
+
+function reduceTaskAdmissionEvent(
+  current: JsonValue | undefined,
+  event: StoredEvent,
+): TaskPlanRecord {
+  if (
+    current === undefined ||
+    event.eventVersion !== 1 ||
+    event.eventType !== EXECUTION_ADMISSION_DECIDED
+  ) {
+    throw new TaskPlanError("conflict");
+  }
+  const task = decodeTaskRecord(current);
+  const payload = requireRecord(event.payload, [
+    "activationId",
+    "commandDigest",
+    "decisionId",
+    "manifestId",
+    "nodeId",
+    "occurredAtMs",
+    "operationKinds",
+    "projectId",
+    "rejectionReason",
+    "routeActivation",
+    "schemaVersion",
+    "status",
+    "taskId",
+  ]);
+  if (
+    payload.schemaVersion !== 1 ||
+    requireUuid(payload.taskId) !== task.taskId ||
+    requireUuid(payload.activationId) !== event.eventId ||
+    requireNonNegativeInteger(payload.occurredAtMs) !== event.occurredAtMs ||
+    event.occurredAtMs < task.updatedAtMs
+  ) {
+    throw new TaskPlanError("conflict");
+  }
+  if (payload.status === "denied") {
+    if (payload.routeActivation !== null || typeof payload.rejectionReason !== "string") {
+      throw new TaskPlanError("conflict");
+    }
+    return task;
+  }
+  if (payload.status !== "activated" || payload.rejectionReason !== null) {
+    throw new TaskPlanError("conflict");
+  }
+  const activation = requireRecord(payload.routeActivation, [
+    "activationId",
+    "catalog",
+    "configurationRevisionId",
+    "decisionId",
+    "executionAuthorized",
+    "graphRevisionId",
+    "manifestId",
+    "manifestPlanningFence",
+    "manifestStateVersion",
+    "nodeId",
+    "ownershipVersion",
+    "permission",
+    "planRevisionId",
+    "profileId",
+    "profileVersion",
+    "projectId",
+    "projectVersion",
+    "requirementRevisionId",
+    "routeDecision",
+    "routingBindingVersion",
+    "schemaVersion",
+    "taskId",
+    "taskVersion",
+    "userConfirmedAtMs",
+    "workspace",
+  ]);
+  const nodeId = requireUuid(payload.nodeId);
+  const nodeStatus = task.activeGraph?.nodes.find((node) => node.nodeId === nodeId)?.status;
+  if (
+    activation.schemaVersion !== 1 ||
+    activation.executionAuthorized !== true ||
+    requireUuid(activation.activationId) !== event.eventId ||
+    requireUuid(activation.taskId) !== task.taskId ||
+    requirePositiveInteger(activation.taskVersion) !== task.taskVersion ||
+    requireUuid(activation.nodeId) !== nodeId ||
+    requireUuid(activation.graphRevisionId) !== task.activeGraph?.revisionId ||
+    (nodeStatus !== "pending" && nodeStatus !== "ready")
+  ) {
+    throw new TaskPlanError("conflict");
+  }
+  return nodeStatus === "ready"
+    ? task
+    : updateTaskNodeStatus(task, nodeId, "ready", event.occurredAtMs);
+}
+
+function reduceTaskRunEvent(current: JsonValue | undefined, event: StoredEvent): TaskPlanRecord {
+  if (
+    current === undefined ||
+    event.eventVersion !== 1 ||
+    (event.eventType !== EXECUTION_RUN_STARTED && event.eventType !== EXECUTION_RUN_FINISHED)
+  ) {
+    throw new TaskPlanError("conflict");
+  }
+  const task = decodeTaskRecord(current);
+  if (
+    task.taskId !== event.streamId ||
+    task.activeGraph === null ||
+    event.occurredAtMs < task.updatedAtMs
+  ) {
+    throw new TaskPlanError("conflict");
+  }
+  if (event.eventType === EXECUTION_RUN_STARTED) {
+    const payload = requireRecord(event.payload, [
+      "expectedTaskVersion",
+      "nodeId",
+      "run",
+      "runId",
+      "schemaVersion",
+      "taskId",
+    ]);
+    const run = requireRecord(payload.run, [
+      "activationId",
+      "attemptNumber",
+      "commands",
+      "completedAtMs",
+      "files",
+      "finalResult",
+      "graphRevisionId",
+      "manifestId",
+      "nodeId",
+      "permission",
+      "route",
+      "runId",
+      "runVersion",
+      "schemaVersion",
+      "startedAtMs",
+      "status",
+      "taskId",
+      "taskVersionAtStart",
+      "terminalReason",
+      "threadId",
+      "turnId",
+      "updatedAtMs",
+      "workspaceAfter",
+      "workspaceBefore",
+    ]);
+    const nodeId = requireUuid(payload.nodeId);
+    const node = task.activeGraph.nodes.find((candidate) => candidate.nodeId === nodeId);
+    if (
+      payload.schemaVersion !== 1 ||
+      requireUuid(payload.taskId) !== task.taskId ||
+      requireUuid(payload.runId) !== event.eventId ||
+      requirePositiveInteger(payload.expectedTaskVersion) !== task.taskVersion ||
+      run.schemaVersion !== 1 ||
+      run.status !== "running" ||
+      requireUuid(run.taskId) !== task.taskId ||
+      requireUuid(run.runId) !== event.eventId ||
+      requireUuid(run.nodeId) !== nodeId ||
+      requireUuid(run.graphRevisionId) !== task.activeGraph.revisionId ||
+      requirePositiveInteger(run.taskVersionAtStart) !== task.taskVersion ||
+      node?.status !== "ready" ||
+      !node.dependsOnNodeIds.every(
+        (dependencyId) =>
+          task.activeGraph?.nodes.find((candidate) => candidate.nodeId === dependencyId)?.status ===
+          "succeeded",
+      ) ||
+      task.activeGraph.nodes.some((candidate) => candidate.status === "running")
+    ) {
+      throw new TaskPlanError("conflict");
+    }
+    return updateTaskNodeStatus(task, nodeId, "running", event.occurredAtMs);
+  }
+
+  const payload = requireRecord(event.payload, [
+    "expectedRunVersion",
+    "expectedTaskVersion",
+    "finalResult",
+    "nodeId",
+    "runId",
+    "schemaVersion",
+    "status",
+    "taskId",
+    "terminalReason",
+    "workspaceAfter",
+  ]);
+  const nodeId = requireUuid(payload.nodeId);
+  const status = payload.status;
+  if (
+    payload.schemaVersion !== 1 ||
+    requireUuid(payload.taskId) !== task.taskId ||
+    requireUuid(payload.runId) === task.taskId ||
+    requirePositiveInteger(payload.expectedRunVersion) < 1 ||
+    requirePositiveInteger(payload.expectedTaskVersion) !== task.taskVersion ||
+    task.activeGraph.nodes.find((candidate) => candidate.nodeId === nodeId)?.status !== "running" ||
+    (status !== "succeeded" &&
+      status !== "failed" &&
+      status !== "blocked" &&
+      status !== "interrupted")
+  ) {
+    throw new TaskPlanError("conflict");
+  }
+  return updateTaskNodeStatus(task, nodeId, status, event.occurredAtMs);
+}
+
+function updateTaskNodeStatus(
+  task: TaskPlanRecord,
+  nodeId: string,
+  status: TaskGraphRevision["nodes"][number]["status"],
+  occurredAtMs: number,
+): TaskPlanRecord {
+  if (task.activeGraph === null) throw new TaskPlanError("conflict");
+  return freezeTask({
+    ...task,
+    taskVersion: incrementVersion(task.taskVersion),
+    updatedAtMs: occurredAtMs,
+    activeGraph: Object.freeze({
+      ...task.activeGraph,
+      nodes: Object.freeze(
+        task.activeGraph.nodes.map((node) =>
+          node.nodeId === nodeId ? Object.freeze({ ...node, status }) : node,
+        ),
+      ),
+    }),
+  });
 }
 
 function normalizeConfig(config: TaskPlanStoreConfig): TaskPlanStoreConfig {

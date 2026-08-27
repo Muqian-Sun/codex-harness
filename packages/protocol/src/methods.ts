@@ -1254,6 +1254,207 @@ export const TaskExecutionActivateResultSchema = z
     }
   });
 
+export const TASK_EXECUTION_RUN_STATUSES = Object.freeze([
+  "running",
+  "stopping",
+  "succeeded",
+  "failed",
+  "blocked",
+  "interrupted",
+] as const);
+
+export const TASK_EXECUTION_TERMINAL_REASONS = Object.freeze([
+  "completed",
+  "turn_failed",
+  "tool_failed",
+  "forbidden_tool",
+  "evidence_missing",
+  "evidence_mismatch",
+  "workspace_changed",
+  "user_interrupted",
+  "daemon_restarted",
+  "worker_unavailable",
+] as const);
+
+const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const RunCommandEvidenceSchema = z
+  .object({
+    sequence: NonNegativeSafeIntegerSchema.min(1),
+    command: z.string().min(1).max(8_192),
+    status: z.enum(["completed", "failed", "declined"]),
+    exitCode: z.number().int().min(-2_147_483_648).max(2_147_483_647).nullable(),
+    durationMs: NonNegativeSafeIntegerSchema.nullable(),
+    outputBytes: NonNegativeSafeIntegerSchema,
+    outputDigest: Sha256Schema,
+  })
+  .strict();
+const RunFileEvidenceSchema = z
+  .object({
+    sequence: NonNegativeSafeIntegerSchema.min(1),
+    path: z.string().min(1).max(4_096),
+    changeKind: z.enum(["add", "delete", "update"]),
+    status: z.enum(["completed", "failed", "declined"]),
+    diffDigest: Sha256Schema,
+  })
+  .strict();
+export const TaskExecutionRunFinalResultSchema = z
+  .object({
+    outcome: z.enum(["completed", "blocked"]),
+    summary: z.string().min(1).max(65_536),
+    validationCommands: z.array(z.string().min(1).max(8_192)).max(64),
+    changedFiles: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1).max(4_096),
+            changeKind: z.enum(["add", "delete", "update"]),
+          })
+          .strict(),
+      )
+      .max(128),
+    acceptanceCriteria: z
+      .array(
+        z
+          .object({
+            criterion: z.string().min(1).max(4096),
+            passed: z.boolean(),
+            evidence: z.string().min(1).max(8192),
+          })
+          .strict(),
+      )
+      .max(100),
+  })
+  .strict();
+
+export const TaskExecutionStartParamsSchema = z
+  .object({
+    runId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    activationId: z.string().regex(UUID_PATTERN),
+    expectedTaskVersion: NonNegativeSafeIntegerSchema.min(1),
+    expectedGraphRevisionId: z.string().regex(UUID_PATTERN),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const identifiers = [
+      value.runId,
+      value.taskId,
+      value.nodeId,
+      value.activationId,
+      value.expectedGraphRevisionId,
+    ];
+    if (new Set(identifiers).size !== identifiers.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["runId"],
+        message: "Run identifiers must be unique",
+      });
+    }
+  });
+
+export const TaskExecutionStartResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["started", "existing"]),
+    runId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    runVersion: NonNegativeSafeIntegerSchema.min(1),
+    runStatus: z.enum(TASK_EXECUTION_RUN_STATUSES),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.status === "started" && value.runStatus !== "running") {
+      context.addIssue({
+        code: "custom",
+        path: ["runStatus"],
+        message: "A newly started Run must be running",
+      });
+    }
+  });
+
+export const TaskExecutionGetParamsSchema = z
+  .object({ taskId: z.string().regex(UUID_PATTERN), runId: z.string().regex(UUID_PATTERN) })
+  .strict();
+
+export const TaskExecutionGetResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    runId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    nodeId: z.string().regex(UUID_PATTERN),
+    activationId: z.string().regex(UUID_PATTERN),
+    attemptNumber: NonNegativeSafeIntegerSchema.min(1),
+    runVersion: NonNegativeSafeIntegerSchema.min(1),
+    status: z.enum(TASK_EXECUTION_RUN_STATUSES),
+    route: ExecutionRouteSummarySchema,
+    permission: ExecutionPermissionSummarySchema,
+    threadBound: z.boolean(),
+    turnBound: z.boolean(),
+    commands: z.array(RunCommandEvidenceSchema).max(64),
+    files: z.array(RunFileEvidenceSchema).max(128),
+    finalResult: TaskExecutionRunFinalResultSchema.nullable(),
+    terminalReason: z.enum(TASK_EXECUTION_TERMINAL_REASONS).nullable(),
+    startedAtMs: NonNegativeSafeIntegerSchema,
+    completedAtMs: NonNegativeSafeIntegerSchema.nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const terminal = ["succeeded", "failed", "blocked", "interrupted"].includes(value.status);
+    const evidence = [...value.commands, ...value.files].sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+    const validTerminalReason =
+      (value.status === "succeeded" && value.terminalReason === "completed") ||
+      (value.status === "failed" &&
+        value.terminalReason !== null &&
+        ["turn_failed", "tool_failed", "forbidden_tool", "worker_unavailable"].includes(
+          value.terminalReason,
+        )) ||
+      (value.status === "blocked" &&
+        value.terminalReason !== null &&
+        ["evidence_missing", "evidence_mismatch", "workspace_changed"].includes(
+          value.terminalReason,
+        )) ||
+      (value.status === "interrupted" &&
+        (value.terminalReason === "user_interrupted" ||
+          value.terminalReason === "daemon_restarted"));
+    if (
+      terminal !== (value.terminalReason !== null && value.completedAtMs !== null) ||
+      value.threadBound !== value.turnBound ||
+      evidence.some((item, index) => item.sequence !== index + 1) ||
+      (terminal && !validTerminalReason) ||
+      (value.status === "succeeded" && value.finalResult === null) ||
+      ((value.status === "running" || value.status === "stopping") && value.finalResult !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["status"],
+        message: "Run terminal fields must match status",
+      });
+    }
+  });
+
+export const TaskExecutionInterruptParamsSchema = z
+  .object({
+    commandId: z.string().regex(UUID_PATTERN),
+    taskId: z.string().regex(UUID_PATTERN),
+    runId: z.string().regex(UUID_PATTERN),
+    expectedRunVersion: NonNegativeSafeIntegerSchema.min(1),
+  })
+  .strict();
+
+export const TaskExecutionInterruptResultSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    status: z.enum(["stopping", "existing", "already_terminal"]),
+    taskId: z.string().regex(UUID_PATTERN),
+    runId: z.string().regex(UUID_PATTERN),
+    runVersion: NonNegativeSafeIntegerSchema.min(1),
+  })
+  .strict();
+
 export const TaskRequirementReviseParamsSchema = z
   .object({
     commandId: z.string().regex(UUID_PATTERN),
@@ -1490,6 +1691,18 @@ export type HarnessExecutionAdmissionRejectionReason =
   (typeof EXECUTION_ADMISSION_REJECTION_REASONS)[number];
 export type HarnessTaskExecutionActivateParams = z.infer<typeof TaskExecutionActivateParamsSchema>;
 export type HarnessTaskExecutionActivateResult = z.infer<typeof TaskExecutionActivateResultSchema>;
+export type HarnessTaskExecutionRunStatus = (typeof TASK_EXECUTION_RUN_STATUSES)[number];
+export type HarnessTaskExecutionTerminalReason = (typeof TASK_EXECUTION_TERMINAL_REASONS)[number];
+export type HarnessTaskExecutionStartParams = z.infer<typeof TaskExecutionStartParamsSchema>;
+export type HarnessTaskExecutionStartResult = z.infer<typeof TaskExecutionStartResultSchema>;
+export type HarnessTaskExecutionGetParams = z.infer<typeof TaskExecutionGetParamsSchema>;
+export type HarnessTaskExecutionGetResult = z.infer<typeof TaskExecutionGetResultSchema>;
+export type HarnessTaskExecutionInterruptParams = z.infer<
+  typeof TaskExecutionInterruptParamsSchema
+>;
+export type HarnessTaskExecutionInterruptResult = z.infer<
+  typeof TaskExecutionInterruptResultSchema
+>;
 export type HarnessTaskRequirementReviseParams = Readonly<{
   commandId: string;
   projectId: string;
@@ -1842,6 +2055,18 @@ export const METHOD_CONTRACTS = Object.freeze({
   "task.execution.activate": Object.freeze({
     params: TaskExecutionActivateParamsSchema,
     result: TaskExecutionActivateResultSchema,
+  }),
+  "task.execution.start": Object.freeze({
+    params: TaskExecutionStartParamsSchema,
+    result: TaskExecutionStartResultSchema,
+  }),
+  "task.execution.get": Object.freeze({
+    params: TaskExecutionGetParamsSchema,
+    result: TaskExecutionGetResultSchema,
+  }),
+  "task.execution.interrupt": Object.freeze({
+    params: TaskExecutionInterruptParamsSchema,
+    result: TaskExecutionInterruptResultSchema,
   }),
   "task.requirement.revise": Object.freeze({
     params: TaskRequirementReviseParamsSchema,

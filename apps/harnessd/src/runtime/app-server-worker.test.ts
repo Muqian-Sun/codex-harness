@@ -10,6 +10,7 @@ import {
   AppServerWorker,
   AppServerWorkerError,
   type AppServerReadOnlyAnalysisInput,
+  type AppServerWorkspaceExecutionInput,
   type AppServerWorkerConfig,
 } from "./app-server-worker.js";
 
@@ -31,6 +32,8 @@ type FakeBehavior = Readonly<{
     | "analysis_output_limit"
     | "analysis_message_limit"
     | "analysis_timeout"
+    | "analysis_tool_item"
+    | "execution_forbidden"
     | "duplicate_response"
     | "early_exit"
     | "event"
@@ -242,6 +245,17 @@ if (args.length === 1 && args[0] === "--version") {
       send({ id: message.id, result: { thread: { id: "thread-analysis" } } });
       return;
     }
+    if (message.method === "turn/interrupt") {
+      send({ id: message.id, result: {} });
+      send({
+        method: "turn/completed",
+        params: {
+          threadId: message.params.threadId,
+          turn: { id: message.params.turnId, items: [], status: "interrupted" }
+        }
+      });
+      return;
+    }
     if (message.method === "turn/start") {
       send({ id: message.id, result: { turn: { id: "turn-analysis" } } });
       const eventTurnId = behavior.appMode === "analysis_mismatched_turn"
@@ -257,6 +271,40 @@ if (args.length === 1 && args[0] === "--version") {
       if (behavior.appMode === "analysis_mismatched_turn") return;
       if (behavior.appMode === "analysis_timeout") return;
       const completeAnalysis = () => {
+        if (behavior.appMode === "analysis_tool_item") {
+          send({
+            method: "item/completed",
+            params: {
+              completedAtMs: 1,
+              threadId: "thread-analysis",
+              turnId: "turn-analysis",
+              item: {
+                id: "command-1",
+                type: "commandExecution",
+                command: "pwd",
+                commandActions: [],
+                cwd: "/tmp/codex-harness-project",
+                status: "completed",
+                exitCode: 0,
+                durationMs: 1,
+                aggregatedOutput: "/tmp/codex-harness-project"
+              }
+            }
+          });
+          return;
+        }
+        if (behavior.appMode === "execution_forbidden") {
+          send({
+            method: "item/completed",
+            params: {
+              completedAtMs: 1,
+              threadId: "thread-analysis",
+              turnId: "turn-analysis",
+              item: { id: "web-1", type: "webSearch" }
+            }
+          });
+          return;
+        }
         if (behavior.appMode === "analysis_failed") {
           send({
             method: "turn/completed",
@@ -434,7 +482,178 @@ function analysisInput(): AppServerReadOnlyAnalysisInput {
   };
 }
 
-describe("Codex App Server worker", () => {
+function executionInput(): AppServerWorkspaceExecutionInput {
+  return analysisInput();
+}
+
+describe("Codex App Server worker", { timeout: 15_000 }, () => {
+  it("runs an isolated workspace-write turn with fixed sandbox policy and evidence callbacks", async () => {
+    const { fake, worker } = await startFakeWorker();
+    const bindings: unknown[] = [];
+    const outputs: unknown[] = [];
+    const result = await worker.runWorkspaceExecutionTurn(executionInput(), {
+      onBound: (binding) => bindings.push(binding),
+      onOutput: (output) => outputs.push(output),
+    });
+
+    expect(result).toEqual({
+      threadId: "thread-analysis",
+      turnId: "turn-analysis",
+      terminalStatus: "completed",
+      output: { kind: "candidate", steps: 2 },
+    });
+    expect(bindings).toEqual([{ threadId: "thread-analysis", turnId: "turn-analysis" }]);
+    expect(outputs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "agent_message", phase: "commentary" }),
+        expect.objectContaining({ type: "agent_message", phase: "final_answer" }),
+      ]),
+    );
+    const messages = (await readWireLog(fake)).flatMap((entry) =>
+      typeof entry === "object" && entry !== null && "message" in entry
+        ? [(entry as { message: Record<string, unknown> }).message]
+        : [],
+    );
+    expect(messages.find((message) => message.method === "thread/start")?.params).toMatchObject({
+      approvalPolicy: "never",
+      cwd: "/tmp/codex-harness-project",
+      ephemeral: true,
+      sandbox: "workspace-write",
+    });
+    expect(messages.find((message) => message.method === "turn/start")?.params).toMatchObject({
+      approvalPolicy: "never",
+      cwd: "/tmp/codex-harness-project",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: ["/tmp/codex-harness-project"],
+        networkAccess: false,
+        excludeTmpdirEnvVar: true,
+        excludeSlashTmp: true,
+      },
+    });
+  });
+
+  it("interrupts only the currently bound workspace execution turn", async () => {
+    const { worker } = await startFakeWorker({ analysisDelayMs: 100 });
+    let resolveBound!: (binding: Readonly<{ threadId: string; turnId: string }>) => void;
+    const bound = new Promise<Readonly<{ threadId: string; turnId: string }>>((resolve) => {
+      resolveBound = resolve;
+    });
+    const running = worker.runWorkspaceExecutionTurn(executionInput(), {
+      onBound: resolveBound,
+      onOutput: () => undefined,
+    });
+    const binding = await bound;
+    await worker.interruptWorkspaceExecutionTurn(binding.threadId, binding.turnId);
+    await expect(running).resolves.toMatchObject({ terminalStatus: "interrupted", output: null });
+    await expect(
+      worker.interruptWorkspaceExecutionTurn(binding.threadId, binding.turnId),
+    ).rejects.toMatchObject({ code: "request_failed" });
+  });
+
+  it("rejects concurrent turns, malformed execution input and invalid observers", async () => {
+    const { worker } = await startFakeWorker({ analysisDelayMs: 50 });
+    const running = worker.runWorkspaceExecutionTurn(executionInput(), {
+      onBound: () => undefined,
+      onOutput: () => undefined,
+    });
+    await expect(
+      worker.runWorkspaceExecutionTurn(executionInput(), {
+        onBound: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "turn_busy" });
+    await expect(worker.runReadOnlyAnalysisTurn(analysisInput())).rejects.toMatchObject({
+      code: "turn_busy",
+    });
+    await expect(running).resolves.toMatchObject({ terminalStatus: "completed" });
+
+    await expect(
+      worker.runWorkspaceExecutionTurn(
+        { ...executionInput(), cwd: "relative" },
+        { onBound: () => undefined, onOutput: () => undefined },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_execution_input" });
+    await expect(
+      worker.runWorkspaceExecutionTurn(executionInput(), {} as never),
+    ).rejects.toMatchObject({ code: "invalid_execution_input" });
+  });
+
+  it("fails closed when a read-only analysis emits command evidence", async () => {
+    const { worker } = await startFakeWorker({ appMode: "analysis_tool_item" });
+    await expect(worker.runReadOnlyAnalysisTurn(analysisInput())).rejects.toMatchObject({
+      code: "invalid_turn_output",
+    });
+    await expect(worker.closed).resolves.toMatchObject({ reason: "protocol_failure" });
+  });
+
+  it.each([
+    ["execution_forbidden", "invalid_turn_output"],
+    ["analysis_duplicate_message", "protocol_failure"],
+    ["analysis_mismatched_turn", "protocol_failure"],
+    ["analysis_output_limit", "protocol_failure"],
+  ] as const)("fails closed for execution evidence mode %s", async (appMode, code) => {
+    const { worker } = await startFakeWorker({ appMode });
+    await expect(
+      worker.runWorkspaceExecutionTurn(executionInput(), {
+        onBound: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code });
+    await expect(worker.closed).resolves.toMatchObject({ reason: "protocol_failure" });
+  });
+
+  it("fails closed when execution observers throw", async () => {
+    const outputFailure = await startFakeWorker();
+    await expect(
+      outputFailure.worker.runWorkspaceExecutionTurn(executionInput(), {
+        onBound: () => undefined,
+        onOutput: () => {
+          throw new Error("private observer failure");
+        },
+      }),
+    ).rejects.toMatchObject({ code: "protocol_failure" });
+    await expect(outputFailure.worker.closed).resolves.toMatchObject({
+      reason: "event_handler_failure",
+    });
+
+    const bindingFailure = await startFakeWorker();
+    await expect(
+      bindingFailure.worker.runWorkspaceExecutionTurn(executionInput(), {
+        onBound: () => {
+          throw new Error("private binding failure");
+        },
+        onOutput: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "protocol_failure" });
+    await expect(bindingFailure.worker.closed).resolves.toMatchObject({
+      reason: "event_handler_failure",
+    });
+  });
+
+  it("times out and rejects an active execution during worker close", async () => {
+    const timeout = await startFakeWorker(
+      { appMode: "analysis_timeout" },
+      { executionTurnTimeoutMs: 10 },
+    );
+    await expect(
+      timeout.worker.runWorkspaceExecutionTurn(executionInput(), {
+        onBound: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "turn_timeout" });
+    await expect(timeout.worker.closed).resolves.toMatchObject({ reason: "turn_timeout" });
+
+    const closing = await startFakeWorker({ appMode: "analysis_timeout" });
+    const running = closing.worker.runWorkspaceExecutionTurn(executionInput(), {
+      onBound: () => undefined,
+      onOutput: () => undefined,
+    });
+    const rejected = expect(running).rejects.toMatchObject({ code: "closed" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await closing.worker.close();
+    await rejected;
+  });
   it("verifies the pinned CLI, performs the handshake, lists models, and closes on EOF", async () => {
     const { fake, worker } = await startFakeWorker({ lineEnding: "crlf" });
     const result = await worker.listModels({ includeHidden: true });
@@ -698,7 +917,7 @@ describe("Codex App Server worker", () => {
         code: "protocol_failure",
       });
     }
-  });
+  }, 15_000);
 
   it("keeps server failures safe and closes on malformed or duplicate responses", async () => {
     const secret = await startFakeWorker({ appMode: "request_error", stderrText: "STDERR-SECRET" });
@@ -729,7 +948,7 @@ describe("Codex App Server worker", () => {
       data: [{ model: "model-root" }],
     });
     await expect(duplicate.worker.closed).resolves.toMatchObject({ reason: "protocol_failure" });
-  });
+  }, 15_000);
 
   it("closes the worker on request timeout and never replays the request", async () => {
     const { fake, worker } = await startFakeWorker(

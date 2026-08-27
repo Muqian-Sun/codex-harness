@@ -294,11 +294,24 @@ describe("node execution admission service", () => {
     expect(
       new RouteActivationRepository(context.store.events).readLatestForNode(TASK_ID, NODE_ID),
     ).toMatchObject({ status: "activated", routeActivation: { executionAuthorized: true } });
+    expect(new TaskPlanRepository(context.store.events).readTask(TASK_ID)).toMatchObject({
+      taskVersion: 4,
+      activeGraph: { nodes: [{ nodeId: NODE_ID, status: "ready" }] },
+    });
 
     await expect(context.service.activate(context.params)).resolves.toMatchObject({
       status: "existing",
     });
     expect(context.observe).toHaveBeenCalledOnce();
+    await expect(
+      context.service.activate({
+        ...context.params,
+        activationId: id(22),
+        decisionId: id(23),
+        expectedTaskVersion: 4,
+      }),
+    ).resolves.toMatchObject({ status: "activated" });
+    expect(new TaskPlanRepository(context.store.events).readTask(TASK_ID).taskVersion).toBe(4);
     context.store.close();
   });
 

@@ -232,7 +232,7 @@ export class NodeExecutionAdmissionService {
       task.latestPlan?.revisionId !== params.confirmedPlanRevisionId ||
       task.latestPlan.status !== "confirmed" ||
       task.activeGraph?.revisionId !== params.graphRevisionId ||
-      preview?.state !== "dependency_eligible" ||
+      (preview?.state !== "dependency_eligible" && preview?.state !== "awaiting_claim") ||
       preview.nodeId !== params.nodeId ||
       manifest.status !== "confirmed" ||
       manifest.manifestId !== params.manifestId ||

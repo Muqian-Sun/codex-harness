@@ -199,6 +199,7 @@ describe("App Server protocol adapter", () => {
       value: {
         type: "turn_output",
         signal: {
+          type: "agent_message",
           threadId: "thread-1",
           turnId: "turn-1",
           itemId: "message-1",

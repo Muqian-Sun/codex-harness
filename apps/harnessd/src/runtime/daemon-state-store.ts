@@ -26,6 +26,10 @@ import {
   RouteActivationRepository,
 } from "../domain/route-activation-repository.js";
 import {
+  EXECUTION_RUN_PROJECTION,
+  ExecutionRunRepository,
+} from "../domain/execution-run-repository.js";
+import {
   PROJECT_TASK_INDEX_PROJECTION,
   TASK_PROJECT_OWNERSHIP_PROJECTION,
   TaskProjectOwnershipRepository,
@@ -50,6 +54,7 @@ const DAEMON_PROJECTIONS: readonly ProjectionDefinition[] = Object.freeze([
   SHADOW_ROUTE_DECISION_PROJECTION,
   NODE_OPERATION_MANIFEST_PROJECTION,
   ROUTE_ACTIVATION_PROJECTION,
+  EXECUTION_RUN_PROJECTION,
 ]);
 
 export type DaemonStateStoreState = "ready" | "closed";
@@ -156,6 +161,7 @@ export class DaemonStateStore {
       new ShadowRouteDecisionRepository(this.#events);
       new NodeOperationManifestRepository(this.#events);
       new RouteActivationRepository(this.#events);
+      new ExecutionRunRepository(this.#events);
       this.#events.inspect();
     } catch {
       try {

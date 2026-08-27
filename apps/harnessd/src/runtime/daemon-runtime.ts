@@ -30,6 +30,7 @@ import type { ProjectTaskService } from "./project-task-service.js";
 import type { CandidatePlanGenerationService } from "./candidate-plan-generation-service.js";
 import type { CandidateOperationManifestGenerationService } from "./candidate-operation-manifest-generation-service.js";
 import type { NodeExecutionAdmissionService } from "./node-execution-admission-service.js";
+import type { NodeExecutionRunService } from "./node-execution-run-service.js";
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
@@ -106,6 +107,7 @@ export class DaemonRuntime {
   readonly #candidateOperationManifestGenerationService:
     CandidateOperationManifestGenerationService | undefined;
   readonly #nodeExecutionAdmissionService: NodeExecutionAdmissionService | undefined;
+  readonly #nodeExecutionRunService: NodeExecutionRunService | undefined;
   readonly closed: Promise<DaemonRuntimeCloseResult>;
   #resolveClosed!: (result: DaemonRuntimeCloseResult) => void;
   #state: DaemonRuntimeState = "starting";
@@ -141,6 +143,7 @@ export class DaemonRuntime {
         candidatePlanGenerationService?: CandidatePlanGenerationService;
         candidateOperationManifestGenerationService?: CandidateOperationManifestGenerationService;
         nodeExecutionAdmissionService?: NodeExecutionAdmissionService;
+        nodeExecutionRunService?: NodeExecutionRunService;
         stateStore?: DaemonStateStore;
         workerManager?: AppServerWorkerManager;
       }>,
@@ -160,6 +163,7 @@ export class DaemonRuntime {
     this.#candidateOperationManifestGenerationService =
       config.candidateOperationManifestGenerationService;
     this.#nodeExecutionAdmissionService = config.nodeExecutionAdmissionService;
+    this.#nodeExecutionRunService = config.nodeExecutionRunService;
     this.#server = createServer({ allowHalfOpen: true }, (socket) => this.#accept(socket));
     this.#server.on("error", () => this.#handleServerFailure());
     this.#server.once("close", () => void this.#finalize());
@@ -247,6 +251,13 @@ export class DaemonRuntime {
           : new (
               await import("./node-execution-admission-service.js")
             ).NodeExecutionAdmissionService(config.stateStore, config.workerManager);
+      const nodeExecutionRunService =
+        config.stateStore === undefined || config.workerManager === undefined
+          ? undefined
+          : new (await import("./node-execution-run-service.js")).NodeExecutionRunService(
+              config.stateStore,
+              config.workerManager,
+            );
       runtime = new DaemonRuntime(endpoint, {
         startupCapability: config.startupCapability,
         serverVersion: config.serverVersion,
@@ -263,6 +274,7 @@ export class DaemonRuntime {
           ? {}
           : { candidateOperationManifestGenerationService }),
         ...(nodeExecutionAdmissionService === undefined ? {} : { nodeExecutionAdmissionService }),
+        ...(nodeExecutionRunService === undefined ? {} : { nodeExecutionRunService }),
       });
     } catch {
       await Promise.all([
@@ -386,6 +398,9 @@ export class DaemonRuntime {
       confirmProjectTaskOperationManifest: (params) =>
         this.#confirmProjectTaskOperationManifest(params),
       activateProjectTaskExecution: (params) => this.#activateProjectTaskExecution(params),
+      startProjectTaskExecution: (params) => this.#startProjectTaskExecution(params),
+      readProjectTaskExecution: (params) => this.#readProjectTaskExecution(params),
+      interruptProjectTaskExecution: (params) => this.#interruptProjectTaskExecution(params),
       readRoutingConfiguration: () => this.#readRoutingConfiguration(),
       setRoutingConfiguration: (params) => this.#setRoutingConfiguration(params),
     });
@@ -700,6 +715,36 @@ export class DaemonRuntime {
     }
   }
 
+  async #startProjectTaskExecution(params: unknown): Promise<unknown> {
+    const service = this.#nodeExecutionRunService;
+    if (service === undefined) throw new RpcProviderError("unavailable");
+    try {
+      return await service.start(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(isNodeExecutionRunConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
+  #readProjectTaskExecution(params: unknown): unknown {
+    const service = this.#nodeExecutionRunService;
+    if (service === undefined) throw new RpcProviderError("unavailable");
+    try {
+      return service.get(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(isNodeExecutionRunConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
+  async #interruptProjectTaskExecution(params: unknown): Promise<unknown> {
+    const service = this.#nodeExecutionRunService;
+    if (service === undefined) throw new RpcProviderError("unavailable");
+    try {
+      return await service.interrupt(params);
+    } catch (error: unknown) {
+      throw new RpcProviderError(isNodeExecutionRunConflict(error) ? "conflict" : "unavailable");
+    }
+  }
+
   #setRoutingConfiguration(params: unknown): unknown {
     const service = this.#routingConfigurationService;
     if (service === undefined) {
@@ -905,6 +950,15 @@ function isNodeExecutionAdmissionConflict(error: unknown): boolean {
   return (
     error instanceof Error &&
     error.name === "NodeExecutionAdmissionServiceError" &&
+    "code" in error &&
+    error.code === "conflict"
+  );
+}
+
+function isNodeExecutionRunConflict(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === "NodeExecutionRunServiceError" &&
     "code" in error &&
     error.code === "conflict"
   );
