@@ -29,6 +29,9 @@ export type RpcDispatchContext = Readonly<{
   generateProjectTaskOperationManifest?: (params: JsonValue) => unknown | Promise<unknown>;
   confirmProjectTaskOperationManifest?: (params: JsonValue) => unknown;
   activateProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
+  startProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
+  readProjectTaskExecution?: (params: JsonValue) => unknown;
+  interruptProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration: () => unknown;
   setRoutingConfiguration: (params: JsonValue) => unknown;
 }>;
@@ -472,6 +475,39 @@ export function dispatchRpcRequest(
       return unavailable(request.id, "The node execution admission service is unavailable.");
     }
 
+    if (request.method === "task.execution.start") {
+      return unavailable(request.id, "The node execution run service is unavailable.");
+    }
+
+    if (request.method === "task.execution.get") {
+      let candidate: unknown;
+      try {
+        if (context.readProjectTaskExecution === undefined) throw new Error();
+        candidate = context.readProjectTaskExecution(decodedParams.value);
+      } catch (error: unknown) {
+        if (error instanceof RpcProviderError && error.code === "conflict") {
+          return {
+            envelope: rpcError(request.id, RPC_ERROR_CODES.conflict, "The execution Run changed."),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          };
+        }
+        return unavailable(request.id, "The node execution run service is unavailable.");
+      }
+      const decodedResult = decodeResponseResult("task.execution.get", candidate);
+      return decodedResult.ok
+        ? {
+            envelope: rpcResponse(request.id, decodedResult.value),
+            shutdownRequested: false,
+            shutdownReason: undefined,
+          }
+        : unavailable(request.id, "The node execution run service is unavailable.");
+    }
+
+    if (request.method === "task.execution.interrupt") {
+      return unavailable(request.id, "The node execution run service is unavailable.");
+    }
+
     if (request.method === "routing.configuration.set") {
       let candidate: unknown;
       try {
@@ -575,6 +611,30 @@ export async function dispatchRpcRequestAsync(
       context.activateProjectTaskExecution,
     );
   }
+  if (request.method === "task.execution.start") {
+    const decodedParams = decodeRequestParams(request.method, request.params);
+    if (!decodedParams.ok || context.startProjectTaskExecution === undefined) {
+      return dispatchRpcRequest(request, context);
+    }
+    return await dispatchExecutionRunMethod(
+      request.id,
+      "task.execution.start",
+      decodedParams.value,
+      context.startProjectTaskExecution,
+    );
+  }
+  if (request.method === "task.execution.interrupt") {
+    const decodedParams = decodeRequestParams(request.method, request.params);
+    if (!decodedParams.ok || context.interruptProjectTaskExecution === undefined) {
+      return dispatchRpcRequest(request, context);
+    }
+    return await dispatchExecutionRunMethod(
+      request.id,
+      "task.execution.interrupt",
+      decodedParams.value,
+      context.interruptProjectTaskExecution,
+    );
+  }
   if (request.method !== "task.plan.generate_candidate") {
     return dispatchRpcRequest(request, context);
   }
@@ -587,6 +647,35 @@ export async function dispatchRpcRequestAsync(
     decodedParams.value,
     context.generateProjectTaskCandidatePlan,
   );
+}
+
+async function dispatchExecutionRunMethod(
+  requestId: string,
+  method: "task.execution.start" | "task.execution.interrupt",
+  params: JsonValue,
+  provider: (params: JsonValue) => unknown | Promise<unknown>,
+): Promise<RpcDispatchResult> {
+  let candidate: unknown;
+  try {
+    candidate = await provider(params);
+  } catch (error: unknown) {
+    if (error instanceof RpcProviderError && error.code === "conflict") {
+      return {
+        envelope: rpcError(requestId, RPC_ERROR_CODES.conflict, "The execution Run changed."),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      };
+    }
+    return unavailable(requestId, "The node execution run service is unavailable.");
+  }
+  const decodedResult = decodeResponseResult(method, candidate);
+  return decodedResult.ok
+    ? {
+        envelope: rpcResponse(requestId, decodedResult.value),
+        shutdownRequested: false,
+        shutdownReason: undefined,
+      }
+    : unavailable(requestId, "The node execution run service is unavailable.");
 }
 
 async function dispatchOperationManifestGeneration(

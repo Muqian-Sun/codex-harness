@@ -1105,3 +1105,185 @@ describe("RPC dispatcher execution admission", () => {
     }
   });
 });
+
+describe("RPC dispatcher execution Run", () => {
+  const startParams = {
+    runId: "00000000-0000-4000-8000-000000000971",
+    taskId: "00000000-0000-4000-8000-000000000972",
+    nodeId: "00000000-0000-4000-8000-000000000973",
+    activationId: "00000000-0000-4000-8000-000000000974",
+    expectedTaskVersion: 4,
+    expectedGraphRevisionId: "00000000-0000-4000-8000-000000000975",
+  } as const;
+  const startResult = {
+    schemaVersion: 1,
+    status: "started",
+    runId: startParams.runId,
+    taskId: startParams.taskId,
+    nodeId: startParams.nodeId,
+    runVersion: 1,
+    runStatus: "running",
+  } as const;
+
+  it("dispatches start and interrupt asynchronously with strict result validation", async () => {
+    const base = context(() => ACCOUNT_STATUS);
+    const start = vi.fn(async () => startResult);
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.start", startParams), {
+        ...base,
+        startProjectTaskExecution: start,
+      }),
+    ).resolves.toMatchObject({ envelope: { kind: "response", result: startResult } });
+    expect(start).toHaveBeenCalledWith(startParams);
+
+    const interruptParams = {
+      commandId: "00000000-0000-4000-8000-000000000976",
+      taskId: startParams.taskId,
+      runId: startParams.runId,
+      expectedRunVersion: 1,
+    } as const;
+    const interruptResult = {
+      schemaVersion: 1,
+      status: "stopping",
+      taskId: startParams.taskId,
+      runId: startParams.runId,
+      runVersion: 2,
+    } as const;
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.interrupt", interruptParams), {
+        ...base,
+        interruptProjectTaskExecution: async () => interruptResult,
+      }),
+    ).resolves.toMatchObject({ envelope: { kind: "response", result: interruptResult } });
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.start", startParams), {
+        ...base,
+        startProjectTaskExecution: async () => ({ ...startResult, private: true }),
+      }),
+    ).resolves.toMatchObject({
+      envelope: { kind: "error", error: { code: RPC_ERROR_CODES.unavailable } },
+    });
+  });
+
+  it("serves minimal Run evidence synchronously and maps Run conflicts", async () => {
+    const base = context(() => ACCOUNT_STATUS);
+    const getParams = { taskId: startParams.taskId, runId: startParams.runId } as const;
+    const getResult = {
+      schemaVersion: 1,
+      runId: startParams.runId,
+      taskId: startParams.taskId,
+      nodeId: startParams.nodeId,
+      activationId: startParams.activationId,
+      attemptNumber: 1,
+      runVersion: 1,
+      status: "running",
+      route: {
+        tier: "standard",
+        provider: "openai",
+        model: "standard",
+        reasoningEffort: "medium",
+      },
+      permission: {
+        workspaceMode: "workspace_write",
+        commandExecution: true,
+        networkAccess: false,
+        allowedOperationKinds: ["modify_workspace", "run_workspace_command"],
+      },
+      threadBound: false,
+      turnBound: false,
+      commands: [],
+      files: [],
+      finalResult: null,
+      terminalReason: null,
+      startedAtMs: 10,
+      completedAtMs: null,
+    } as const;
+    expect(
+      dispatchRpcRequest(request("task.execution.get", getParams), {
+        ...base,
+        readProjectTaskExecution: () => getResult,
+      }).envelope,
+    ).toMatchObject({ kind: "response", result: getResult });
+    expect(
+      dispatchRpcRequest(request("task.execution.start", startParams), base).envelope,
+    ).toMatchObject({
+      kind: "error",
+      error: { code: RPC_ERROR_CODES.unavailable },
+    });
+    expect(
+      dispatchRpcRequest(
+        request("task.execution.interrupt", {
+          commandId: "00000000-0000-4000-8000-000000000976",
+          taskId: startParams.taskId,
+          runId: startParams.runId,
+          expectedRunVersion: 1,
+        }),
+        base,
+      ).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.unavailable } });
+    expect(
+      dispatchRpcRequest(request("task.execution.get", getParams), base).envelope,
+    ).toMatchObject({
+      kind: "error",
+      error: { code: RPC_ERROR_CODES.unavailable },
+    });
+    expect(
+      dispatchRpcRequest(request("task.execution.get", getParams), {
+        ...base,
+        readProjectTaskExecution: () => {
+          throw new RpcProviderError("conflict");
+        },
+      }).envelope,
+    ).toMatchObject({ kind: "error", error: { code: RPC_ERROR_CODES.conflict } });
+
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.start", { ...startParams, extra: true }), {
+        ...base,
+        startProjectTaskExecution: vi.fn(),
+      }),
+    ).resolves.toMatchObject({ envelope: { error: { code: RPC_ERROR_CODES.invalidParams } } });
+    await expect(
+      dispatchRpcRequestAsync(
+        request("task.execution.interrupt", {
+          commandId: "00000000-0000-4000-8000-000000000976",
+          taskId: startParams.taskId,
+          runId: startParams.runId,
+          expectedRunVersion: 0,
+        }),
+        { ...base, interruptProjectTaskExecution: vi.fn() },
+      ),
+    ).resolves.toMatchObject({ envelope: { error: { code: RPC_ERROR_CODES.invalidParams } } });
+
+    for (const method of ["task.execution.start", "task.execution.interrupt"] as const) {
+      const params =
+        method === "task.execution.start"
+          ? startParams
+          : {
+              commandId: "00000000-0000-4000-8000-000000000976",
+              taskId: startParams.taskId,
+              runId: startParams.runId,
+              expectedRunVersion: 1,
+            };
+      const provider = async (): Promise<never> =>
+        await Promise.reject(new RpcProviderError("conflict"));
+      await expect(
+        dispatchRpcRequestAsync(request(method, params), {
+          ...base,
+          ...(method === "task.execution.start"
+            ? { startProjectTaskExecution: provider }
+            : { interruptProjectTaskExecution: provider }),
+        }),
+      ).resolves.toMatchObject({
+        envelope: { kind: "error", error: { code: RPC_ERROR_CODES.conflict } },
+      });
+    }
+    await expect(
+      dispatchRpcRequestAsync(request("task.execution.start", startParams), {
+        ...base,
+        startProjectTaskExecution: async () => Promise.reject(new Error("private")),
+      }),
+    ).resolves.toMatchObject({
+      envelope: { kind: "error", error: { code: RPC_ERROR_CODES.unavailable } },
+    });
+  });
+});

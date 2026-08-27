@@ -24,6 +24,9 @@ import {
   AppServerWorker,
   type AppServerReadOnlyAnalysisInput,
   type AppServerReadOnlyAnalysisResult,
+  type AppServerWorkspaceExecutionInput,
+  type AppServerWorkspaceExecutionObserver,
+  type AppServerWorkspaceExecutionResult,
   type AppServerWorkerCloseResult,
   type AppServerWorkerConfig,
   type AppServerWorkerContainment,
@@ -48,6 +51,7 @@ export type AppServerWorkerManagerState =
 export type AppServerWorkerManagerErrorCode =
   | "account_snapshot_failed"
   | "analysis_unavailable"
+  | "execution_unavailable"
   | "catalog_page_unavailable"
   | "catalog_refresh_failed"
   | "closed"
@@ -58,6 +62,7 @@ export type AppServerWorkerManagerErrorCode =
 const ERROR_MESSAGES: Readonly<Record<AppServerWorkerManagerErrorCode, string>> = Object.freeze({
   account_snapshot_failed: "The Codex account status snapshot failed.",
   analysis_unavailable: "The Codex App Server analysis turn is unavailable.",
+  execution_unavailable: "The Codex App Server execution turn is unavailable.",
   catalog_page_unavailable: "The current Codex model catalog page is unavailable.",
   catalog_refresh_failed: "The Codex model catalog refresh failed.",
   closed: "The Codex App Server worker manager is closed.",
@@ -102,6 +107,11 @@ export type ManagedAppServerWorker = Readonly<{
   runReadOnlyAnalysisTurn?(
     input: AppServerReadOnlyAnalysisInput,
   ): Promise<AppServerReadOnlyAnalysisResult>;
+  runWorkspaceExecutionTurn?(
+    input: AppServerWorkspaceExecutionInput,
+    observer: AppServerWorkspaceExecutionObserver,
+  ): Promise<AppServerWorkspaceExecutionResult>;
+  interruptWorkspaceExecutionTurn?(threadId: string, turnId: string): Promise<void>;
   close(): Promise<AppServerWorkerCloseResult>;
   closed: Promise<AppServerWorkerCloseResult>;
 }>;
@@ -305,6 +315,51 @@ export class AppServerWorkerManager {
       return await this.#worker.runReadOnlyAnalysisTurn(input);
     } catch {
       throw new AppServerWorkerManagerError("analysis_unavailable");
+    }
+  }
+
+  async runWorkspaceExecutionTurn(
+    input: AppServerWorkspaceExecutionInput,
+    observer: AppServerWorkspaceExecutionObserver,
+  ): Promise<AppServerWorkspaceExecutionResult> {
+    if (this.#state !== "ready") {
+      throw new AppServerWorkerManagerError(
+        this.#state === "closing" || this.#state === "closed" ? "closed" : "execution_unavailable",
+      );
+    }
+    const catalog = this.#catalog;
+    const model = catalog?.models.find(
+      (candidate) => !candidate.hidden && candidate.model === input.model,
+    );
+    if (
+      catalog === undefined ||
+      !this.isCatalogCurrent(catalog) ||
+      typeof this.#worker.runWorkspaceExecutionTurn !== "function" ||
+      input.modelProvider !== catalog.provider ||
+      model === undefined ||
+      !model.inputModalities.includes("text") ||
+      !model.supportedReasoningEfforts.includes(input.reasoningEffort)
+    ) {
+      throw new AppServerWorkerManagerError("execution_unavailable");
+    }
+    try {
+      return await this.#worker.runWorkspaceExecutionTurn(input, observer);
+    } catch {
+      throw new AppServerWorkerManagerError("execution_unavailable");
+    }
+  }
+
+  async interruptWorkspaceExecutionTurn(threadId: string, turnId: string): Promise<void> {
+    if (
+      this.#state !== "ready" ||
+      typeof this.#worker.interruptWorkspaceExecutionTurn !== "function"
+    ) {
+      throw new AppServerWorkerManagerError("execution_unavailable");
+    }
+    try {
+      await this.#worker.interruptWorkspaceExecutionTurn(threadId, turnId);
+    } catch {
+      throw new AppServerWorkerManagerError("execution_unavailable");
     }
   }
 

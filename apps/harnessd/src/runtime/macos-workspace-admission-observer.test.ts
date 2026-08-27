@@ -178,6 +178,65 @@ describe("macOS workspace admission observer", () => {
       ).observe(workspace),
     ).resolves.toEqual({ status: "denied", rejectionReason: "workspace_changed" });
   });
+
+  it("captures stable tracked and untracked content for post-execution evidence", async () => {
+    const observer = new MacosWorkspaceAdmissionObserver(
+      dependencies({
+        runGit: async (_cwd, args) => {
+          const command = args.join(" ");
+          if (command === "rev-parse --show-toplevel") return `${PATH}\n`;
+          if (command === "rev-parse HEAD") return `${HEAD}\n`;
+          if (command === "status --porcelain=v1 -z --untracked-files=all") {
+            return " M tracked.ts\0?? new.ts\0";
+          }
+          if (command === "diff --name-only -z HEAD --") return "tracked.ts\0";
+          if (command === "ls-files --others --exclude-standard -z") return "new.ts\0";
+          if (command === "diff --binary --no-ext-diff HEAD --") return "tracked diff";
+          if (command === "hash-object --no-filters -- new.ts") return `${"b".repeat(40)}\n`;
+          throw new Error("unexpected command");
+        },
+      }),
+    );
+
+    await expect(observer.observe(workspace, { requireClean: false })).resolves.toMatchObject({
+      status: "verified",
+      snapshot: {
+        schemaVersion: 2,
+        changedPaths: ["new.ts", "tracked.ts"],
+        contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+  });
+
+  it.each([
+    ["invalid_nul", "tracked.ts"],
+    ["invalid_path", "../outside.ts\0"],
+    ["invalid_hash", "new.ts\0"],
+  ] as const)("fails closed for malformed content observation %s", async (mode, pathOutput) => {
+    const observer = new MacosWorkspaceAdmissionObserver(
+      dependencies({
+        runGit: async (_cwd, args) => {
+          const command = args.join(" ");
+          if (command === "rev-parse --show-toplevel") return `${PATH}\n`;
+          if (command === "rev-parse HEAD") return `${HEAD}\n`;
+          if (command === "status --porcelain=v1 -z --untracked-files=all") return "";
+          if (command === "diff --name-only -z HEAD --") {
+            return mode === "invalid_hash" ? "" : pathOutput;
+          }
+          if (command === "ls-files --others --exclude-standard -z") {
+            return mode === "invalid_hash" ? pathOutput : "";
+          }
+          if (command === "diff --binary --no-ext-diff HEAD --") return "";
+          if (command === "hash-object --no-filters -- new.ts") return "invalid-hash\n";
+          throw new Error("unexpected command");
+        },
+      }),
+    );
+    await expect(observer.observe(workspace, { requireClean: false })).resolves.toEqual({
+      status: "denied",
+      rejectionReason: "workspace_unavailable",
+    });
+  });
 });
 
 async function runGit(cwd: string, args: readonly string[]): Promise<void> {

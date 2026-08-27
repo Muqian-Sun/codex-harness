@@ -57,6 +57,9 @@ export type ConnectionSessionConfig = Readonly<{
   generateProjectTaskOperationManifest?: (params: JsonValue) => unknown | Promise<unknown>;
   confirmProjectTaskOperationManifest?: (params: JsonValue) => unknown;
   activateProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
+  startProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
+  readProjectTaskExecution?: (params: JsonValue) => unknown;
+  interruptProjectTaskExecution?: (params: JsonValue) => unknown | Promise<unknown>;
   readRoutingConfiguration?: () => unknown;
   setRoutingConfiguration?: (params: JsonValue) => unknown;
 }>;
@@ -142,6 +145,9 @@ export class ConnectionSession {
   readonly #generateProjectTaskOperationManifest: (params: JsonValue) => unknown | Promise<unknown>;
   readonly #confirmProjectTaskOperationManifest: (params: JsonValue) => unknown;
   readonly #activateProjectTaskExecution: (params: JsonValue) => unknown | Promise<unknown>;
+  readonly #startProjectTaskExecution: (params: JsonValue) => unknown | Promise<unknown>;
+  readonly #readProjectTaskExecution: (params: JsonValue) => unknown;
+  readonly #interruptProjectTaskExecution: (params: JsonValue) => unknown | Promise<unknown>;
   readonly #readRoutingConfiguration: () => unknown;
   readonly #setRoutingConfiguration: (params: JsonValue) => unknown;
   #state: ConnectionSessionState = "awaiting_hello";
@@ -190,7 +196,13 @@ export class ConnectionSession {
       (config.confirmProjectTaskOperationManifest !== undefined &&
         typeof config.confirmProjectTaskOperationManifest !== "function") ||
       (config.activateProjectTaskExecution !== undefined &&
-        typeof config.activateProjectTaskExecution !== "function")
+        typeof config.activateProjectTaskExecution !== "function") ||
+      (config.startProjectTaskExecution !== undefined &&
+        typeof config.startProjectTaskExecution !== "function") ||
+      (config.readProjectTaskExecution !== undefined &&
+        typeof config.readProjectTaskExecution !== "function") ||
+      (config.interruptProjectTaskExecution !== undefined &&
+        typeof config.interruptProjectTaskExecution !== "function")
     ) {
       throw new Error("Invalid connection session configuration.");
     }
@@ -226,6 +238,9 @@ export class ConnectionSession {
     this.#confirmProjectTaskOperationManifest =
       config.confirmProjectTaskOperationManifest ?? (() => null);
     this.#activateProjectTaskExecution = config.activateProjectTaskExecution ?? (() => null);
+    this.#startProjectTaskExecution = config.startProjectTaskExecution ?? (() => null);
+    this.#readProjectTaskExecution = config.readProjectTaskExecution ?? (() => null);
+    this.#interruptProjectTaskExecution = config.interruptProjectTaskExecution ?? (() => null);
     this.#readRoutingConfiguration = config.readRoutingConfiguration ?? (() => null);
     this.#setRoutingConfiguration = config.setRoutingConfiguration ?? (() => null);
   }
@@ -413,6 +428,9 @@ export class ConnectionSession {
       generateProjectTaskOperationManifest: this.#generateProjectTaskOperationManifest,
       confirmProjectTaskOperationManifest: this.#confirmProjectTaskOperationManifest,
       activateProjectTaskExecution: this.#activateProjectTaskExecution,
+      startProjectTaskExecution: this.#startProjectTaskExecution,
+      readProjectTaskExecution: this.#readProjectTaskExecution,
+      interruptProjectTaskExecution: this.#interruptProjectTaskExecution,
       readRoutingConfiguration: this.#readRoutingConfiguration,
       setRoutingConfiguration: this.#setRoutingConfiguration,
     });

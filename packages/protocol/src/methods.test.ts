@@ -1275,6 +1275,129 @@ describe("method contracts", () => {
     ).toBe(false);
   });
 
+  it("strictly validates execution Run start, read, evidence and interrupt contracts", () => {
+    const start = {
+      runId: "00000000-0000-4000-8000-000000000921",
+      taskId: "00000000-0000-4000-8000-000000000922",
+      nodeId: "00000000-0000-4000-8000-000000000923",
+      activationId: "00000000-0000-4000-8000-000000000924",
+      expectedTaskVersion: 4,
+      expectedGraphRevisionId: "00000000-0000-4000-8000-000000000925",
+    } as const;
+    expect(decodeRequestParams("task.execution.start", start).ok).toBe(true);
+    expect(
+      decodeRequestParams("task.execution.start", { ...start, activationId: start.runId }).ok,
+    ).toBe(false);
+    expect(decodeRequestParams("task.execution.start", { ...start, extra: true }).ok).toBe(false);
+    expect(
+      decodeResponseResult("task.execution.start", {
+        schemaVersion: 1,
+        status: "started",
+        runId: start.runId,
+        taskId: start.taskId,
+        nodeId: start.nodeId,
+        runVersion: 1,
+        runStatus: "running",
+      }).ok,
+    ).toBe(true);
+
+    const getParams = { taskId: start.taskId, runId: start.runId } as const;
+    expect(decodeRequestParams("task.execution.get", getParams).ok).toBe(true);
+    const running = {
+      schemaVersion: 1,
+      runId: start.runId,
+      taskId: start.taskId,
+      nodeId: start.nodeId,
+      activationId: start.activationId,
+      attemptNumber: 1,
+      runVersion: 3,
+      status: "running",
+      route: {
+        tier: "standard",
+        provider: "openai",
+        model: "standard",
+        reasoningEffort: "medium",
+      },
+      permission: {
+        workspaceMode: "workspace_write",
+        commandExecution: true,
+        networkAccess: false,
+        allowedOperationKinds: ["modify_workspace", "run_workspace_command"],
+      },
+      threadBound: true,
+      turnBound: true,
+      commands: [
+        {
+          sequence: 1,
+          command: "pnpm test",
+          status: "completed",
+          exitCode: 0,
+          durationMs: 5,
+          outputBytes: 6,
+          outputDigest: "a".repeat(64),
+        },
+      ],
+      files: [
+        {
+          sequence: 2,
+          path: "src/index.ts",
+          changeKind: "update",
+          status: "completed",
+          diffDigest: "b".repeat(64),
+        },
+      ],
+      finalResult: null,
+      terminalReason: null,
+      startedAtMs: 10,
+      completedAtMs: null,
+    } as const;
+    expect(decodeResponseResult("task.execution.get", running).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.execution.get", {
+        ...running,
+        status: "succeeded",
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeResponseResult("task.execution.get", {
+        ...running,
+        commands: [{ ...running.commands[0], output: "private" }],
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeResponseResult("task.execution.get", {
+        ...running,
+        status: "succeeded",
+        terminalReason: "completed",
+        completedAtMs: 20,
+        finalResult: {
+          outcome: "completed",
+          summary: "完成",
+          validationCommands: ["pnpm test"],
+          changedFiles: [{ path: "src/index.ts", changeKind: "update" }],
+          acceptanceCriteria: [{ criterion: "测试通过", passed: true, evidence: "pnpm test" }],
+        },
+      }).ok,
+    ).toBe(true);
+
+    const interrupt = {
+      commandId: "00000000-0000-4000-8000-000000000926",
+      taskId: start.taskId,
+      runId: start.runId,
+      expectedRunVersion: 3,
+    } as const;
+    expect(decodeRequestParams("task.execution.interrupt", interrupt).ok).toBe(true);
+    expect(
+      decodeResponseResult("task.execution.interrupt", {
+        schemaVersion: 1,
+        status: "stopping",
+        taskId: start.taskId,
+        runId: start.runId,
+        runVersion: 4,
+      }).ok,
+    ).toBe(true);
+  });
+
   it("strictly validates the account status changed event contract", () => {
     const valid = {
       schemaVersion: 1,

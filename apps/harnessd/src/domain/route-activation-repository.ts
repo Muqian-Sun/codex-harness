@@ -476,6 +476,79 @@ function decodeOperationKinds(input: unknown): readonly (typeof TASK_OPERATION_K
 }
 
 function decodeWorkspace(input: unknown): VerifiedMacosWorkspaceSnapshot {
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    (input as Record<string, unknown>).schemaVersion === 2
+  ) {
+    const record = exactRecord(input, [
+      "canonicalPath",
+      "changedPaths",
+      "contentDigest",
+      "deviceId",
+      "gitHead",
+      "inode",
+      "observedAtMs",
+      "platform",
+      "policyVersion",
+      "schemaVersion",
+      "statusDigest",
+      "workspaceDigest",
+    ]);
+    if (
+      record.policyVersion !== "macos-workspace-admission-policy-v2" ||
+      record.platform !== "macos" ||
+      typeof record.gitHead !== "string" ||
+      !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(record.gitHead) ||
+      !Array.isArray(record.changedPaths) ||
+      record.changedPaths.length !== 0
+    ) {
+      fail();
+    }
+    const canonicalPath = text(record.canonicalPath);
+    const deviceId = decimalIdentifier(record.deviceId);
+    const inode = decimalIdentifier(record.inode);
+    const gitHead = record.gitHead;
+    const statusDigest = requireSha256(record.statusDigest);
+    const contentDigest = requireSha256(record.contentDigest);
+    const workspaceDigest = requireSha256(record.workspaceDigest);
+    const changedPaths = Object.freeze([] as string[]);
+    if (
+      !isAbsolute(canonicalPath) ||
+      canonicalPath.includes("\0") ||
+      statusDigest !== digest("") ||
+      contentDigest !== digest("\0\0") ||
+      workspaceDigest !==
+        digest(
+          JSON.stringify({
+            canonicalPath,
+            changedPaths,
+            contentDigest,
+            deviceId,
+            gitHead,
+            inode,
+            statusDigest,
+          }),
+        )
+    ) {
+      fail();
+    }
+    return Object.freeze({
+      schemaVersion: 2,
+      policyVersion: "macos-workspace-admission-policy-v2",
+      platform: "macos",
+      canonicalPath,
+      deviceId,
+      inode,
+      gitHead,
+      statusDigest,
+      contentDigest,
+      changedPaths,
+      workspaceDigest,
+      observedAtMs: nonNegative(record.observedAtMs),
+    });
+  }
   const record = exactRecord(input, [
     "canonicalPath",
     "deviceId",

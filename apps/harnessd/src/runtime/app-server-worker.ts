@@ -21,11 +21,13 @@ const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 5_000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_ANALYSIS_TURN_TIMEOUT_MS = 300_000;
+const DEFAULT_EXECUTION_TURN_TIMEOUT_MS = 900_000;
 const DEFAULT_GRACEFUL_TIMEOUT_MS = 2_000;
 const DEFAULT_SIGTERM_TIMEOUT_MS = 2_000;
 const DEFAULT_SIGKILL_TIMEOUT_MS = 2_000;
 const MAX_TIMEOUT_MS = 60_000;
 const MAX_ANALYSIS_TURN_TIMEOUT_MS = 900_000;
+const MAX_EXECUTION_TURN_TIMEOUT_MS = 3_600_000;
 const MAX_ANALYSIS_OUTPUT_SCHEMA_BYTES = 256 * 1024;
 const MAX_ANALYSIS_AGENT_MESSAGES = 64;
 const MAX_ANALYSIS_AGENT_MESSAGE_CHARACTERS = 2_000_000;
@@ -35,8 +37,10 @@ export type AppServerWorkerState = "starting" | "ready" | "closing" | "closed";
 
 export type AppServerWorkerErrorCode =
   | "analysis_busy"
+  | "turn_busy"
   | "closed"
   | "invalid_analysis_input"
+  | "invalid_execution_input"
   | "invalid_configuration"
   | "invalid_turn_output"
   | "protocol_failure"
@@ -53,8 +57,10 @@ export type AppServerWorkerErrorCode =
 
 const ERROR_MESSAGES: Readonly<Record<AppServerWorkerErrorCode, string>> = Object.freeze({
   analysis_busy: "The Codex App Server worker already has an active analysis turn.",
+  turn_busy: "The Codex App Server worker already has an active turn.",
   closed: "The Codex App Server worker is closed.",
   invalid_analysis_input: "The Codex App Server analysis turn input is invalid.",
+  invalid_execution_input: "The Codex App Server execution turn input is invalid.",
   invalid_configuration: "The Codex App Server worker configuration is invalid.",
   invalid_turn_output: "The Codex App Server analysis turn output is invalid.",
   protocol_failure: "The Codex App Server worker protocol failed.",
@@ -112,6 +118,7 @@ export type AppServerWorkerConfig = Readonly<{
   startupTimeoutMs?: number;
   requestTimeoutMs?: number;
   analysisTurnTimeoutMs?: number;
+  executionTurnTimeoutMs?: number;
   gracefulTimeoutMs?: number;
   sigtermTimeoutMs?: number;
   sigkillTimeoutMs?: number;
@@ -125,6 +132,7 @@ type NormalizedConfig = Readonly<{
   startupTimeoutMs: number;
   requestTimeoutMs: number;
   analysisTurnTimeoutMs: number;
+  executionTurnTimeoutMs: number;
   gracefulTimeoutMs: number;
   sigtermTimeoutMs: number;
   sigkillTimeoutMs: number;
@@ -154,6 +162,20 @@ export type AppServerReadOnlyAnalysisResult = Readonly<{
   output: JsonValue;
 }>;
 
+export type AppServerWorkspaceExecutionInput = AppServerReadOnlyAnalysisInput;
+
+export type AppServerWorkspaceExecutionResult = Readonly<{
+  threadId: string;
+  turnId: string;
+  terminalStatus: "completed" | "failed" | "interrupted";
+  output: JsonValue | null;
+}>;
+
+export type AppServerWorkspaceExecutionObserver = Readonly<{
+  onBound(binding: Readonly<{ threadId: string; turnId: string }>): void;
+  onOutput(signal: Extract<AppServerAdapterEvent, { type: "turn_output" }>["signal"]): void;
+}>;
+
 type CompletedAgentMessage = Readonly<{
   itemId: string;
   phase: "commentary" | "final_answer" | null;
@@ -167,6 +189,18 @@ type ActiveAnalysisTurn = {
   messageIds: Set<string>;
   messageCharacters: number;
   deferred: Deferred<AppServerReadOnlyAnalysisResult>;
+  timer: NodeJS.Timeout | null;
+};
+
+type ActiveExecutionTurn = {
+  threadId: string | null;
+  turnId: string | null;
+  bindingObserved: boolean;
+  messages: CompletedAgentMessage[];
+  messageIds: Set<string>;
+  messageCharacters: number;
+  observer: AppServerWorkspaceExecutionObserver;
+  deferred: Deferred<AppServerWorkspaceExecutionResult>;
   timer: NodeJS.Timeout | null;
 };
 
@@ -192,6 +226,7 @@ export class AppServerWorker {
   #stderrObserved = false;
   #terminalError: AppServerWorkerError | undefined;
   #activeAnalysisTurn: ActiveAnalysisTurn | undefined;
+  #activeExecutionTurn: ActiveExecutionTurn | undefined;
 
   private constructor(config: NormalizedConfig, child: ChildProcessWithoutNullStreams) {
     this.#config = config;
@@ -268,9 +303,8 @@ export class AppServerWorker {
     if (this.#state !== "ready") {
       throw new AppServerWorkerError("closed");
     }
-    if (this.#activeAnalysisTurn !== undefined) {
-      throw new AppServerWorkerError("analysis_busy");
-    }
+    if (this.#activeAnalysisTurn !== undefined) throw new AppServerWorkerError("analysis_busy");
+    if (this.#activeExecutionTurn !== undefined) throw new AppServerWorkerError("turn_busy");
     const normalized = normalizeAnalysisInput(input);
     const active: ActiveAnalysisTurn = {
       threadId: null,
@@ -328,8 +362,91 @@ export class AppServerWorker {
     }
   }
 
+  async runWorkspaceExecutionTurn(
+    input: AppServerWorkspaceExecutionInput,
+    observer: AppServerWorkspaceExecutionObserver,
+  ): Promise<AppServerWorkspaceExecutionResult> {
+    if (this.#state !== "ready") throw new AppServerWorkerError("closed");
+    if (this.#activeAnalysisTurn !== undefined || this.#activeExecutionTurn !== undefined) {
+      throw new AppServerWorkerError("turn_busy");
+    }
+    const normalized = normalizeExecutionInput(input);
+    if (typeof observer?.onBound !== "function" || typeof observer?.onOutput !== "function") {
+      throw new AppServerWorkerError("invalid_execution_input");
+    }
+    const active: ActiveExecutionTurn = {
+      threadId: null,
+      turnId: null,
+      bindingObserved: false,
+      messages: [],
+      messageIds: new Set(),
+      messageCharacters: 0,
+      observer,
+      deferred: createDeferred<AppServerWorkspaceExecutionResult>(),
+      timer: null,
+    };
+    void active.deferred.promise.catch(() => undefined);
+    this.#activeExecutionTurn = active;
+    try {
+      const threadResult = await this.#request("thread/start", {
+        approvalPolicy: "never",
+        cwd: normalized.cwd,
+        ephemeral: true,
+        model: normalized.model,
+        modelProvider: normalized.modelProvider,
+        sandbox: "workspace-write",
+      });
+      active.threadId = requireNestedIdentifier(threadResult, "thread");
+      active.timer = setTimeout(() => {
+        const error = new AppServerWorkerError("turn_timeout");
+        active.deferred.reject(error);
+        this.#fail(error, "turn_timeout");
+      }, this.#config.executionTurnTimeoutMs);
+      const turnResult = await this.#request("turn/start", {
+        approvalPolicy: "never",
+        cwd: normalized.cwd,
+        effort: normalized.reasoningEffort,
+        input: [{ type: "text", text: normalized.prompt, text_elements: [] }],
+        model: normalized.model,
+        outputSchema: normalized.outputSchema,
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: [normalized.cwd],
+          networkAccess: false,
+          excludeTmpdirEnvVar: true,
+          excludeSlashTmp: true,
+        },
+        summary: "none",
+        threadId: active.threadId,
+      });
+      if (!this.#bindExecutionTurn(active, requireNestedIdentifier(turnResult, "turn"))) {
+        throw this.#terminalError ?? new AppServerWorkerError("invalid_turn_output");
+      }
+      return await active.deferred.promise;
+    } catch (error: unknown) {
+      if (error instanceof AppServerWorkerError) throw error;
+      throw new AppServerWorkerError("invalid_turn_output");
+    } finally {
+      if (active.timer !== null) clearTimeout(active.timer);
+      if (this.#activeExecutionTurn === active) this.#activeExecutionTurn = undefined;
+    }
+  }
+
+  async interruptWorkspaceExecutionTurn(threadId: string, turnId: string): Promise<void> {
+    const active = this.#activeExecutionTurn;
+    if (
+      this.#state !== "ready" ||
+      active === undefined ||
+      active.threadId !== threadId ||
+      active.turnId !== turnId
+    ) {
+      throw new AppServerWorkerError("request_failed");
+    }
+    await this.#request("turn/interrupt", { threadId, turnId });
+  }
+
   async #request(
-    method: "account/read" | "model/list" | "thread/start" | "turn/start",
+    method: "account/read" | "model/list" | "thread/start" | "turn/start" | "turn/interrupt",
     params: unknown,
   ): Promise<JsonValue> {
     if (this.#state !== "ready") {
@@ -532,12 +649,21 @@ export class AppServerWorker {
   #observeTurnOutput(
     signal: Extract<AppServerAdapterEvent, { type: "turn_output" }>["signal"],
   ): void {
+    const execution = this.#activeExecutionTurn;
+    if (execution !== undefined) {
+      this.#observeExecutionTurnOutput(execution, signal);
+      return;
+    }
     const active = this.#activeAnalysisTurn;
     if (active === undefined || active.threadId === null || signal.threadId !== active.threadId) {
       this.#fail(new AppServerWorkerError("protocol_failure"), "protocol_failure");
       return;
     }
     if (!this.#bindActiveTurn(active, signal.turnId)) {
+      return;
+    }
+    if (signal.type !== "agent_message") {
+      this.#fail(new AppServerWorkerError("invalid_turn_output"), "protocol_failure");
       return;
     }
     if (active.messageIds.has(signal.itemId)) {
@@ -561,9 +687,68 @@ export class AppServerWorker {
     }
   }
 
+  #observeExecutionTurnOutput(
+    active: ActiveExecutionTurn,
+    signal: Extract<AppServerAdapterEvent, { type: "turn_output" }>["signal"],
+  ): void {
+    if (
+      active.threadId === null ||
+      signal.threadId !== active.threadId ||
+      !this.#bindExecutionTurn(active, signal.turnId) ||
+      active.messageIds.has(signal.itemId) ||
+      active.messageIds.size >= 576
+    ) {
+      this.#fail(new AppServerWorkerError("protocol_failure"), "protocol_failure");
+      return;
+    }
+    active.messageIds.add(signal.itemId);
+    try {
+      active.observer.onOutput(signal);
+    } catch {
+      this.#fail(new AppServerWorkerError("protocol_failure"), "event_handler_failure");
+      return;
+    }
+    if (signal.type === "forbidden_item") {
+      this.#fail(new AppServerWorkerError("invalid_turn_output"), "protocol_failure");
+      return;
+    }
+    if (signal.type !== "agent_message") return;
+    const nextMessageCharacters = active.messageCharacters + signal.text.length;
+    if (nextMessageCharacters > MAX_ANALYSIS_AGENT_MESSAGE_CHARACTERS) {
+      this.#fail(new AppServerWorkerError("protocol_failure"), "protocol_failure");
+      return;
+    }
+    active.messageCharacters = nextMessageCharacters;
+    if (signal.phase === "commentary") return;
+    active.messages.push(
+      Object.freeze({ itemId: signal.itemId, phase: signal.phase, text: signal.text }),
+    );
+  }
+
   #observeTurnLifecycle(
     signal: Extract<AppServerAdapterEvent, { type: "recovery_lifecycle" }>["signal"],
   ): void {
+    const execution = this.#activeExecutionTurn;
+    if (
+      execution !== undefined &&
+      execution.threadId !== null &&
+      signal.threadId === execution.threadId &&
+      (signal.type === "turn_started" || signal.type === "turn_completed")
+    ) {
+      if (!this.#bindExecutionTurn(execution, signal.turnId) || signal.type !== "turn_completed") {
+        return;
+      }
+      const message = selectFinalAgentMessage(execution.messages);
+      execution.deferred.resolve(
+        Object.freeze({
+          threadId: execution.threadId,
+          turnId: signal.turnId,
+          terminalStatus: signal.status,
+          output: message === null ? null : parseTurnOutput(message.text),
+        }),
+      );
+      return;
+    }
     const active = this.#activeAnalysisTurn;
     if (
       active === undefined ||
@@ -593,6 +778,25 @@ export class AppServerWorker {
     active.deferred.resolve(
       Object.freeze({ threadId: active.threadId, turnId: signal.turnId, output }),
     );
+  }
+
+  #bindExecutionTurn(active: ActiveExecutionTurn, turnId: string): boolean {
+    if (this.#activeExecutionTurn !== active || active.threadId === null) return false;
+    if (active.turnId !== null && active.turnId !== turnId) {
+      this.#fail(new AppServerWorkerError("protocol_failure"), "protocol_failure");
+      return false;
+    }
+    active.turnId = turnId;
+    if (!active.bindingObserved) {
+      try {
+        active.observer.onBound(Object.freeze({ threadId: active.threadId, turnId }));
+        active.bindingObserved = true;
+      } catch {
+        this.#fail(new AppServerWorkerError("protocol_failure"), "event_handler_failure");
+        return false;
+      }
+    }
+    return true;
   }
 
   #bindActiveTurn(active: ActiveAnalysisTurn, turnId: string): boolean {
@@ -673,6 +877,11 @@ export class AppServerWorker {
       }
       active.deferred.reject(rejection);
     }
+    const execution = this.#activeExecutionTurn;
+    if (execution !== undefined) {
+      if (execution.timer !== null) clearTimeout(execution.timer);
+      execution.deferred.reject(rejection);
+    }
     this.#adapter.close();
     this.#decoder.close();
 
@@ -733,6 +942,8 @@ function normalizeConfig(config: AppServerWorkerConfig): NormalizedConfig {
     const startupTimeoutMs = config.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     const analysisTurnTimeoutMs = config.analysisTurnTimeoutMs ?? DEFAULT_ANALYSIS_TURN_TIMEOUT_MS;
+    const executionTurnTimeoutMs =
+      config.executionTurnTimeoutMs ?? DEFAULT_EXECUTION_TURN_TIMEOUT_MS;
     const gracefulTimeoutMs = config.gracefulTimeoutMs ?? DEFAULT_GRACEFUL_TIMEOUT_MS;
     const sigtermTimeoutMs = config.sigtermTimeoutMs ?? DEFAULT_SIGTERM_TIMEOUT_MS;
     const sigkillTimeoutMs = config.sigkillTimeoutMs ?? DEFAULT_SIGKILL_TIMEOUT_MS;
@@ -745,6 +956,7 @@ function normalizeConfig(config: AppServerWorkerConfig): NormalizedConfig {
       !validTimeout(startupTimeoutMs) ||
       !validTimeout(requestTimeoutMs) ||
       !validAnalysisTurnTimeout(analysisTurnTimeoutMs) ||
+      !validExecutionTurnTimeout(executionTurnTimeoutMs) ||
       !validTimeout(gracefulTimeoutMs) ||
       !validTimeout(sigtermTimeoutMs) ||
       !validTimeout(sigkillTimeoutMs)
@@ -768,6 +980,7 @@ function normalizeConfig(config: AppServerWorkerConfig): NormalizedConfig {
       startupTimeoutMs,
       requestTimeoutMs,
       analysisTurnTimeoutMs,
+      executionTurnTimeoutMs,
       gracefulTimeoutMs,
       sigtermTimeoutMs,
       sigkillTimeoutMs,
@@ -778,6 +991,14 @@ function normalizeConfig(config: AppServerWorkerConfig): NormalizedConfig {
       throw error;
     }
     throw new AppServerWorkerError("invalid_configuration");
+  }
+}
+
+function normalizeExecutionInput(input: unknown): AppServerWorkspaceExecutionInput {
+  try {
+    return normalizeAnalysisInput(input);
+  } catch {
+    throw new AppServerWorkerError("invalid_execution_input");
   }
 }
 
@@ -987,6 +1208,10 @@ function validTimeout(value: number): boolean {
 
 function validAnalysisTurnTimeout(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0 && value <= MAX_ANALYSIS_TURN_TIMEOUT_MS;
+}
+
+function validExecutionTurnTimeout(value: number): boolean {
+  return Number.isSafeInteger(value) && value > 0 && value <= MAX_EXECUTION_TURN_TIMEOUT_MS;
 }
 
 async function waitForSpawn(child: ChildProcess): Promise<void> {

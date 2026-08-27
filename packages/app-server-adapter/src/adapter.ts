@@ -18,7 +18,7 @@ import { adapterFailure, adapterSuccess, type AdapterResult } from "./result.js"
 import { InitializeParamsSchema, InitializeResponseSchema } from "./schemas.js";
 import {
   parseAppServerTurnOutputNotification,
-  type AppServerCompletedAgentMessage,
+  type AppServerCompletedTurnOutput,
 } from "./turn-output.js";
 import type { AppServerMessage, AppServerRequestId } from "./wire.js";
 
@@ -56,7 +56,7 @@ export type AppServerAdapterEvent =
   | Readonly<{ type: "notification"; method: string; params: JsonValue | undefined }>
   | Readonly<{ type: "account_updated" }>
   | Readonly<{ type: "recovery_lifecycle"; signal: AppServerRecoveryLifecycleSignal }>
-  | Readonly<{ type: "turn_output"; signal: AppServerCompletedAgentMessage }>
+  | Readonly<{ type: "turn_output"; signal: AppServerCompletedTurnOutput }>
   | Readonly<{
       type: "server_request";
       id: AppServerRequestId;

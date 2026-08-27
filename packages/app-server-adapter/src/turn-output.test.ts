@@ -21,6 +21,7 @@ describe("App Server turn output notifications", () => {
     expect(parsed).toEqual({
       kind: "signal",
       signal: {
+        type: "agent_message",
         threadId: "thread-1",
         turnId: "turn-1",
         itemId: "message-1",
@@ -43,6 +44,7 @@ describe("App Server turn output notifications", () => {
     ).toEqual({
       kind: "signal",
       signal: {
+        type: "agent_message",
         threadId: "thread-1",
         turnId: "turn-1",
         itemId: "message-1",
@@ -52,7 +54,7 @@ describe("App Server turn output notifications", () => {
     });
   });
 
-  it("leaves other notifications and completed item kinds unrecognized", () => {
+  it("projects command and file evidence while leaving passive items unrecognized", () => {
     expect(parseAppServerTurnOutputNotification("warning", {})).toEqual({
       kind: "unrecognized",
     });
@@ -61,9 +63,93 @@ describe("App Server turn output notifications", () => {
         completedAtMs: 1,
         threadId: "thread-1",
         turnId: "turn-1",
-        item: { id: "command-1", type: "commandExecution", private: "not copied" },
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          command: "pnpm test",
+          commandActions: [],
+          cwd: "/workspace",
+          status: "completed",
+          exitCode: 0,
+          durationMs: 10,
+          aggregatedOutput: "passed",
+        },
+      }),
+    ).toEqual({
+      kind: "signal",
+      signal: {
+        type: "command_execution",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "command-1",
+        command: "pnpm test",
+        cwd: "/workspace",
+        status: "completed",
+        exitCode: 0,
+        durationMs: 10,
+        aggregatedOutput: "passed",
+      },
+    });
+    expect(
+      parseAppServerTurnOutputNotification("item/completed", {
+        completedAtMs: 2,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "file-1",
+          type: "fileChange",
+          status: "completed",
+          changes: [
+            { path: "src/index.ts", diff: "diff", kind: { type: "update", move_path: null } },
+          ],
+        },
+      }),
+    ).toEqual({
+      kind: "signal",
+      signal: {
+        type: "file_change",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "file-1",
+        status: "completed",
+        changes: [
+          {
+            path: "src/index.ts",
+            changeKind: "update",
+            movePath: null,
+            diff: "diff",
+          },
+        ],
+      },
+    });
+    expect(
+      parseAppServerTurnOutputNotification("item/completed", {
+        completedAtMs: 3,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "reasoning-1", type: "reasoning" },
       }),
     ).toEqual({ kind: "unrecognized" });
+  });
+
+  it("classifies non-passive tool items as forbidden", () => {
+    expect(
+      parseAppServerTurnOutputNotification("item/completed", {
+        completedAtMs: 3,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "web-1", type: "webSearch" },
+      }),
+    ).toEqual({
+      kind: "signal",
+      signal: {
+        type: "forbidden_item",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "web-1",
+        itemType: "webSearch",
+      },
+    });
   });
 
   it("rejects malformed known agent messages without disclosure", () => {

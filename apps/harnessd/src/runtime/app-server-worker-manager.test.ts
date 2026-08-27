@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import type {
   AppServerReadOnlyAnalysisInput,
+  AppServerWorkspaceExecutionInput,
+  AppServerWorkspaceExecutionObserver,
   AppServerWorkerCloseResult,
   AppServerWorkerConfig,
   AppServerWorkerEvent,
@@ -70,6 +72,10 @@ class FakeWorker implements ManagedAppServerWorker {
   closeCalls = 0;
   readonly analysisRequests: AppServerReadOnlyAnalysisInput[] = [];
   analysisFailure = false;
+  readonly executionRequests: AppServerWorkspaceExecutionInput[] = [];
+  readonly interruptRequests: Readonly<{ threadId: string; turnId: string }>[] = [];
+  executionFailure = false;
+  interruptFailure = false;
 
   constructor(
     responses: readonly PendingResponse[],
@@ -122,6 +128,26 @@ class FakeWorker implements ManagedAppServerWorker {
     return Object.freeze({ threadId: "thread-1", turnId: "turn-1", output: { ok: true } });
   }
 
+  async runWorkspaceExecutionTurn(
+    input: AppServerWorkspaceExecutionInput,
+    observer: AppServerWorkspaceExecutionObserver,
+  ) {
+    this.executionRequests.push(structuredClone(input));
+    if (this.executionFailure) throw new Error("private execution failure");
+    observer.onBound({ threadId: "thread-execution", turnId: "turn-execution" });
+    return Object.freeze({
+      threadId: "thread-execution",
+      turnId: "turn-execution",
+      terminalStatus: "completed" as const,
+      output: { ok: true },
+    });
+  }
+
+  async interruptWorkspaceExecutionTurn(threadId: string, turnId: string): Promise<void> {
+    this.interruptRequests.push({ threadId, turnId });
+    if (this.interruptFailure) throw new Error("private interrupt failure");
+  }
+
   async close(): Promise<AppServerWorkerCloseResult> {
     this.closeCalls += 1;
     if (this.state !== "closed") {
@@ -169,6 +195,55 @@ async function startManager(
 }
 
 describe("AppServerWorkerManager", () => {
+  it("runs and interrupts workspace execution only for the current visible model target", async () => {
+    const worker = new FakeWorker([page([model("standard")], null)]);
+    const manager = await startManager(worker);
+    const input = {
+      cwd: "/Users/example/project",
+      modelProvider: "openai",
+      model: "standard",
+      reasoningEffort: "medium",
+      prompt: "Execute the node.",
+      outputSchema: { type: "object" },
+    } as const;
+    const observer = { onBound: () => undefined, onOutput: () => undefined };
+
+    await expect(manager.runWorkspaceExecutionTurn(input, observer)).resolves.toMatchObject({
+      terminalStatus: "completed",
+      output: { ok: true },
+    });
+    expect(worker.executionRequests).toEqual([input]);
+    await manager.interruptWorkspaceExecutionTurn("thread-execution", "turn-execution");
+    expect(worker.interruptRequests).toEqual([
+      { threadId: "thread-execution", turnId: "turn-execution" },
+    ]);
+
+    for (const invalid of [
+      { ...input, modelProvider: "other" },
+      { ...input, model: "missing" },
+      { ...input, reasoningEffort: "low" },
+    ]) {
+      await expect(manager.runWorkspaceExecutionTurn(invalid, observer)).rejects.toMatchObject({
+        code: "execution_unavailable",
+      });
+    }
+    worker.executionFailure = true;
+    await expect(manager.runWorkspaceExecutionTurn(input, observer)).rejects.toMatchObject({
+      code: "execution_unavailable",
+    });
+    worker.interruptFailure = true;
+    await expect(
+      manager.interruptWorkspaceExecutionTurn("thread-execution", "turn-execution"),
+    ).rejects.toMatchObject({ code: "execution_unavailable" });
+    await manager.close();
+    await expect(manager.runWorkspaceExecutionTurn(input, observer)).rejects.toMatchObject({
+      code: "closed",
+    });
+    await expect(
+      manager.interruptWorkspaceExecutionTurn("thread-execution", "turn-execution"),
+    ).rejects.toMatchObject({ code: "execution_unavailable" });
+  });
+
   it("runs one analysis only for an observed visible model target", async () => {
     const worker = new FakeWorker([page([model("deep", "high")], null)]);
     const manager = await startManager(worker);
